@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+# Migration ledger checksums describe exact bytes, including line endings.
+src/quintessence_pcs/resources/migrations/*.sql -text

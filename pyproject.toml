@@ -1,0 +1,22 @@
+[project]
+name = "quintessence-pcs"
+version = "0.0.0"
+description = "QUINTESSENCE PCS Python core (pcs.v2 contracts, storage foundation and offline tests)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+# Build dependencies are separate from the standard-library-only runtime.
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["quintessence_pcs*"]
+
+[tool.setuptools.package-data]
+quintessence_pcs = ["resources/migrations/*.sql"]

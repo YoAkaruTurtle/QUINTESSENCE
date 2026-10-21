@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecordVersion",
+  "description": "pcs.v2 immutable Record version (J.2). Published versions are not edited in place; privacy deletion is the explicit exception handled by the state layer. A plain state_revision field is not part of this envelope: the commit revision is committed_state_revision. Per-kind body schemas are future work; this contract fixes only the shared shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "record_id",
+    "record_version",
+    "kind",
+    "schema_version",
+    "status",
+    "body",
+    "scope",
+    "source_refs",
+    "created_by_event_ref",
+    "committed_state_revision",
+    "recorded_at",
+    "privacy_class"
+  ],
+  "properties": {
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "record_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "record_version": {
+      "$ref": "_common.json#/$defs/record_version_int"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Record kind. The set is open here because per-kind body schemas arrive with later cards (007+).",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Body schema version label for this kind.",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "status": {
+      "type": "string",
+      "description": "Record status. J.2 does not enumerate the values, so the contract does not invent an enum.",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "body": {
+      "type": "object",
+      "description": "Kind-specific body. Strict per-kind validation is out of scope for PCS2-002."
+    },
+    "scope": {
+      "$ref": "scope.json"
+    },
+    "source_refs": {
+      "type": "array",
+      "description": "Exact source references for this version.",
+      "items": {
+        "$ref": "_common.json#/$defs/any_ref"
+      },
+      "uniqueItems": true
+    },
+    "created_by_event_ref": {
+      "$ref": "_common.json#/$defs/event_ref"
+    },
+    "committed_state_revision": {
+      "$ref": "_common.json#/$defs/state_revision_int"
+    },
+    "recorded_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "privacy_class": {
+      "$ref": "_common.json#/$defs/privacy_class"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+include README.md pyproject.toml .gitattributes .gitignore
+recursive-include contracts *.json *.md
+recursive-include tests *.py *.json
+recursive-include tools *.py *.json
+recursive-include src/quintessence_pcs/resources/migrations *.sql
+global-exclude *.pyc *.sqlite *.sqlite3 *.db *.log
+prune .git

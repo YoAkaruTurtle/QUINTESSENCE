@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Response",
+  "description": "pcs.v2 public response envelope (J.4): {protocol_version, request_id, ok, state_revision, data, error, warnings}. error is null on success. data carries operation-specific outcome values such as committed/noop/accepted/duplicate. Unknown top-level fields are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "ok",
+    "state_revision",
+    "data",
+    "error",
+    "warnings"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "_common.json#/$defs/protocol_version"
+    },
+    "request_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "state_revision": {
+      "$ref": "_common.json#/$defs/state_revision_int"
+    },
+    "data": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Operation-specific result; null when the request failed without data. J.4 lists committed/noop/accepted/duplicate as examples of operation-specific outcomes, not as a closed enum.",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "error": {
+      "description": "null or a J.4 controlled error object.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "error.json"
+        }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal, public warnings.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    }
+  }
+}

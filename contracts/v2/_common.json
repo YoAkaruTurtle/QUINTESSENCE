@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "_common.json",
+  "title": "pcs.v2 shared schema definitions",
+  "description": "Shared definitions for the pcs.v2 minimal DTOs. Authority: historical architecture appendix J.1-J.5 (baseline PCS-2026-10-17-r3). This file is a library of $defs, not a DTO with its own golden vectors.",
+  "$defs": {
+    "protocol_version": {
+      "const": "pcs.v2"
+    },
+    "uuid": {
+      "type": "string",
+      "description": "Canonical lower-case UUID text form (8-4-4-4-12). The version nibble is deliberately not restricted so future UUIDv7 identifiers remain representable.",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Single-namespace identifier such as example.private (J.2, section 5.3).",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "description": "UTC / RFC 3339 instant (section 5.3). The pattern checks syntactic shape only; calendar correctness beyond month/day ranges is semantic.",
+      "minLength": 20,
+      "maxLength": 27,
+      "pattern": "^(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?Z$"
+    },
+    "nullable_timestamp_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "An unknown observation time is null, never invented (J.1).",
+      "minLength": 20,
+      "maxLength": 27,
+      "pattern": "^(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?Z$"
+    },
+    "source_kind": {
+      "type": "string",
+      "description": "Bound by the trusted entry point, never self-declared by a model (J.2).",
+      "enum": [
+        "host_observation",
+        "user_report",
+        "imported_memory",
+        "model_inference",
+        "synthetic_fixture",
+        "system_internal"
+      ]
+    },
+    "privacy_class": {
+      "type": "string",
+      "description": "Not an outbound-authorization flag (section 5.2).",
+      "enum": [
+        "private",
+        "restricted",
+        "public-example"
+      ]
+    },
+    "source_position": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Optional external source sequence number (J.1/J.2).",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "record_version_int": {
+      "type": "integer",
+      "description": "Record version, starting at 1 and increasing (J.1). Bounded by the cross-language safe-integer limit.",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "state_revision_int": {
+      "type": "integer",
+      "description": "Namespace domain-commit sequence (J.1/J.7). Distinct from record_version; the schema only bounds the numeric shape.",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "scope_id": {
+      "type": "string",
+      "description": "Opaque scope identifier. J.1 does not require these to be UUIDs.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "Stable identifier of the source instance (for example a home or process identity).",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "source_event_id": {
+      "type": "string",
+      "description": "Source-side event identifier; part of the idempotency key (namespace, source_instance, source_event_id).",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "event_type": {
+      "type": "string",
+      "description": "Event type label. The set is open; unknown types are not a structural error.",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "payload_ref": {
+      "type": "string",
+      "description": "Opaque pointer into the controlled private-payload area. J.1-J.5 do not fix its inner scheme.",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "event_ref": {
+      "type": "object",
+      "description": "Typed reference to an Event (J.1). Bare IDs are not representable.",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "event_id"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "event"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "event_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "record_ref": {
+      "type": "object",
+      "description": "Typed reference to an exact Record version (J.1). A RecordRef without record_version is invalid.",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "record_id",
+        "record_version"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "record"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "record_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "record_version": {
+          "$ref": "#/$defs/record_version_int"
+        }
+      }
+    },
+    "any_ref": {
+      "description": "Union of the only two legal reference shapes (J.1). Exactly one branch must match.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/event_ref"
+        },
+        {
+          "$ref": "#/$defs/record_ref"
+        }
+      ]
+    }
+  }
+}

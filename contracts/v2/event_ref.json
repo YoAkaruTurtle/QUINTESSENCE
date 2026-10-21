@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EventRef",
+  "description": "pcs.v2 typed reference to an Event (J.1). A bare ID object such as {\"id\": \"...\"} is rejected by the shared definition.",
+  "$ref": "_common.json#/$defs/event_ref"
+}

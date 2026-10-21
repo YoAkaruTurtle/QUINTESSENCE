@@ -1,0 +1,1997 @@
+{
+  "format": "pcs.v2-contract-vectors-1",
+  "protocol_version": "pcs.v2",
+  "cases": [
+    {
+      "id": "bare_id.event_ref",
+      "schema": "event_ref.json",
+      "why": "A bare ID object is not one of the two legal reference shapes (J.1).",
+      "instance": {
+        "id": "11111111-1111-4111-8111-111111111111"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "bare_id.record_ref",
+      "schema": "record_ref.json",
+      "why": "A bare ID can never identify an exact record version (J.1).",
+      "instance": {
+        "id": "22222222-2222-4222-8222-222222222222"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.missing_record_version",
+      "schema": "record_ref.json",
+      "why": "RecordRef without record_version is incomplete (J.1).",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.ref_type_unknown",
+      "schema": "record_ref.json",
+      "why": "ref_type must be exactly event or record.",
+      "instance": {
+        "ref_type": "observation",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.ref_type_event_in_record_ref",
+      "schema": "event_ref.json",
+      "why": "The event file must not accept ref_type=record.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "event_id": "11111111-1111-4111-8111-111111111111"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.version_zero",
+      "schema": "record_ref.json",
+      "why": "record_version starts at 1 (J.1).",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 0
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.version_negative",
+      "schema": "record_ref.json",
+      "why": "Negative record_version is invalid (J.1).",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": -1
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.version_bool",
+      "schema": "record_ref.json",
+      "why": "Python trap: True is not an integer in JSON Schema.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": true
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.version_float",
+      "schema": "record_ref.json",
+      "why": "Strict checker: 1.0 is not accepted as an integer.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1.0
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.version_too_large",
+      "schema": "record_ref.json",
+      "why": "2^53 exceeds the cross-language safe integer range.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 9007199254740992
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.unknown_state_revision",
+      "schema": "record_ref.json",
+      "why": "state_revision is not part of RecordRef; unknown fields are rejected.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1,
+        "state_revision": 214
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_ref.invalid_uuid",
+      "schema": "record_ref.json",
+      "why": "record_id must be a canonical UUID.",
+      "instance": {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "2222-invalid",
+        "record_version": 1
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_version.unknown_state_revision",
+      "schema": "record_version.json",
+      "why": "RecordVersion stores committed_state_revision; a plain state_revision is unknown.",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "scene": "深夜-反馈"
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private",
+        "state_revision": 214
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_version.version_zero",
+      "schema": "record_version.json",
+      "why": "record_version starts at 1 (J.1).",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 0,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "scene": "深夜-反馈"
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_version.version_too_large",
+      "schema": "record_version.json",
+      "why": "record_version must stay within the safe integer range.",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 9007199254740992,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "scene": "深夜-反馈"
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "record_version.scope_unknown_key",
+      "schema": "record_version.json",
+      "why": "Unknown key inside scope is a scope violation (J.2).",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "tenant_id": "tenant-0001"
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "record_version.scope_entity_duplicate",
+      "schema": "record_version.json",
+      "why": "Duplicate entity_ids are structural noise (uniqueItems).",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "entity_ids": [
+            "ent-1",
+            "ent-1"
+          ]
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "record_version.scope_wrong_type",
+      "schema": "record_version.json",
+      "why": "project_id must be an opaque string.",
+      "instance": {
+        "namespace": "example.private",
+        "record_id": "22222222-2222-4222-8222-222222222222",
+        "record_version": 1,
+        "kind": "observation",
+        "schema_version": "observation.v1",
+        "status": "active",
+        "body": {
+          "text": "合成夹具：用户反馈语气过活泼。"
+        },
+        "scope": {
+          "project_id": 123
+        },
+        "source_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "created_by_event_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "committed_state_revision": 214,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "event.missing_source_instance",
+      "schema": "event.json",
+      "why": "source_instance is required (J.2).",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.missing_observed_at",
+      "schema": "event.json",
+      "why": "observed_at may be null but the field must be present.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.source_kind_unknown",
+      "schema": "event.json",
+      "why": "source_kind is a fixed enum bound by the entry point.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "guessed_by_model",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.privacy_class_unknown",
+      "schema": "event.json",
+      "why": "privacy_class is private/restricted/public-example.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "secret"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.event_seq_unknown_top_field",
+      "schema": "event.json",
+      "why": "event_seq is generated by the store and is not part of the envelope.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private",
+        "event_seq": 1
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.invalid_uuid",
+      "schema": "event.json",
+      "why": "event_id must be a canonical UUID.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "not-a-uuid",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.causation_ref_bare_id",
+      "schema": "event.json",
+      "why": "causation_refs elements must be typed refs, not bare IDs.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111"
+          }
+        ],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.causation_ref_unknown_state_revision",
+      "schema": "event.json",
+      "why": "A RecordRef inside causation_refs must not carry state_revision.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 1,
+            "state_revision": 1
+          }
+        ],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.recorded_at_bad_shape",
+      "schema": "event.json",
+      "why": "recorded_at must be a UTC RFC 3339 instant.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": null,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17 09:48:57",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.source_position_string",
+      "schema": "event.json",
+      "why": "source_position is an integer or null, not a numeric string.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": "7",
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "event.source_position_negative",
+      "schema": "event.json",
+      "why": "source_position cannot be negative.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "source_kind": "user_report",
+        "source_instance": "harness/home-probe",
+        "source_event_id": "src-evt-0001",
+        "source_position": -1,
+        "event_type": "user.feedback",
+        "observed_at": null,
+        "recorded_at": "2026-10-17T09:48:57Z",
+        "payload_ref": "payload:fixtures/0001",
+        "causation_refs": [],
+        "privacy_class": "private"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "request.unknown_authorization_field",
+      "schema": "request.json",
+      "why": "Self-declared role does not grant authorization (J.4).",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "operation": "proposal.submit",
+        "expected_state_revision": 214,
+        "payload": {
+          "context_id": "44444444-4444-4444-8444-444444444444",
+          "run_id": "run-20261017-0001",
+          "kind": "belief",
+          "body": {
+            "text": "该场景下应更克制。"
+          }
+        },
+        "role": "admin"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "request.missing_payload",
+      "schema": "request.json",
+      "why": "payload is required (J.4).",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "operation": "proposal.submit",
+        "expected_state_revision": 214
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "request.invalid_request_id",
+      "schema": "request.json",
+      "why": "request_id is a UUID.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "req-0001",
+        "namespace": "example.private",
+        "operation": "proposal.submit",
+        "expected_state_revision": 214,
+        "payload": {
+          "context_id": "44444444-4444-4444-8444-444444444444",
+          "run_id": "run-20261017-0001",
+          "kind": "belief",
+          "body": {
+            "text": "该场景下应更克制。"
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "request.protocol_version_v1",
+      "schema": "request.json",
+      "why": "pcs.v1 is not this protocol version.",
+      "instance": {
+        "protocol_version": "pcs.v1",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "operation": "proposal.submit",
+        "expected_state_revision": 214,
+        "payload": {
+          "context_id": "44444444-4444-4444-8444-444444444444",
+          "run_id": "run-20261017-0001",
+          "kind": "belief",
+          "body": {
+            "text": "该场景下应更克制。"
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "code": "UNSUPPORTED_VERSION"
+      }
+    },
+    {
+      "id": "request.expected_state_revision_negative",
+      "schema": "request.json",
+      "why": "state_revision cannot be negative.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "operation": "proposal.submit",
+        "expected_state_revision": -1,
+        "payload": {
+          "context_id": "44444444-4444-4444-8444-444444444444",
+          "run_id": "run-20261017-0001",
+          "kind": "belief",
+          "body": {
+            "text": "该场景下应更克制。"
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "request.operation_shape",
+      "schema": "request.json",
+      "why": "operation names are lower-case dotted identifiers.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "operation": "Proposal Submit!",
+        "expected_state_revision": 214,
+        "payload": {
+          "context_id": "44444444-4444-4444-8444-444444444444",
+          "run_id": "run-20261017-0001",
+          "kind": "belief",
+          "body": {
+            "text": "该场景下应更克制。"
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.unknown_top_field",
+      "schema": "response.json",
+      "why": "The old status envelope field is not part of pcs.v2.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": true,
+        "state_revision": 214,
+        "data": {
+          "outcome": "committed",
+          "record_ref": {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 1
+          }
+        },
+        "error": null,
+        "warnings": [],
+        "status": "ok"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.error_code_unknown",
+      "schema": "response.json",
+      "why": "error.code must come from the J.4 enum.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": false,
+        "state_revision": 214,
+        "data": null,
+        "error": {
+          "code": "MODEL_FORGOT",
+          "message": "forgot",
+          "retryable": true,
+          "details": {}
+        },
+        "warnings": [
+          "rebuild context before resubmitting"
+        ]
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.data_outcome_not_string",
+      "schema": "response.json",
+      "why": "J.4 lists outcomes as examples, so the value is an open string, not an enum.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": true,
+        "state_revision": 214,
+        "data": {
+          "outcome": 1
+        },
+        "error": null,
+        "warnings": []
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.data_outcome_empty",
+      "schema": "response.json",
+      "why": "An outcome label, when present, cannot be empty.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": true,
+        "state_revision": 214,
+        "data": {
+          "outcome": ""
+        },
+        "error": null,
+        "warnings": []
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.missing_error",
+      "schema": "response.json",
+      "why": "error is required and may be null (J.4).",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": true,
+        "state_revision": 214,
+        "data": {
+          "outcome": "committed",
+          "record_ref": {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 1
+          }
+        },
+        "warnings": []
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.error_missing_retryable",
+      "schema": "response.json",
+      "why": "A J.4 error object needs code, message, retryable and details.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": false,
+        "state_revision": 214,
+        "data": null,
+        "error": {
+          "code": "CONTEXT_STALE",
+          "message": "stale",
+          "details": {}
+        },
+        "warnings": [
+          "rebuild context before resubmitting"
+        ]
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "response.state_revision_negative",
+      "schema": "response.json",
+      "why": "state_revision cannot be negative.",
+      "instance": {
+        "protocol_version": "pcs.v2",
+        "request_id": "33333333-3333-4333-8333-333333333333",
+        "ok": true,
+        "state_revision": -1,
+        "data": {
+          "outcome": "committed",
+          "record_ref": {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 1
+          }
+        },
+        "error": null,
+        "warnings": []
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "error.code_unknown",
+      "schema": "error.json",
+      "why": "The error code enum is fixed by J.4.",
+      "instance": {
+        "code": "INTERNAL",
+        "message": "internal",
+        "retryable": false,
+        "details": {}
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "error.missing_retryable",
+      "schema": "error.json",
+      "why": "retryable is required (J.4).",
+      "instance": {
+        "code": "NOT_FOUND",
+        "message": "missing",
+        "details": {}
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "error.details_not_object",
+      "schema": "error.json",
+      "why": "details is a structured object.",
+      "instance": {
+        "code": "NOT_FOUND",
+        "message": "missing",
+        "retryable": false,
+        "details": "none"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.missing_model_input_complete",
+      "schema": "context_envelope.json",
+      "why": "All J.5 fields are required; completeness must be stated explicitly.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea"
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.read_set_usage_unknown",
+      "schema": "context_envelope.json",
+      "why": "usage is current/historical/pinned_asset only (J.5).",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 1
+            },
+            "usage": "stale"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.read_set_bare_ref",
+      "schema": "context_envelope.json",
+      "why": "read_set entries use an exact RecordRef, not a bare ID.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "id": "22222222-2222-4222-8222-222222222222"
+            },
+            "usage": "current"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.profile_ref_is_event",
+      "schema": "context_envelope.json",
+      "why": "profile_ref points at a record version, not an event.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.content_hash_bad",
+      "schema": "context_envelope.json",
+      "why": "content_hash is a sha256 digest.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "md5:abc",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.unknown_top_field",
+      "schema": "context_envelope.json",
+      "why": "Unknown envelope fields are rejected.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false,
+        "draft": true
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.memory_hits_bare_string",
+      "schema": "context_envelope.json",
+      "why": "memory_hits are exact record references.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.trigger_ref_unknown_type",
+      "schema": "context_envelope.json",
+      "why": "trigger_ref is an EventRef or RecordRef.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "context",
+          "namespace": "example.private",
+          "context_id": "44444444-4444-4444-8444-444444444444"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "reason": "超出本轮 token 预算的可选经历"
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "context_envelope.omission_empty_reason",
+      "schema": "context_envelope.json",
+      "why": "An omission records why something was left out.",
+      "instance": {
+        "context_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "run_id": "run-20261017-0001",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        },
+        "state_revision": 214,
+        "context_event_seq": 783,
+        "privacy_epoch": 3,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 4
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "22222222-2222-4222-8222-222222222222",
+              "record_version": 2
+            },
+            "usage": "current"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "66666666-6666-4666-8666-666666666666",
+              "record_version": 1
+            },
+            "usage": "historical"
+          }
+        ],
+        "memory_hits": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "22222222-2222-4222-8222-222222222222",
+            "record_version": 2
+          }
+        ],
+        "belief_refs": [
+          {
+            "ref_type": "record",
+            "namespace": "example.private",
+            "record_id": "66666666-6666-4666-8666-666666666666",
+            "record_version": 1
+          }
+        ],
+        "question_refs": [],
+        "focus_refs": [],
+        "unknown_execution_ids": [
+          "exec-unknown-0001"
+        ],
+        "permission_view_ref": "permission-view-0001",
+        "budget_view": {
+          "max_tokens": 4096,
+          "remaining_calls": 1
+        },
+        "pending_source_event_refs": [
+          {
+            "ref_type": "event",
+            "namespace": "example.private",
+            "event_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        ],
+        "omissions": [
+          {
+            "reason": ""
+          }
+        ],
+        "index_generation": 36,
+        "index_coverage": {
+          "episodes": 1.0,
+          "beliefs": 1.0
+        },
+        "content_hash": "sha256:82c31678c2eb8bcca08b63f2d98b1feca3766fb8e3fef9632bdb886971179fea",
+        "model_input_complete": false
+      },
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "scope.unknown_key",
+      "schema": "scope.json",
+      "why": "The scope field set is closed (J.2).",
+      "instance": {
+        "tenant_id": "tenant-0001"
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "scope.legacy_goal_scope",
+      "schema": "scope.json",
+      "why": "Retired goal_scope is not scope (J.2).",
+      "instance": {
+        "goal_scope": {
+          "goal_id": "goal-0001"
+        }
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "scope.entity_ids_duplicate",
+      "schema": "scope.json",
+      "why": "entity_ids must be unique.",
+      "instance": {
+        "entity_ids": [
+          "ent-1",
+          "ent-1"
+        ]
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "scope.project_id_empty",
+      "schema": "scope.json",
+      "why": "A present scope id cannot be empty.",
+      "instance": {
+        "project_id": ""
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "scope.project_id_type",
+      "schema": "scope.json",
+      "why": "Scope ids are strings.",
+      "instance": {
+        "project_id": 1
+      },
+      "expect": {
+        "valid": false,
+        "code": "SCOPE_VIOLATION"
+      }
+    },
+    {
+      "id": "raw_json.nan_record_version",
+      "schema": "record_ref.json",
+      "why": "NaN is not JSON; json.loads accepts it by default, the strict loader must not.",
+      "raw_json": "{\"ref_type\":\"record\",\"namespace\":\"example.private\",\"record_id\":\"22222222-2222-4222-8222-222222222222\",\"record_version\":NaN}",
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "raw_json.infinity_source_position",
+      "schema": "event.json",
+      "why": "Infinity is not JSON; it must fail before schema validation.",
+      "raw_json": "{\"protocol_version\":\"pcs.v2\",\"event_id\":\"11111111-1111-4111-8111-111111111111\",\"namespace\":\"example.private\",\"source_kind\":\"user_report\",\"source_instance\":\"harness/home-probe\",\"source_event_id\":\"src-evt-0001\",\"source_position\":Infinity,\"event_type\":\"user.feedback\",\"observed_at\":null,\"recorded_at\":\"2026-10-17T09:48:57Z\",\"payload_ref\":\"payload:fixtures/0001\",\"causation_refs\":[],\"privacy_class\":\"private\"}",
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "raw_json.duplicate_key",
+      "schema": "record_ref.json",
+      "why": "Python json.loads silently keeps the last duplicate key; the strict loader rejects ambiguity.",
+      "raw_json": "{\"ref_type\":\"record\",\"ref_type\":\"record\",\"namespace\":\"example.private\",\"record_id\":\"22222222-2222-4222-8222-222222222222\",\"record_version\":1}",
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    },
+    {
+      "id": "raw_json.overflow_1e999",
+      "schema": "record_ref.json",
+      "why": "1e999 parses to inf without parse_constant; the post-parse scan must reject it.",
+      "raw_json": "{\"ref_type\":\"record\",\"namespace\":\"example.private\",\"record_id\":\"22222222-2222-4222-8222-222222222222\",\"record_version\":1e999}",
+      "expect": {
+        "valid": false,
+        "code": "INVALID_SCHEMA"
+      }
+    }
+  ]
+}

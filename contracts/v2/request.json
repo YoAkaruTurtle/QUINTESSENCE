@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Request",
+  "description": "pcs.v2 machine request envelope (J.4). Model self-declared authorization fields (for example role/approved_by) are not representable: unknown top-level fields are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "namespace",
+    "operation",
+    "expected_state_revision",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "_common.json#/$defs/protocol_version"
+    },
+    "request_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "operation": {
+      "type": "string",
+      "description": "Operation name such as record.get or proposal.submit. The set is open here; an unsupported operation is the runtime error UNSUPPORTED_OPERATION, not a structural error.",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$"
+    },
+    "expected_state_revision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Read-only request basis; null for reads (J.4).",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "payload": {
+      "type": "object",
+      "description": "Operation-specific payload. proposal.submit requires context_id, run_id, kind and body (J.4); that inner shape belongs to the command layer, not to this envelope."
+    }
+  }
+}

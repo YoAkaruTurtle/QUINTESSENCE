@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scope",
+  "description": "pcs.v2 restricted retrieval scope (J.2): project_id, session_id, scene, entity_ids, goal_id. All fields are optional; an empty object means namespace-general. This is not goal_scope and grants no file or network permission. Unknown keys are rejected and reported as SCOPE_VIOLATION by the contract checker.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "project_id": {
+      "$ref": "_common.json#/$defs/scope_id"
+    },
+    "session_id": {
+      "$ref": "_common.json#/$defs/scope_id"
+    },
+    "scene": {
+      "$ref": "_common.json#/$defs/scope_id"
+    },
+    "entity_ids": {
+      "type": "array",
+      "description": "Entity identifiers within the scope. Duplicates are structural noise and rejected.",
+      "items": {
+        "$ref": "_common.json#/$defs/scope_id"
+      },
+      "uniqueItems": true
+    },
+    "goal_id": {
+      "$ref": "_common.json#/$defs/scope_id"
+    }
+  }
+}

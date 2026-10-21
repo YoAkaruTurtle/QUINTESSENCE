@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextEnvelope",
+  "description": "pcs.v2 minimal Context snapshot evidence (J.5). Every listed field is required. Fields whose inner shape J.5 does not fix (budget_view, index_coverage, permission_view_ref) keep a minimal structural type and will be narrowed by later cards. source_refs and profile_version are optional: J.5 explicitly allows the readable profile_version, and its read_set sentence requires EventRefs to be listed separately as source_refs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "context_id",
+    "namespace",
+    "run_id",
+    "trigger_ref",
+    "state_revision",
+    "context_event_seq",
+    "privacy_epoch",
+    "profile_ref",
+    "read_set",
+    "memory_hits",
+    "belief_refs",
+    "question_refs",
+    "focus_refs",
+    "unknown_execution_ids",
+    "permission_view_ref",
+    "budget_view",
+    "pending_source_event_refs",
+    "omissions",
+    "index_generation",
+    "index_coverage",
+    "content_hash",
+    "model_input_complete"
+  ],
+  "properties": {
+    "context_id": {
+      "type": "string",
+      "description": "Dedicated context run-account ID, not a RecordRef (J.1).",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Dedicated run-account ID, not a RecordRef (J.1).",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "trigger_ref": {
+      "$ref": "_common.json#/$defs/any_ref"
+    },
+    "state_revision": {
+      "$ref": "_common.json#/$defs/state_revision_int"
+    },
+    "context_event_seq": {
+      "type": "integer",
+      "description": "Event watermark captured with the snapshot (J.5/J.6).",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "privacy_epoch": {
+      "type": "integer",
+      "description": "Privacy barrier generation captured with the snapshot (J.5/J.7).",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "profile_ref": {
+      "$ref": "_common.json#/$defs/record_ref",
+      "description": "Exact PersonaProfile Record version (J.5)."
+    },
+    "read_set": {
+      "type": "array",
+      "description": "Each entry is an exact RecordRef plus the Context Engine's usage tag (J.5). The model must not rewrite usage.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref",
+          "usage"
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "_common.json#/$defs/record_ref"
+          },
+          "usage": {
+            "enum": [
+              "current",
+              "historical",
+              "pinned_asset"
+            ]
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "memory_hits": {
+      "type": "array",
+      "description": "Exact RecordRefs hit at this snapshot. The hit metadata shape is not fixed by J.5.",
+      "items": {
+        "$ref": "_common.json#/$defs/record_ref"
+      },
+      "uniqueItems": true
+    },
+    "belief_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "_common.json#/$defs/record_ref"
+      },
+      "uniqueItems": true
+    },
+    "question_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "_common.json#/$defs/record_ref"
+      },
+      "uniqueItems": true
+    },
+    "focus_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "_common.json#/$defs/record_ref"
+      },
+      "uniqueItems": true
+    },
+    "unknown_execution_ids": {
+      "type": "array",
+      "description": "Execution accounts whose outcome cannot be verified; unknown is shown, not guessed (J.8).",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "uniqueItems": true
+    },
+    "permission_view_ref": {
+      "type": "string",
+      "description": "Reference to the permission view captured for this run. J.5 does not fix the scheme; it is not a RecordRef.",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "budget_view": {
+      "type": "object",
+      "description": "Budget view captured for this run. Shape is defined by the run-account layer."
+    },
+    "pending_source_event_refs": {
+      "type": "array",
+      "description": "Received but not yet derived source events; all must be carried into the input (J.6).",
+      "items": {
+        "$ref": "_common.json#/$defs/event_ref"
+      },
+      "uniqueItems": true
+    },
+    "omissions": {
+      "type": "array",
+      "description": "Explicitly trimmed optional material (J.5). Each entry records why something was left out, and optionally which exact ref it was.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "_common.json#/$defs/any_ref"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "index_generation": {
+      "type": "integer",
+      "description": "Search-index generation used by the snapshot (J.5).",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "index_coverage": {
+      "type": "object",
+      "description": "Coverage report of the index used by the snapshot (J.5). Shape is defined by the retrieval layer."
+    },
+    "content_hash": {
+      "type": "string",
+      "description": "Hash of the private fragment payload kept with the snapshot (J.5).",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "model_input_complete": {
+      "type": "boolean",
+      "description": "false unless the complete host request was observable (J.5)."
+    },
+    "source_refs": {
+      "type": "array",
+      "description": "Optional EventRef list, kept separate from read_set per J.5.",
+      "items": {
+        "$ref": "_common.json#/$defs/event_ref"
+      },
+      "uniqueItems": true
+    },
+    "profile_version": {
+      "type": "string",
+      "description": "Optional human-readable profile version label (J.5).",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

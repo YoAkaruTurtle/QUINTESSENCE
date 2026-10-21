@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Error",
+  "description": "pcs.v2 controlled error object (J.4). The code enum is fixed here from J.4; which condition produces which code is state-layer semantics and out of scope for PCS2-002. Controlled errors must not carry sensitive payload text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code",
+    "message",
+    "retryable",
+    "details"
+  ],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "INVALID_SCHEMA",
+        "UNSUPPORTED_VERSION",
+        "UNSUPPORTED_OPERATION",
+        "CONTEXT_TOO_LARGE",
+        "NOT_FOUND",
+        "PARTIAL_HISTORY",
+        "ID_CONFLICT",
+        "REVISION_CONFLICT",
+        "CONTEXT_STALE",
+        "EVIDENCE_MISSING",
+        "SOURCE_UNTRUSTED",
+        "SOURCE_REDACTED",
+        "SCOPE_VIOLATION",
+        "REDACTED",
+        "HISTORICAL_SEARCH_UNSUPPORTED",
+        "NEEDS_CONTEXT",
+        "INVALID_TRANSITION",
+        "BUDGET_EXCEEDED",
+        "EXECUTION_UNKNOWN",
+        "DB_BUSY",
+        "CORRUPT_STORE",
+        "MIGRATION_REQUIRED"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "description": "Public, non-sensitive explanation.",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "details": {
+      "type": "object",
+      "description": "Structured, non-sensitive details. J.4 lists the field; the inner shape is operation-specific."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecordRef",
+  "description": "pcs.v2 typed reference to an exact Record version (J.1). record_version is mandatory; a bare ID object such as {\"id\": \"...\"} is rejected by the shared definition.",
+  "$ref": "_common.json#/$defs/record_ref"
+}
