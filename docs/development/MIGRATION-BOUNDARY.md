@@ -1,8 +1,9 @@
 # Candidate maintenance boundary
 
 This local candidate is not yet the designated development mainline or an
-approved release. Legal attribution, public documentation and publication
-remain separate acceptance steps. No remote is configured.
+approved release. Public documentation, mainline switch and publication remain
+separate acceptance steps. Licensing is recorded in `LICENSE` and `NOTICE`.
+No remote is configured.
 
 The import namespace is `quintessence_pcs`; no legacy import alias is supplied.
 Protocol `pcs.v2`, baseline identity `PCS-2026-10-17-r3`, SQL migration names,

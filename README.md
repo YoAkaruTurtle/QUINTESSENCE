@@ -1,8 +1,8 @@
 # QUINTESSENCE
 
 Local migration candidate, version 0.0.0. Not a release or the designated
-development mainline. Public README, architecture, roadmap and licensing
-review are pending separate approval.
+development mainline. Public README, architecture and roadmap are pending
+separate approval.
 
 Python 3.12+ library: storage, Persona/Memory/Cognition services and runtime.
 Import `quintessence_pcs`. Protocol `pcs.v2` and migration ledger identities
@@ -18,3 +18,12 @@ external instance or experiment directory. No private instance manager or
 experiment platform is supplied by this migration.
 
 Engineering completion does not establish research evaluation results.
+
+## License
+
+Licensed under the Apache License, Version 2.0. The full license text is in
+`LICENSE`; the copyright notice is in `NOTICE`.
+
+Copyright 2026 Linguist.
+
+Contribution rules are in `CONTRIBUTING.md`.

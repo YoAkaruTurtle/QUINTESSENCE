@@ -1,7 +1,10 @@
 [
   ".gitattributes",
   ".gitignore",
+  "CONTRIBUTING.md",
+  "LICENSE",
   "MANIFEST.in",
+  "NOTICE",
   "README.md",
   "contracts/v2/README.md",
   "contracts/v2/_common.json",

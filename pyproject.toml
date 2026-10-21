@@ -4,11 +4,17 @@ version = "0.0.0"
 description = "QUINTESSENCE PCS Python core (pcs.v2 contracts, storage foundation and offline tests)"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Linguist" }]
 dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+]
 
 # Build dependencies are separate from the standard-library-only runtime.
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
