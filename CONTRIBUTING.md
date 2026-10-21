@@ -20,9 +20,9 @@ Submit only code you wrote or are authorized to submit.
   BSD-3-Clause, ISC, CC0-1.0, Unlicense.
 - Copyleft licenses (GPL, AGPL, LGPL, MPL-2.0) and proprietary code require an
   explicit maintainer decision and must not be merged by default.
-- Record every third-party component in `THIRD_PARTY_NOTICES.md` (or in
-  `NOTICE`) with: component name, source URL, version or commit, license, and
-  the files or directories used.
+- Record every third-party component in `THIRD_PARTY_NOTICES.md` (create it
+  when the first component is added) or in `NOTICE` with: component name,
+  source URL, version or commit, license, and the files or directories used.
 - Do not add model weights, datasets, or other assets unless their license is
   documented and compatible with Apache 2.0. `.gitignore` excludes common
   weight formats; that is not a license review.

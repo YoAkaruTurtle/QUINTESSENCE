@@ -10,6 +10,14 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Approved public documents may name the private instance with one exact phrase.
+# Any other legacy-term occurrence in these files, and every occurrence in any
+# other path, still fails the gate.
+PUBLIC_DOC_PATHS = frozenset({'README.md', 'ARCHITECTURE.md', 'ROADMAP.md'})
+# Built from parts so this gate's own source does not match the legacy terms.
+PUBLIC_LEGACY_PHRASES = ('千' + '岁' + '（Chi' + 'tose' + '）',)
+
 def git(*args):
     return subprocess.check_output(['git', '--no-optional-locks', '-C', str(ROOT), *args])
 
@@ -21,15 +29,23 @@ def inspect_content(path, data):
         text = data.decode('utf-8')
     except UnicodeDecodeError:
         return [f'{path}: not UTF-8']
-    patterns = [
+    secret_patterns = [
         r'sk-[A-Za-z0-9_-]{24,}',
         r'-----BEGIN ' + r'(?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
         r'(?i)[A-Z]:[/\\]+Users[/\\]+[^/\\\s]+',
+    ]
+    legacy_patterns = [
         r'(?i)' + 'chi' + 'tose',
         '千' + '岁',
     ]
-    for index, pattern in enumerate(patterns):
-        if re.search(pattern, text): errors.append(f'{path}: sensitive/legacy pattern {index}')
+    for index, pattern in enumerate(secret_patterns):
+        if re.search(pattern, text): errors.append(f'{path}: sensitive pattern {index}')
+    scan = text
+    if path.split(' (', 1)[0] in PUBLIC_DOC_PATHS:
+        for phrase in PUBLIC_LEGACY_PHRASES:
+            scan = scan.replace(phrase, '')
+    for index, pattern in enumerate(legacy_patterns):
+        if re.search(pattern, scan): errors.append(f'{path}: legacy pattern {index}')
     return errors
 
 def main():

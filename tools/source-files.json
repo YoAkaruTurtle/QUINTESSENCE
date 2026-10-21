@@ -1,11 +1,13 @@
 [
   ".gitattributes",
   ".gitignore",
+  "ARCHITECTURE.md",
   "CONTRIBUTING.md",
   "LICENSE",
   "MANIFEST.in",
   "NOTICE",
   "README.md",
+  "ROADMAP.md",
   "contracts/v2/README.md",
   "contracts/v2/_common.json",
   "contracts/v2/context_envelope.json",
