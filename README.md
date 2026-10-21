@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/quintessence-banner.png" alt="QUINTESSENCE — Persistent Cognitive System (PCS)" width="100%">
+</p>
+
 <h1 align="center">QUINTESSENCE</h1>
 
 <p align="center"><strong>Persistent Cognitive System (PCS)</strong></p>
