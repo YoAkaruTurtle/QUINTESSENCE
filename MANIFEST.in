@@ -1,4 +1,6 @@
-include README.md ARCHITECTURE.md ROADMAP.md pyproject.toml .gitattributes .gitignore
+include README.md README.zh-CN.md
+include ARCHITECTURE.md ARCHITECTURE.zh-CN.md
+include ROADMAP.md ROADMAP.zh-CN.md pyproject.toml .gitattributes .gitignore
 include LICENSE NOTICE CONTRIBUTING.md
 recursive-include docs *.md
 recursive-include contracts *.json *.md

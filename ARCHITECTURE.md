@@ -1,169 +1,173 @@
 # QUINTESSENCE Architecture
 
-**持久状态如何承接经历，模型如何参与认识更新。**
+**How persistent state carries experience, and how the model participates in belief revision.**
 
-> 状态核对：2026-10-21。本文区分已有实现与已批准的目标设计。统一 LLM–PCS 协作层设计已获批准，尚无实施完成证据；图中目标关系不代表当前部署状态。
+**English** · [简体中文](ARCHITECTURE.zh-CN.md)
 
-[项目介绍](README.md) · [演进路线](ROADMAP.md)
+> Status checked 2026-10-21. This document separates implemented mechanisms from approved target design. The unified LLM–PCS collaboration layer is not implemented. Design approved; implementation pending. Target relationships in the diagrams do not describe the current deployment.
+>
+> Status terms: **Implemented** = present in the current code and covered by tests; **Approved design** = design accepted, not implemented; **Planned** = scheduled after P0; **Research direction** = long-term inquiry, not an engineering commitment.
 
-## 1. 架构起点：状态跨越模型调用
+[Project overview](README.md) · [Roadmap](ROADMAP.md)
 
-PCS（Persistent Cognitive System，持久认知系统）是 QUINTESSENCE 的整体架构定位。一次模型调用可以结束，而系统中的经历、当前认识、版本历史和未完成工作继续存在。
+## 1. Starting point: state across model calls
 
-模型基于显式提供的上下文参与推理，输出候选或回答。持久认识的更新由 PCS 的领域规则和提交机制决定。因此，可以在固定模型参数的情况下研究系统状态如何积累与变化；状态确实更新和行为确实改变仍需分别验证。
+PCS (Persistent Cognitive System) is QUINTESSENCE's overall architectural identity. A model call can end, while the system's experiences, current beliefs, version history, and unfinished work continue to exist.
 
-| 对象 | 所有权与责任 |
+The model participates in inference based on explicitly supplied context and emits candidates or answers. Updates to persistent beliefs are determined by PCS domain rules and commit mechanisms. This makes it possible to study how system state accumulates and changes while model parameters remain fixed; whether state actually updates and whether behavior actually changes still require separate verification.
+
+| Object | Ownership and responsibility |
 |---|---|
-| PCS | 权威认知状态、来源、版本、领域校验与正式 Context |
-| LLM | 推理与候选生成；不能自行认定工具成功、来源可信或获得授权 |
-| 宿主（如 DSH；尚未集成） | 会话、运行环境、真实工具执行及宿主侧授权 |
-| 应用 | 用户输入、结果展示与交互；目标是消费统一接口 |
-| 私有实例 | 个体配置及持续经历；不与通用源码、模型权重绑定为同一资产 |
+| PCS | Authoritative cognitive state, provenance, versions, domain validation, and formal Context |
+| LLM | Inference and candidate generation; cannot self-certify tool success, source trust, or authorization |
+| Host (e.g., DSH; not yet integrated) | Session, runtime environment, real tool execution, and host-side authorization |
+| Application | User input, result presentation, and interaction; consumes the unified interface |
+| Private instance | Individual configuration and persistent experience; not bundled with general source code or model weights as one asset |
 
-模型可替换是一项架构原则，当前不承诺任意模型之间行为一致或无损迁移。
+Model replaceability is an architectural principle; current work does not promise behavioral equivalence or lossless migration between arbitrary models.
 
-## 2. 已有底座
+## 2. Existing foundation
 
-现有核心已有持久存储、版本更新、Context 装配、模型端口以及 Belief 领域操作。以下名称描述当前技术报告中的组件，不代表公开包的稳定 API 承诺。
+The current core has persistent storage, version updates, Context assembly, model ports, and Belief domain operations. The names below describe components in the current technical report; they are not stable API commitments for the public package.
 
-| 组件 | 当前职责 |
+| Component | Current responsibility |
 |---|---|
-| State Store / 提交事务 | 保存状态和历史，执行受控追加、版本检查与提交回执 |
-| 领域服务 / BeliefService | 校验认识操作、证据与范围，应用合法变更 |
-| ContextService | 读取与装配正式上下文，绑定材料、版本及状态快照 |
-| ModelPort / DirectHttpModel | 模型调用抽象与已有真实 HTTP 调用路径 |
-| 提议解析与校验 | 解析模型输出，拒绝不支持的字段和不合法操作 |
-| CognitionRuntime.run_step | 编排已有的有界认知步骤、校验反馈与受限重试 |
+| State Store / commit transactions | Stores state and history; performs controlled appends, version checks, and commit receipts |
+| Domain services / BeliefService | Validates belief operations, evidence, and scope; applies legal changes |
+| ContextService | Loads and assembles formal context; binds material, versions, and a state snapshot |
+| ModelPort / DirectHttpModel | Model-call abstraction and the existing real HTTP call path |
+| Proposal parsing and validation | Parses model output; rejects unsupported fields and illegal operations |
+| CognitionRuntime.run_step | Orchestrates the existing bounded cognitive step, validation feedback, and limited retries |
 
-### 经历、证据与认识
+### Experience, evidence, and belief
 
-这些概念不能仅凭文本相似就互换：
+These concepts cannot be treated as interchangeable merely because their text looks similar:
 
-| 概念 | 含义与边界 |
+| Concept | Meaning and boundary |
 |---|---|
-| Event | 发生过的输入或观察记录；可信程度取决于来源，不能由模型自报成功赋予 |
-| Evidence | 被某个判断使用、满足相应规则的来源；重复引用同一来源不增加独立证据 |
-| Episode | 对经历的组织形式；当前仅有最小基础，不代表完整记忆整理与语义检索 |
-| Belief | 带来源、适用范围、状态和版本的认识，可撤回或被替代 |
-| Knowledge | 后续规划的有效知识投影与检索能力；不是已经建成的独立事实库 |
+| Event | A record of an input or observation that occurred; trust depends on its source and cannot be granted by a model's self-report |
+| Evidence | A source used by a judgment that satisfies the relevant rules; citing the same source again does not create independent evidence |
+| Episode | An organizational form of experience; currently only a minimal foundation, not full memory organization or semantic retrieval |
+| Belief | A belief with provenance, applicability scope, status, and version; it can be retracted or superseded |
+| Knowledge | The planned projection and retrieval of valid knowledge; not an existing independent fact store |
 
-用户陈述、模型推断与实际工具观察保留不同来源语义。保存一段话，并不使其自动成为事实或 Belief。
+User statements, model inferences, and actual tool observations retain different source semantics. Storing a sentence does not automatically make it a fact or a Belief.
 
-### 当前核心认知步骤
+### Current core cognitive step
 
-下图描述核心已有步骤的责任关系。正式 v4 实验与旧 Workbench 的具体编排另见下一节。
+The diagram describes the responsibility relationships of the existing core step. The formal v4 experiment and the legacy Workbench have their own orchestration, described in the next section.
 
 ```mermaid
 flowchart TD
-    E["受信事件与待处理工作"] --> C["ContextService 装配当前材料"]
-    S["持久状态与版本历史"] --> C
-    C --> M["模型生成候选"]
-    M --> V["解析、领域校验与提交检查"]
-    V -->|合法更新| S
-    V --> O["回执、等待或拒绝结果"]
+    E["Trusted events and pending work"] --> C["ContextService assembles current material"]
+    S["Persistent state and version history"] --> C
+    C --> M["Model generates candidates"]
+    M --> V["Parsing, domain validation, and commit checks"]
+    V -->|legal update| S
+    V --> O["Receipt, WAIT, or rejection"]
 ```
 
-典型纠正路径包括：撤回旧判断、读取更新后的状态并生成新 Context、提出替代认识。两次操作不是一个可以凭语言承诺跳过的整体；第二步失败或 WAIT 时，不能报告替代认识已经建立。
+A typical revision path includes retracting an earlier judgment, reading the updated state and building a new Context, and proposing a replacement belief. The two operations are not a single whole that can be skipped by a verbal promise; if the second step fails or WAITs, the system must not report that the replacement belief has been established.
 
-已有校验和受限反馈能够约束模型操作，但不能保证模型每次触发正确操作，也不能证明开放世界结论为真。
+Existing validation and bounded feedback constrain model operations, but they cannot guarantee that the model triggers the correct operation every time, nor prove open-world conclusions true.
 
-## 3. 三条现有调用路径
+## 3. Three existing call paths
 
-| 路径 | 实际情况 | 使用边界 |
+| Path | Actual situation | Boundary |
 |---|---|---|
-| PCS Core | 已有 Context、模型调用、候选解析与领域提交的局部闭环 | 有界认知操作，不是完整开放式会话协议 |
-| EXP-01 v4 | Q1/Q2 使用正式 Context 与部分核心机制，由实验适配器编排；Advice 使用独立调用分支 | 受控研究实现，不等于全部经过 run_step 或统一协作层 |
-| Workbench V0.2 | 原型自行组织部分 Prompt、检索与 HTTP，复用部分 PCS 能力 | 独立展示 Demo，未统一为核心接口 |
+| PCS Core | Local closed loop of Context, model call, candidate parsing, and domain commit | Bounded cognitive operation; not a complete open-ended conversation protocol |
+| EXP-01 v4 | Q1/Q2 use formal Context and some core mechanisms, orchestrated by the experiment adapter; Advice uses a separate call branch | Controlled research implementation; not every step goes through run_step or the unified collaboration layer |
+| Workbench V0.2 | The prototype assembles some prompts, retrieval, and HTTP itself and reuses some PCS capabilities | Standalone demo; not unified into the core interface |
 
-旧 Workbench 已决定冻结，不复用或迁移为新应用。其运行经历帮助明确了统一协作层的需求，但不能作为该层已交付的证据。
+The legacy Workbench is frozen and will not be reused or migrated into the new application. Its operating experience clarified the need for a unified collaboration layer, but it is not evidence that the layer has been delivered.
 
-旧实验要求的特定请求格式保留在原协议范围内。未来协作层可以采用显式、版本化的多消息格式，不会偷偷改变历史实验契约。
+Specific request formats required by the old experiments remain within the original protocol scope. A future collaboration layer may use explicit, versioned multi-message formats without silently changing historical experiment contracts.
 
-## 4. 已批准设计：统一 LLM–PCS 协作层
+## 4. Approved design: unified LLM–PCS collaboration layer
 
-**状态：设计已批准，待实施。** 方案采用 PCS 库内的薄协调入口（Facade），抽取已有生成与提交步骤供应用复用。它不建立第二套权威认知状态，也不新增常驻认知服务器。
+**Status: approved design, not implemented.** The proposal uses a thin coordination entry point (Facade) inside the PCS library and extracts existing generation and commit steps for application reuse. It does not create a second authoritative cognitive state and does not add a resident cognitive server.
 
-目标关系如下：
+The target relationships are:
 
 ```mermaid
 flowchart TD
-    H["应用与可信宿主"] --> F["协作入口：consult / review"]
-    F --> C["唯一 ContextService"]
-    S["PCS 领域状态与来源"] --> C
-    C --> M["共享模型适配与调用记录"]
+    H["Application and trusted host"] --> F["Collaboration entry: consult / review"]
+    F --> C["Single ContextService"]
+    S["PCS domain state and sources"] --> C
+    C --> M["Shared model adapter and call records"]
     M --> F
-    F --> V["候选校验、许可与领域提交"]
+    F --> V["Candidate validation, permission, and domain commit"]
     V --> S
-    F --> R["回复、候选及权威回执"]
+    F --> R["Reply, candidates, and authoritative receipt"]
 ```
 
-### 两种交互，分开的更新责任
+### Two interactions, separate update responsibilities
 
-| 模式 | 用途 | 状态影响 |
+| Mode | Purpose | State impact |
 |---|---|---|
-| consult | 围绕当前可访问材料进行咨询、查询与回答 | 可保存审计记录，不创建认知 work、不写 Belief、不刷新持久 SelfView |
-| review | 根据事件和待处理工作复查认识、提出候选 | 生成后按许可和领域规则提交，也可等待、拒绝或失败 |
+| consult | Consultation, query, and answer over currently accessible material | May store audit records; does not create cognitive work, write Belief, or refresh persistent SelfView |
+| review | Review beliefs against events and pending work; propose candidates | After generation, commit according to permissions and domain rules; may also wait, reject, or fail |
 
-consult 不因模型输出“应该记住”就自动转成 review。review 中，生成候选、结构合法、批准候选、提交成功是不同阶段。界面上的自然语言不能覆盖系统实际结果。
+consult does not automatically become review just because the model says “this should be remembered.” In review, candidate generation, structural validity, candidate approval, and successful commit are distinct stages. Natural-language UI text cannot override actual system results.
 
-### 生成与提交分离
+### Generation and commit are separate
 
-候选绑定其原始 Context、工作、内容与稳定请求标识。确认时重新检查是否仍有效；不能把旧候选静默换绑到新的状态上。
+A candidate is bound to its original Context, work, content, and a stable request identifier. Confirmation re-checks whether the candidate is still valid; an old candidate cannot be silently rebound to a new state.
 
-拒绝是该候选的终态，并阻断对应工作的自动重跑。重启、换会话或换请求标识不能解除拒绝；重新考虑需要明确授权，并产生新候选。若提交已经成功，之后的拒绝也不能伪称撤销，撤回认识需要另一个领域操作。
+Rejection is terminal for that candidate and blocks automatic reruns of the corresponding work. Restart, a new session, or a new request identifier cannot lift the rejection; reconsideration requires explicit authorization and produces a new candidate. If a commit has already succeeded, a later rejection cannot pretend to undo it; retracting the belief requires a separate domain operation.
 
-提交事实以权威回执为准。目标是在提交成功但响应丢失等情况下恢复结果，避免重复追加；这是一项有边界的工程机制，不作跨任意外部系统的 exactly-once 保证。
+Commit facts are determined by the authoritative receipt. The goal is to recover results when a commit succeeds but the response is lost, avoiding duplicate appends; this is a bounded engineering mechanism, not an exactly-once guarantee across arbitrary external systems.
 
-### 查询必须回到正式 Context
+### Queries must return to formal Context
 
-协作层的确定性查询负责读取获准的认识、版本与适用性信息。查询结果经同一 ContextService 装配后再交给模型；应用不得自行拼接一套隐含认知材料。
+The collaboration layer's deterministic query path reads permitted beliefs, versions, and applicability information. Query results are assembled through the same ContextService before being given to the model; applications must not assemble their own hidden cognitive material.
 
-首期交互有明确调用上限，查询与修复共享预算，不递归扩张为任意 Agent Loop。无结果、等待、拒绝、失效和调用失败分别表示，不暗含后台重试。
+First-phase interactions have explicit call limits, and queries and repair share a budget; they do not recursively expand into an arbitrary Agent Loop. No result, WAIT, rejection, invalidation, and call failure are each reported separately, with no hidden background retry.
 
-## 5. 协作经历与未来记忆
+## 5. Collaboration experience and future memory
 
-已批准方案把输入、回答、候选及处理结果保存为可追溯的交互经历来源，并提供精确引用读取接口。这些记录可以成为未来 Memory/Episode 的材料，但不自动成为长期记忆或当前认识。
+The approved design stores inputs, answers, candidates, and processing results as traceable interaction-experience sources and provides an exact-reference read interface. These records can become material for future Memory/Episode work, but they do not automatically become long-term memory or current belief.
 
-三种内容保持区分：发生过的交互、经领域规则提交的认识、未来经过选择和组织形成的 Episode 或知识投影。
+Three kinds of content remain distinct: interactions that occurred, beliefs committed through domain rules, and Episodes or knowledge projections that may later be formed through selection and organization.
 
-首期只实现经验读取桥接及合成消费者验证，不实现自动摘要、语义检索或 Episode 写入。被拒绝的候选也可以解释为“曾提出但未接受”，不能重新包装为事实。模型输出始终保留模型来源语义。
+The first phase implements only the experience-read bridge and synthetic consumer validation; it does not implement automatic summarization, semantic retrieval, or Episode writing. A rejected candidate can also be described as “proposed but not accepted”; it must not be repackaged as a fact. Model output always retains model-source semantics.
 
-未来组织经历时，需要继承精确来源、版本和删除依赖。复制一份内容不能绕过原来源删除，也不能制造新的独立证据。
+Future organization of experience must inherit exact provenance, versions, and deletion dependencies. Copying content must not bypass deletion of the original source, nor create new independent evidence.
 
-## 6. 授权、删除与持久边界
+## 6. Authorization, deletion, and persistence boundaries
 
-已有核心的证据、版本、水位和删除检查继续保留；协作层将扩展输入与产物的来源登记、删除传播和许可执行点。新增机制目前仍属于待实施设计。
+Existing core checks for evidence, versions, watermarks, and deletion remain in place; the collaboration layer will extend source registration, deletion propagation, and permission enforcement points for inputs and outputs. The new mechanisms are still part of the approved, unimplemented design.
 
-首期信任模型是**单用户可信宿主**。宿主负责建立调用身份与有效授权；namespace 用于逻辑隔离，scope 表示适用范围，授权引用用于审计，它们自身都不是身份认证。
+The first-phase trust model is a **single-user trusted host**. The host establishes call identity and valid authorization; namespace is used for logical isolation, scope expresses applicability, and authorization references support audit. None of these is authentication by itself.
 
-- 读取实例、私人内容外发、自动提交、记忆整合和拒绝后重跑分别授权。
-- 获准发送给模型不意味着获准修改认识；获准提交也不意味着获准外发私人内容。
-- 每次模型发送及重试前检查当前许可；模型不能在输出中创建授权。
-- 删除先建立不可读屏障，再清理登记的派生内容；旧 Context 及依赖材料应失效。
-- 原始请求记录有助于复核，但受隐私与保留策略约束；删除后不承诺恢复完整正文。
+- Reading an instance, sending private content outward, automatic commit, memory integration, and rerun after rejection are authorized separately.
+- Permission to send content to a model does not imply permission to modify beliefs; permission to commit does not imply permission to send private content outward.
+- Current permission is checked before every model send and retry; the model cannot create authorization in its output.
+- Deletion first establishes an unreadable barrier, then cleans registered derived content; old Contexts and dependent material should become invalid.
+- Raw request records support review but are constrained by privacy and retention policies; after deletion, full text is not guaranteed to be recoverable.
 
-此设计不防御恶意同进程代码直接操作底层存储，也不是多租户网络服务安全方案。
+This design does not defend against malicious same-process code operating on the underlying storage directly, and it is not a multi-tenant network-service security design.
 
-## 7. 五项能力的长期位置
+## 7. Long-term position of the five capabilities
 
-| 能力 | 研究职责 | 当前落地范围 |
+| Capability | Research responsibility | Current implementation scope |
 |---|---|---|
-| Persona | 身份与倾向的连续性、情境反馈 | Profile 等最小基础；P1 情境反馈待做 |
-| Memory | 经历保留、组织、选择与再利用 | 事件和 Episode 最小基础；完整整合与检索待做 |
-| Cognition | 形成和修正认识，延续问题与关注 | Belief / Context 及受控操作链已有实现；Question / Focus 待做 |
-| Affect | 对对象和经历进行带来源的评价 | 研究方向 |
-| Load & Recovery | 活动负荷、停止与恢复节律 | 长期机制待研究；现有调用预算不等于完整负荷系统 |
+| Persona | Continuity of identity and dispositions; contextual feedback | Minimal Profile foundation; P1 contextual feedback pending |
+| Memory | Retention, organization, selection, and reuse of experience | Minimal event and Episode foundation; full integration and retrieval pending |
+| Cognition | Form and revise beliefs; carry questions and focus forward | Belief / Context and the controlled operation chain are implemented; Question / Focus pending |
+| Affect | Source-bearing evaluation of objects and experiences | Research direction |
+| Load & Recovery | Activity load, stopping, and recovery rhythm | Long-term mechanism pending; current call budgets are not a complete load system |
 
-五项是概念与职责划分，具体模块是否独立由实现需求决定。共享状态和来源，不意味着各领域采用同一套更新规则。
+The five are conceptual responsibility divisions; whether they become separate modules depends on implementation needs. Shared state and provenance do not imply that every domain uses the same update rules.
 
-认知活动的长期触发来源可以包括累积经历、状态变化、未解决问题和持续关注。首期协作层仅提供手动、有界入口，不宣称已有自主持续运行。
+Long-term triggers for cognitive activity may include accumulated experience, state changes, unresolved problems, and persistent focus. The first collaboration layer provides only manual, bounded entry points and does not claim autonomous continuous operation.
 
-## 8. 怎样验证这套架构
+## 8. How to validate the architecture
 
-工程验收检查通道与约束：候选不提前提交、重复确认不重复更新、拒绝后不自动重跑、重启可恢复、删除和权限变化能阻断旧材料使用。
+Engineering acceptance checks channels and constraints: candidates are not committed early, repeated confirmation does not duplicate updates, rejection does not trigger automatic rerun, restart is recoverable, and deletion and permission changes can block reuse of old material.
 
-真实模型研究另行检查内容与行为：材料是否选到、实际请求是否包含正确版本、输出是否正确使用适用范围，以及新情境中的判断是否合理受影响。引用一个记录或自称“记得”不能替代行为证据。
+Real-model research separately checks content and behavior: whether the right material is selected, whether the actual request contains the correct version, whether the output uses the applicable scope correctly, and whether judgments in new situations are reasonably affected. Citing a record or claiming to “remember” is not a substitute for behavioral evidence.
 
-协作层计划使用纠正后重启、清空聊天缓存的序列，区分持久状态作用与聊天上下文作用，并保留未纠正、无相关历史及临时等价摘要等对照。与等价摘要表现相近，并不否定系统维护和纠正长期状态的价值。
+The collaboration-layer plan uses a sequence of post-revision restart and chat-cache clearing to separate the effect of persistent state from that of chat context, with controls for no revision, no relevant history, and a temporary equivalent summary. Performance similar to an equivalent summary does not negate the value of maintaining and revising long-term state.
 
-这些是下一阶段的验收设计，不能提前计入 010 已有成绩。当前实验边界与下一步见 [ROADMAP.md](ROADMAP.md)。
+These are acceptance designs for the next stage and cannot be counted toward PCS2-010 results in advance. Current experiment boundaries and next steps are in [ROADMAP.md](ROADMAP.md).

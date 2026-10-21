@@ -15,12 +15,19 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Approved public documents may name the private instance with one exact phrase.
-# Any other legacy-term occurrence in these files, and every occurrence in any
-# other path, still fails the gate.
-PUBLIC_DOC_PATHS = frozenset({'README.md', 'ARCHITECTURE.md', 'ROADMAP.md'})
+# Approved public documents may name the private instance with one exact phrase
+# per language. Any other legacy-term occurrence in these files, and every
+# occurrence in any other path, still fails the gate.
+PUBLIC_DOC_PATHS = frozenset({
+    'README.md', 'README.zh-CN.md',
+    'ARCHITECTURE.md', 'ARCHITECTURE.zh-CN.md',
+    'ROADMAP.md', 'ROADMAP.zh-CN.md',
+})
 # Built from parts so this gate's own source does not match the legacy terms.
-PUBLIC_LEGACY_PHRASES = ('千' + '岁' + '（Chi' + 'tose' + '）',)
+PUBLIC_LEGACY_PHRASES = (
+    '千' + '岁' + '（Chi' + 'tose' + '）',
+    'Chi' + 'tose' + ' (' + '千' + '岁' + ')',
+)
 
 def git(*args):
     return subprocess.check_output(['git', '--no-optional-locks', '-C', str(ROOT), *args])

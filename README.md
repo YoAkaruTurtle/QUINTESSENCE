@@ -1,105 +1,125 @@
-# QUINTESSENCE
+<h1 align="center">QUINTESSENCE</h1>
 
-**Persistent Cognitive System · 持久认知系统**
+<p align="center"><strong>Persistent Cognitive System (PCS)</strong></p>
 
-让经历留下，让认识可以修正，让变化能够延续。
+<p align="center"><em>Preserve · Participate · Change</em></p>
 
-QUINTESSENCE 是一个研究与工程项目：探索如何让 AI 在一次次交互之间维护持续的认知状态，使过去的经历参与后来的理解、判断与发展。它将持久状态、证据来源和认识更新组织在模型之外，由可替换的语言模型参与推理。
+<p align="center">
+  <img alt="PCS: Research" src="https://img.shields.io/badge/PCS-Research-8B1E24?style=flat-square&amp;labelColor=181818">
+  <img alt="Status: Early Research" src="https://img.shields.io/badge/Status-Early%20Research-555555?style=flat-square&amp;labelColor=181818">
+  <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache--2.0-8B1E24?style=flat-square&amp;labelColor=181818">
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/Python-3.12%2B-555555?style=flat-square&amp;labelColor=181818">
+  <img alt="Windows Tested" src="https://img.shields.io/badge/Windows-Tested-555555?style=flat-square&amp;labelColor=181818">
+</p>
 
-> 早期研究阶段。状态核对至 **2026-10-21**：认知底座与受控纠正链已有实现和真实模型运行记录；统一 LLM–PCS 协作层设计已批准、待实施；正式实验的人工评价仍待完成。
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-[系统架构](ARCHITECTURE.md) · [演进路线](ROADMAP.md)
+<p align="center">
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-## 为什么做这件事
+---
 
-一次对话可以表现得很聪明，但对话结束之后，发生过的事情如何成为下一次理解的依据？当新证据推翻旧判断，系统能否保留纠正的来由，并在未来使用适当版本的认识？进一步，经历能否逐渐形成持续关注、尚未解决的问题与稳定而可发展的个体特征？
+QUINTESSENCE is an open-source research and engineering project exploring how AI systems can preserve, revise, and develop cognitive state across interactions — beyond the lifespan of any single language-model call. It keeps persistent state, evidence provenance, and belief revision outside the model, while a replaceable language model participates in inference.
 
-QUINTESSENCE 从这些问题出发。我们研究的连续性包括三个环节：
+A Persistent Cognitive System keeps experiences, current beliefs, provenance, versions, and unfinished work across calls, and treats model output as a candidate subject to domain rules rather than as directly authoritative state. This differs from a conventional LLM memory layer, which mainly stores and retrieves text for prompts: PCS adds explicit evidence relationships, scoped beliefs, versioned retraction and replacement, formal Context assembly, and commit and audit boundaries. Retrieval is one part; the system also governs whether a proposed belief may become persistent state.
 
-- **留下**：经历和认识在调用结束后仍然存在，带有来源、时间与版本。
-- **参与**：与当前问题有关、仍然有效且获准使用的状态进入推理上下文。
-- **改变**：新证据能够纠正已有认识；这些变化是否进一步影响新情境中的行为，需要单独验证。
+> **Early research stage. The GitHub repository is public.** Status checked 2026-10-21. The M1–M6 phases (migration, licensing, formal mainline, and Public repository) are complete. The cognitive substrate and the controlled revision chain have implementations and real-model run records. The unified LLM–PCS collaboration layer is not implemented. Design approved; implementation pending. Human evaluation of the formal experiment is still pending.
 
-长期目标是发展具有身份连续性、记忆、认知、评价与运行节律的系统。当前工作从可验证的认识更新开始，尚未实现完整的持续自主认知。
+## Why this matters
 
-## 已经走到哪里
+A single conversation can look intelligent, but what happens after it ends? Can what happened become evidence for the next understanding? When new evidence overturns an earlier judgment, can the system retain the reason for the revision and later use the appropriate version? Further, can experience gradually form persistent questions, unresolved problems, and stable but evolving individual characteristics?
 
-| 能力 | 当前状态 | 范围 |
+QUINTESSENCE studies continuity through three stages:
+
+- **Preserve**: experiences and beliefs survive the end of a call, with provenance, time, and version.
+- **Participate**: state that is relevant, still valid, and permitted enters the inference context.
+- **Change**: new evidence can revise existing beliefs. Whether those revisions later change behavior in new situations must be tested separately.
+
+The long-term goal is a system with identity continuity, memory, cognition, evaluation, and operational rhythm. Current work starts from verifiable belief revision; full autonomous persistent cognition is not yet implemented.
+
+## Where the project stands
+
+| Capability | Current status | Scope |
 |---|---|---|
-| 持久状态与来源追踪 | 已实现基础 | 事件、记录版本、证据关联与受控状态更新 |
-| Belief 与正式 Context | 已实现基础 | 带范围的认识、撤回与替代、供模型使用的规范上下文 |
-| 模型参与认识纠正 | 已有真实运行记录 | 受控案例中的候选、校验反馈和持久修订；成功率与行为效果仍有限 |
-| 统一咨询与认知复查 | 设计已批准，待实施 | 将既有能力组织为应用可复用的 LLM–PCS 协作层 |
-| Cognitive Workbench V0.2 | 实验原型 | 独立 Demo，使用专用交互编排；不是核心包已交付的标准聊天界面 |
-| Knowledge、Question / Focus、情境人格反馈 | 规划中 | 逐步接入统一状态与协作路径 |
-| Affect、Load & Recovery、长期发展 | 研究方向 | 尚未形成完整工程能力 |
+| Persistent state and provenance | Implemented foundation | Events, record versions, evidence links, and controlled state updates |
+| Belief and formal Context | Implemented foundation | Scoped beliefs, retraction and supersession, and canonical model-facing context |
+| Model participation in belief revision | Real-run records exist | Candidate, validation feedback, and persistent revision in controlled cases; success rate and behavioral effect remain limited |
+| Unified consult and cognitive review | Design approved, not implemented | Organize existing capabilities into a reusable LLM–PCS collaboration layer |
+| Cognitive Workbench V0.2 | Experimental prototype | Standalone demo with bespoke orchestration; not the delivered standard chat interface of the core package |
+| Knowledge, Question / Focus, contextual persona feedback | Planned | To be integrated with unified state and the collaboration path |
+| Affect, Load & Recovery, long-term development | Research direction | No complete engineering capability yet |
 
-### 一个具体例子：修正“这个工具不能用”的认识
+### A concrete example: revising “this tool does not work”
 
-在合成场景中，一个工具处理某类路径时失败。系统保存的是带证据和范围的判断。后来出现新证据：失败与权限有关，指定条件下的复测已经成功。
+In a synthetic scenario, a tool fails on a class of paths. The system stores a judgment with evidence and scope. Later evidence appears: the failure was permission-related, and a retest under specified conditions succeeded.
 
-纠正过程中，模型提出候选，PCS 检查操作和证据是否符合规则；旧判断被撤回后，系统装配新的 Context，再形成范围更准确的替代认识。版本历史保留这次变化的来由。第二步若失败或选择等待，系统不会假装替代认识已经建立。
+During revision, the model proposes a candidate; PCS checks whether the operation and evidence satisfy the rules. After the old judgment is retracted, the system assembles a new Context and forms a replacement belief with a narrower scope. Version history retains why the change happened. If the second step fails or waits, the system does not pretend that the replacement belief has been established.
 
-**当前成果是这条持久纠正链已经落地并实际运行过。** 它还不足以证明，修正后的认识能在任意新情境中稳定产生更好的建议。
+**The persistent revision chain is implemented and has actually run.** It is not yet proof that a revised belief will reliably produce better advice in arbitrary new situations.
 
-### 我们怎样判断进展
+### How progress is judged
 
-工程测试检查状态更新、版本、校验和恢复等机制；真实模型实验检查模型是否能触发并正确使用这些机制。两种证据分别报告。
+Engineering tests check state updates, versions, validation, and recovery mechanisms. Real-model experiments check whether the model can trigger and correctly use those mechanisms. The two kinds of evidence are reported separately.
 
-010 的工程工作已关闭。正式 EXP-01 v4 共六次运行，其中一次完整走过认识形成、纠正与后续 Advice 阶段，三次未触发有效初始操作，两次在纠正阶段产生无效操作；人工盲评与最终研究结论仍待完成。此前五轮探索属于另一批次，不与 v4 合并统计。
+The PCS2-010 engineering work is closed. The formal EXP-01 v4 study ran six times: one run completed belief formation, revision, and the later Advice stage; three did not trigger a valid initial operation; two produced invalid operations during revision. Human blind review and final research conclusions remain pending. The earlier five exploratory rounds are a different batch and are not pooled with v4.
 
-当前正式主线的工程验收记录包括 **509 项回归测试通过，以及 wheel / sdist 构建通过**。这说明该主线通过了对应工程检查，并不等于已经证明稳定的认知迁移效果。
+The current mainline's engineering acceptance record includes **509 regression tests passing and successful wheel / sdist builds**. This shows that the mainline passes the corresponding engineering checks; it does not prove stable cognitive transfer.
 
-## 系统怎样组织
+## How the system is organized
 
-**PCS 持有认知状态，模型参与推理，宿主负责实际执行。**
+**PCS holds cognitive state; the model participates in inference; the host performs execution.**
 
-| 部分 | 职责 |
+| Part | Responsibility |
 |---|---|
-| QUINTESSENCE / PCS | 保存与修正认识，管理来源、版本及正式上下文 |
-| 语言模型 | 根据提供的材料回答或提出候选；模型输出需经规则处理才能成为持久认识 |
-| 宿主与应用 | 提供交互、授权和工具执行环境；通过集成接口使用 PCS |
-| 私有实例 | 保存具体个体的人格配置、记忆与持续状态；与通用源码分离 |
+| QUINTESSENCE / PCS | Preserve and revise beliefs; manage provenance, versions, and formal context |
+| Language model | Answer or propose candidates from the supplied material; model output must pass rule processing before becoming persistent belief |
+| Host and application | Provide interaction, authorization, and tool-execution environments; consume PCS through an integration interface |
+| Private instance | Store an individual's persona configuration, memories, and persistent state; kept separate from the general source code |
 
-千岁（Chitose）是该研究中的一个私有实例。公开项目提供通用机制，不附带她的私人经历或人格资产。DSH 等宿主是未来的集成对象，尚未集成，也不是 QUINTESSENCE 的全部实现或核心运行依赖。
+Chitose (千岁) is a private instance in this research. The public project provides general mechanisms and does not include her private experiences or persona assets. Hosts such as DSH are future integration targets; they are not yet integrated and are neither the whole of QUINTESSENCE nor a core runtime dependency.
 
-架构中的五项概念能力为 Persona、Memory、Cognition、Affect、Load & Recovery。它们描述长期职责，并不代表已有五个成熟服务。详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+The five conceptual capabilities in the architecture are Persona, Memory, Cognition, Affect, and Load & Recovery. They describe long-term responsibilities; they do not imply five mature services. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 获取与运行
+## Getting started
 
-当前已完成迁移、许可证落地和正式开发主线切换；尚无经本文确认的公开发行包或安装入口。本稿不提供未经验证的安装命令，也不将独立 Workbench Demo 当作核心包默认功能。
+The GitHub repository is public. There is no confirmed public release package or installation entry point yet. This document does not provide unverified installation commands, and the standalone Workbench demo is not the core package's default feature.
 
-### 源码树开发检查（Windows / Python 3.12）
+### Source-tree checks (Windows / Python 3.12)
 
-需要 Python 3.12+。当前验证环境为 Windows；Linux 尚未验证。在仓库根目录运行：
+Python 3.12+ is required. The current verification environment is Windows; Linux has not been verified. From the repository root:
 
 ```powershell
 python tools/run_tests.py
 python tools/check_repository.py
 ```
 
-`run_tests.py` 使用合成数据与本地回环假 provider，把测试输出写到仓库外的临时目录；`check_repository.py` 检查路径白名单、敏感模式与可达 Git 历史。当前没有经确认的安装入口或命令行入口，以上命令只用于源码树开发检查。
+`run_tests.py` uses synthetic data and a loopback fake provider, and writes test output to a temporary directory outside the checkout. `check_repository.py` checks the path allowlist, sensitive patterns, and reachable Git history. There is no confirmed installation or command-line entry point; these commands are only for source-tree development checks.
 
-发布时将补齐对应版本的安装方式、依赖和合成示例。Linux 验证仍待后续进行；现有工程验收不能扩展为跨平台支持承诺。
+Release packaging will add versioned installation instructions, dependencies, and synthetic examples. Linux verification remains future work; current engineering acceptance does not extend to a cross-platform support claim.
 
-## 下一步
+## Next step
 
-下一项基础工作是**统一 LLM–PCS 协作层**：将咨询、查询、认识复查、候选确认及结果恢复连接到同一套正式机制。随后推进 Knowledge、Question / Focus、Persona 情境反馈与宿主集成。
+The next foundation is the **unified LLM–PCS collaboration layer**: connect consultation, query, belief review, candidate confirmation, and result recovery to one formal mechanism. Knowledge, Question / Focus, persona-context feedback, and host integration follow.
 
-其中一个关键验证是：纠正认识后关闭进程、清空聊天缓存，再提出相关问题，系统是否仍能从持久状态取得正确版本，并合理处理新的适用条件。详见 [ROADMAP.md](ROADMAP.md)。
+One key validation: after revising a belief, close the process, clear the chat cache, and ask a related question. Can the system still retrieve the correct version from persistent state and handle new applicability conditions appropriately? See [ROADMAP.md](ROADMAP.md).
 
-## 开发与贡献
+## Development and contributions
 
-本项目由个人主导，使用 **AI 辅助编写代码、测试和文档**；项目方向、重要取舍与交付由维护者负责，AI 产出接受相应的审查和验证。AI 辅助贡献也应披露使用情况并遵循项目贡献规则。
+The project is independently maintained and uses **AI-assisted code, tests, and documentation**; the maintainer owns direction, trade-offs, and delivery, and AI output is reviewed and verified. AI-assisted contributions should disclose their use and follow the project's contribution rules.
 
-通用 PCS 的后续开发以本仓库为唯一权威源码主线；旧研究仓库、实验 worktree 与封存材料仅保留为历史与研究来源，不作为通用 PCS 的代码权威。
+Future development of the general PCS uses this repository as the sole authoritative source mainline. The legacy research repository, experiment worktrees, and sealed materials are preserved as historical and research sources only; they are not the code authority for the general PCS.
 
-欢迎围绕具体问题、最小复现、合成测试和明确的能力缺口参与改进。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。请勿提交私人对话、实例数据库、人格档案、密钥或其他敏感数据。维护边界见 [MIGRATION-BOUNDARY.md](docs/development/MIGRATION-BOUNDARY.md)。
+Contributions are welcome around concrete problems, minimal reproductions, synthetic tests, and well-defined capability gaps. See [CONTRIBUTING.md](CONTRIBUTING.md). Do not submit private conversations, instance databases, persona profiles, keys, or other sensitive data. See [MIGRATION-BOUNDARY.md](docs/development/MIGRATION-BOUNDARY.md) for the maintenance boundary.
 
-## 许可与数据
+## License and data
 
-QUINTESSENCE 通用自研代码采用 **Apache License 2.0**，参见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。如未来纳入宿主适配代码，将按来源与许可范围处理；不将完整 DSH 上游仓库作为本项目自研代码发布。
+General first-party QUINTESSENCE code is licensed under the **Apache License 2.0**; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Any future host-adapter code will be handled according to its source and license; the full DSH upstream repository is not published as first-party code here.
 
 Copyright 2026 Linguist.
 
-私人记忆、认知轨迹、人格配置、个性化训练数据和权重不属于默认开源范围。开放通用机制，让具体个体的积累由其持有者控制。
+Private memories, cognitive traces, persona configuration, personalized training data, and weights are not part of the default open-source scope. The project opens general mechanisms so that each individual's accumulated state remains under its holder's control.

@@ -1,10 +1,11 @@
 # Maintenance boundary
 
 This repository is the designated authoritative development mainline for the
-general PCS. It is not an approved Public release; Public publication remains a
-separate acceptance step. Public documentation (README, ARCHITECTURE, ROADMAP)
-is present; licensing is recorded in `LICENSE` and `NOTICE`. The local `main`
-branch tracks the private GitHub remote `origin`.
+general PCS. The GitHub repository is public. A formal release package remains a
+separate acceptance step; no versioned release is published yet. Public
+documentation (README, ARCHITECTURE, ROADMAP) is present in English and
+Simplified Chinese; licensing is recorded in `LICENSE` and `NOTICE`. The local
+`main` branch tracks the public GitHub remote `origin`.
 
 Canonical checkout for new general-PCS work: `E:\QUINTESSENCE`. Canonical
 remote: `origin` (`https://github.com/YoAkaruTurtle/QUINTESSENCE`). New task
