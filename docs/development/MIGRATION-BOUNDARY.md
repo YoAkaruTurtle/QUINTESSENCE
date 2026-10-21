@@ -1,9 +1,10 @@
 # Candidate maintenance boundary
 
 This local candidate is not yet the designated development mainline or an
-approved release. Mainline switch and publication remain separate acceptance
-steps. Public documentation (README, ARCHITECTURE, ROADMAP) is present;
-licensing is recorded in `LICENSE` and `NOTICE`. No remote is configured.
+approved release. Mainline switch and Public publication remain separate
+acceptance steps. Public documentation (README, ARCHITECTURE, ROADMAP) is
+present; licensing is recorded in `LICENSE` and `NOTICE`. The local `main`
+branch tracks the private GitHub remote `origin`.
 
 The import namespace is `quintessence_pcs`; no legacy import alias is supplied.
 Protocol `pcs.v2`, baseline identity `PCS-2026-10-17-r3`, SQL migration names,
@@ -24,10 +25,13 @@ sandbox. The public Store APIs still accept explicit paths; application owners
 must choose an external database location. No implicit database path is added.
 
 `python tools/check_repository.py` checks approved file paths, the index and
-all reachable history. Update `tools/source-files.json` only after reviewing
-new code paths. Ignore rules do not authorize adding private data and do not
-remove data from prior commits. Human privacy and license review are still
-required before any upload. If data enters history, stop upload and report it.
+all reachable history. Its `--pre-upload` mode additionally requires that no
+remote is configured; the default mode also works after the private remote
+exists. Update `tools/source-files.json` only after reviewing new code paths.
+Ignore rules do not authorize adding private data and do not remove data from
+prior commits. Human privacy and license review were completed before the
+private upload; repeat them before any public release. If data enters history,
+stop and report it.
 
 SQL migrations are packaged once under `resources/migrations` and remain
 byte-identical to the source baseline. The Path API supports unpacked wheel

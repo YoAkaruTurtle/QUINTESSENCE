@@ -1,5 +1,9 @@
 """Fail closed on unexpected files, unsafe payloads and reachable Git history.
 
+The default mode is safe to run after a remote exists.  ``--pre-upload``
+additionally requires that no remote is configured; it is for the pre-upload
+audit only.
+
 This structural/secret-pattern gate supplements human content and rights review.
 It cannot certify the absence of every possible secret or copyrighted passage.
 """
@@ -49,6 +53,7 @@ def inspect_content(path, data):
     return errors
 
 def main():
+    pre_upload = '--pre-upload' in sys.argv[1:]
     allowed = set(json.loads((ROOT / 'tools/source-files.json').read_text(encoding='utf-8')))
     files = git('ls-files', '--cached', '--others', '--exclude-standard', '-z').decode().split('\0')
     files = {p for p in files if p}
@@ -79,8 +84,10 @@ def main():
                 blobs.add(blob)
                 errors.extend(inspect_content(path + ' (history)', git('cat-file', 'blob', blob)))
     if (ROOT / '.git/objects/info/alternates').exists(): errors.append('alternate object stores forbidden')
-    if git('remote').strip(): errors.append('candidate must have no remote before upload authorization')
-    print(json.dumps({'files': len(files), 'commits': len(commits), 'history_blobs': len(blobs),
+    if pre_upload and git('remote').strip():
+        errors.append('pre-upload: candidate must have no remote before upload authorization')
+    print(json.dumps({'mode': 'pre-upload' if pre_upload else 'default',
+                      'files': len(files), 'commits': len(commits), 'history_blobs': len(blobs),
                       'passed': not errors, 'errors': errors}, ensure_ascii=False, indent=2))
     return bool(errors)
 
