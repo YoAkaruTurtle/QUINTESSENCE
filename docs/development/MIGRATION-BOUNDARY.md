@@ -1,10 +1,20 @@
-# Candidate maintenance boundary
+# Maintenance boundary
 
-This local candidate is not yet the designated development mainline or an
-approved release. Mainline switch and Public publication remain separate
-acceptance steps. Public documentation (README, ARCHITECTURE, ROADMAP) is
-present; licensing is recorded in `LICENSE` and `NOTICE`. The local `main`
+This repository is the designated authoritative development mainline for the
+general PCS. It is not an approved Public release; Public publication remains a
+separate acceptance step. Public documentation (README, ARCHITECTURE, ROADMAP)
+is present; licensing is recorded in `LICENSE` and `NOTICE`. The local `main`
 branch tracks the private GitHub remote `origin`.
+
+Canonical checkout for new general-PCS work: `E:\QUINTESSENCE`. Canonical
+remote: `origin` (`https://github.com/YoAkaruTurtle/QUINTESSENCE`). New task
+cards should cite the commit they start from.
+
+The legacy research repository, its experiment worktrees and sealed experiment
+materials are preserved separately as historical and research sources. They are
+not the authoritative source for general PCS code, and this repository does not
+absorb their private data, databases or model assets. Future P0 and PCS2-011
+work targets this checkout.
 
 The import namespace is `quintessence_pcs`; no legacy import alias is supplied.
 Protocol `pcs.v2`, baseline identity `PCS-2026-10-17-r3`, SQL migration names,
