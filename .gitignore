@@ -1,4 +1,5 @@
 # Instance data and secrets are never source assets.
+# Ignore rules control Git tracking only; they are not a security boundary.
 .env
 .env.*
 !.env.example
@@ -37,3 +38,26 @@ dist/
 *.tar.gz
 test-results/
 *.tmp
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+*.bak
+
+# Notebook and array dumps
+.ipynb_checkpoints/
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.h5
+*.onnx
+*.ckpt

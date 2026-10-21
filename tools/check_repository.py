@@ -29,12 +29,23 @@ PUBLIC_LEGACY_PHRASES = (
     'Chi' + 'tose' + ' (' + '千' + '岁' + ')',
 )
 
+# Exact public brand asset allowed to be binary. Every other binary file fails.
+APPROVED_BINARY_PATHS = frozenset({'assets/quintessence-banner.png'})
+
+# Absolute-path style rules were introduced after this public commit. Commits
+# reachable from this boundary are exempt from the new style rules only; they
+# are still scanned for secrets. Every later commit is treated as new content.
+HISTORICAL_BASELINE = '246d87458b548021b762f1c349cdccab05c696f5'
+
 def git(*args):
     return subprocess.check_output(['git', '--no-optional-locks', '-C', str(ROOT), *args])
 
-def inspect_content(path, data):
+def inspect_content(path, data, *, historical=False):
     errors = []
     if b'\0' in data:
+        base = path.split(' (', 1)[0]
+        if base in APPROVED_BINARY_PATHS and data.startswith(b'\x89PNG\r\n\x1a\n'):
+            return []
         return [f'{path}: binary data is not permitted']
     try:
         text = data.decode('utf-8')
@@ -45,6 +56,15 @@ def inspect_content(path, data):
         r'-----BEGIN ' + r'(?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
         r'(?i)[A-Z]:[/\\]+Users[/\\]+[^/\\\s]+',
     ]
+    # An absolute location identifies one machine, so it never belongs in
+    # source. Drive X: is reserved for the synthetic long-path fixtures.
+    # Immutable pre-baseline history is exempt; the worktree, the index, and
+    # every post-baseline commit are checked with the rule active.
+    if not historical:
+        secret_patterns += [
+            r'(?i)(?<![A-Za-z0-9_])' + r'(?![Xx]:)[A-Z]:[/\\]',
+            r'(?:^|[\s"\'`(=:,\[{])' + r'/(?:home|Users|root)/',
+        ]
     legacy_patterns = [
         r'(?i)' + 'chi' + 'tose',
         '千' + '岁',
@@ -78,17 +98,28 @@ def main():
         if mode != '100644' or stage != '0': errors.append(f'{path}: unsupported index entry')
         errors.extend(inspect_content(path + ' (index)', git('cat-file', 'blob', blob)))
     commits = git('rev-list', '--all').decode().splitlines()
+    baseline_commits = set(git('rev-list', HISTORICAL_BASELINE).decode().splitlines())
     blobs = set()
+    checked_strict = set()
+    checked_historical = set()
     for commit in commits:
-        errors.extend(inspect_content('commit metadata', git('cat-file', 'commit', commit)))
+        historical = commit in baseline_commits
+        errors.extend(inspect_content('commit metadata', git('cat-file', 'commit', commit), historical=historical))
         for entry in git('ls-tree', '-r', '-z', commit).split(b'\0'):
             if not entry: continue
             meta, raw_path = entry.split(b'\t'); mode, kind, blob = meta.decode().split()
             path = raw_path.decode()
             if path not in allowed or mode != '100644' or kind != 'blob':
                 errors.append(f'{commit}: unsafe historical path or mode: {path}')
-            if blob not in blobs:
-                blobs.add(blob)
+            blobs.add(blob)
+            # A new commit may reuse an old blob. Scan it strictly if it has
+            # not already been checked as post-baseline content.
+            if historical:
+                if blob not in checked_historical and blob not in checked_strict:
+                    checked_historical.add(blob)
+                    errors.extend(inspect_content(path + ' (history)', git('cat-file', 'blob', blob), historical=True))
+            elif blob not in checked_strict:
+                checked_strict.add(blob)
                 errors.extend(inspect_content(path + ' (history)', git('cat-file', 'blob', blob)))
     if (ROOT / '.git/objects/info/alternates').exists(): errors.append('alternate object stores forbidden')
     if pre_upload and git('remote').strip():
