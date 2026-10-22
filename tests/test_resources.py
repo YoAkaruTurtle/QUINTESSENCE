@@ -14,7 +14,7 @@ class ResourceTests(unittest.TestCase):
     def test_sql_resources_are_contiguous_and_exact(self):
         self.assertEqual('pcs.v2', PROTOCOL_VERSION)
         migrations = discover_migrations()
-        self.assertEqual(list(range(1, 8)), [m.version for m in migrations])
+        self.assertEqual(list(range(1, 9)), [m.version for m in migrations])
         for migration in migrations:
             self.assertEqual(hashlib.sha256(migration.path.read_bytes()).hexdigest(), migration.checksum)
             self.assertEqual('migrations', migration.path.parent.name)
@@ -29,7 +29,7 @@ class ResourceTests(unittest.TestCase):
             again = RecordStore.open(path)
             try:
                 self.assertEqual(ledger, [tuple(r) for r in again.connection.execute('SELECT migration_id,name,checksum FROM schema_migrations ORDER BY migration_id')])
-                self.assertEqual(7, len(ledger))
+                self.assertEqual(8, len(ledger))
             finally:
                 again.close()
 

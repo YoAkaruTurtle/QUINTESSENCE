@@ -54,6 +54,17 @@ class WorkAlreadyCompleted(StorageError):
     code = "ID_CONFLICT"
 
 
+class ConsultContextNotCommittable(StorageError):
+    """A consult Context reached ``commit_command``.
+
+    A consult Context is a read/answer basis, not a review work basis: it has
+    no work generation and no candidate, so committing a domain command on it
+    is an invalid transition rather than a stale Context.
+    """
+
+    code = "INVALID_TRANSITION"
+
+
 class InvalidWorkCompletion(StorageError):
     """``TxScope.complete_work`` was used in a state where it cannot be true.
 
@@ -66,6 +77,7 @@ class InvalidWorkCompletion(StorageError):
 
 
 __all__ = [
+    "ConsultContextNotCommittable",
     "ContextTooLarge",
     "InvalidWorkCompletion",
     "NeedsContext",

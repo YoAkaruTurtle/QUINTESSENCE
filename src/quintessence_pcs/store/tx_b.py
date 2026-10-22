@@ -47,14 +47,15 @@ from ..foundation.errors import (
 )
 from ..foundation.jsonutil import canonical_json_text, sha256_hex, strict_json_loads
 from ..foundation.timeutil import utc_now_rfc3339
-from .errors import InvalidWorkCompletion
+from .errors import ConsultContextNotCommittable, InvalidWorkCompletion
 
 OUTCOME_COMMITTED = "committed"
 OUTCOME_NOOP = "noop"
 COMMIT_OUTCOMES = (OUTCOME_COMMITTED, OUTCOME_NOOP)
 
 _SNAPSHOT_COLUMNS = (
-    "context_id, namespace, state_revision, context_event_seq, privacy_epoch, created_at"
+    "context_id, namespace, context_kind, state_revision, context_event_seq, "
+    "privacy_epoch, created_at"
 )
 _RECEIPT_KEYS = frozenset(
     {
@@ -80,6 +81,7 @@ class Snapshot:
     context_event_seq: int
     privacy_epoch: int
     created_at: str
+    context_kind: str = "review"
 
 
 @dataclass(frozen=True)
@@ -374,6 +376,10 @@ class TxBMixin:
                     f"snapshot {context_id} belongs to namespace "
                     f"{snapshot.namespace!r}, not {expected_namespace!r}"
                 )
+            if snapshot.context_kind == "consult":
+                raise ConsultContextNotCommittable(
+                    f"context {context_id} is a consult Context; it has no commit basis"
+                )
             ns = snapshot.namespace
             digest = _request_digest(ns, operation, context_id, payload)
 
@@ -472,6 +478,7 @@ class TxBMixin:
             context_event_seq=int(row["context_event_seq"]),
             privacy_epoch=int(row["privacy_epoch"]),
             created_at=row["created_at"],
+            context_kind=row["context_kind"],
         )
 
     def _load_command_locked(self, namespace: str, request_id: str) -> sqlite3.Row | None:

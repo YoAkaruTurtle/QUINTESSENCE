@@ -551,6 +551,7 @@ class ContextService:
     def load_context(self, context_id: str) -> ContextEnvelope:
         """Read one persisted Context back and re-verify its rendered input."""
 
+        self._store.require_context_deliverable(context_id)
         snapshot = self._store.load_context_snapshot(context_id)
         return self._envelope_from_snapshot(snapshot)
 

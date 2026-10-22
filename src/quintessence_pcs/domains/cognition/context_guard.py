@@ -90,6 +90,13 @@ def require_live_context(
                     "a context record source points at a missing record version"
                 ) from exc
 
+    if store.collab_context_sources_barred(
+        namespace=namespace, context_id=context_id
+    ):
+        raise ContextStale(
+            "a collaboration source this context used has been deleted"
+        )
+
     for item in snapshot.pending_source_event_refs:
         ref = EventRef.from_value(item, field="pending_source_event_refs[]")
         if ref.namespace != namespace:

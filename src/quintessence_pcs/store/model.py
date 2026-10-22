@@ -819,11 +819,21 @@ class ModelLedgerMixin:
             raise InvalidInput("kind must be 'request' or 'response'")
         row = self._require_connection().execute(
             "SELECT request_payload_ref, request_hash, response_payload_ref, "
-            "response_hash, status FROM model_attempts WHERE attempt_id = ?",
+            "response_hash, status, namespace, context_id "
+            "FROM model_attempts WHERE attempt_id = ?",
             (aid,),
         ).fetchone()
         if row is None:
             raise ModelAttemptNotFound(f"no model attempt {aid!r}")
+        # C05b: the Context's barrier is a read barrier for attempt payloads
+        # too.  A stopped source must make the request/response unreadable
+        # before cleanup has had a chance to run.
+        if self.context_barred(
+            namespace=row["namespace"], context_id=row["context_id"]
+        ):
+            raise Redacted(
+                f"the {kind} body of model attempt {aid} belongs to a barred Context"
+            )
         if kind == "request":
             payload_ref = row["request_payload_ref"]
             expected_hash = row["request_hash"]
@@ -884,17 +894,23 @@ class ModelLedgerMixin:
         return cleared + self._clear_model_attempt_payloads_locked(target)
 
     def _clear_model_attempt_payloads_locked(self, target: DeletionTarget) -> int:
-        if target.target_kind == DELETION_RECORD:
-            ref_kind = "record"
-        elif target.target_kind == DELETION_EVENT:
-            ref_kind = "event"
-        else:  # pragma: no cover - deletion layer validates the kind
-            return 0
-        context_ids = self.context_ids_for_source(
+        context_ids: list[str] = []
+        if target.target_kind in (DELETION_RECORD, DELETION_EVENT):
+            context_ids.extend(
+                self.context_ids_for_source(
+                    namespace=target.namespace,
+                    ref_kind=target.target_kind,
+                    ref_id=target.target_id,
+                )
+            )
+        for context_id in self.context_ids_for_collab_source(
             namespace=target.namespace,
-            ref_kind=ref_kind,
+            ref_kind=target.target_kind,
             ref_id=target.target_id,
-        )
+            ref_version=target.target_version,
+        ):
+            if context_id not in context_ids:
+                context_ids.append(context_id)
         if not context_ids:
             return 0
 

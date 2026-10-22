@@ -45,20 +45,38 @@ DELETION_CLEANED = "cleaned"
 DELETION_STATUSES = (DELETION_PENDING_CLEANUP, DELETION_CLEANED)
 DELETION_RECORD = "record"
 DELETION_EVENT = "event"
+DELETION_COLLAB_INPUT = "collab_input"
+DELETION_COLLAB_ARTIFACT = "collab_artifact"
+#: The public request_deletion shape stays exactly ('record', 'event').
 DELETION_TARGET_KINDS = (DELETION_RECORD, DELETION_EVENT)
+#: Internal barriers also cover collaboration rows; only delete_experience
+#: (C05b) may write these kinds.
+INTERNAL_DELETION_TARGET_KINDS = (
+    DELETION_RECORD,
+    DELETION_EVENT,
+    DELETION_COLLAB_INPUT,
+    DELETION_COLLAB_ARTIFACT,
+)
 
 AUTHORIZATION_REF_MAX_LENGTH = 512
 LAST_ERROR_MAX_LENGTH = 1024
 
 _TARGET_COLUMNS = (
-    "target_kind, namespace, target_id, status, authorization_ref, "
-    "created_at, updated_at, last_error"
+    "target_kind, namespace, target_id, target_version, status, "
+    "authorization_ref, created_at, updated_at, last_error"
 )
 
 
 @dataclass(frozen=True)
 class DeletionTarget:
-    """One durable deletion barrier row."""
+    """One durable deletion barrier row.
+
+    ``target_version`` is 0 for whole-object record/event deletion and the
+    exact artifact/input version for a collaboration target.  The same
+    ``(kind, id, version)`` identity is used by barrier, cleanup, retry and the
+    reverse lookup; only the record/event *matching* rule deliberately ignores
+    the version (see the C05b addendum).
+    """
 
     target_kind: str
     namespace: str
@@ -68,6 +86,7 @@ class DeletionTarget:
     created_at: str
     updated_at: str
     last_error: str | None
+    target_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,13 +216,8 @@ class DeletionMixin:
         authorization = _require_authorization_ref(authorization_ref)
 
         with self.transaction():
-            existing = self._load_target_locked(ns, kind, target)
-            if existing is not None:
-                return _target_from_row(existing)
-
-            connection = self._require_connection()
             if kind == DELETION_RECORD:
-                exists = connection.execute(
+                exists = self._require_connection().execute(
                     "SELECT 1 FROM records WHERE namespace = ? AND record_id = ?",
                     (ns, target),
                 ).fetchone()
@@ -212,7 +226,7 @@ class DeletionMixin:
                         f"record {target} does not exist in namespace {ns!r}"
                     )
             else:
-                exists = connection.execute(
+                exists = self._require_connection().execute(
                     "SELECT 1 FROM event_journal WHERE namespace = ? AND event_id = ?",
                     (ns, target),
                 ).fetchone()
@@ -220,57 +234,85 @@ class DeletionMixin:
                     raise EventNotFound(
                         f"event {target} does not exist in namespace {ns!r}"
                     )
-
-            now = utc_now_rfc3339()
-            connection.execute(
-                "INSERT INTO deletion_targets ("
-                "target_kind, namespace, target_id, status, authorization_ref, "
-                "created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    kind,
-                    ns,
-                    target,
-                    DELETION_PENDING_CLEANUP,
-                    authorization,
-                    now,
-                    now,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO namespace_state (namespace, state_revision, privacy_epoch) "
-                "VALUES (?, 1, 1) "
-                "ON CONFLICT(namespace) DO UPDATE SET "
-                "state_revision = namespace_state.state_revision + 1, "
-                "privacy_epoch = namespace_state.privacy_epoch + 1",
-                (ns,),
-            )
-            # PCS2-008-R1 hook: a deleted event's still-unfinished work must
-            # reach a terminal state in this same transaction.  The default is
-            # a no-op, so PCS2-006/007 semantics are unchanged.  If the hook
-            # cannot write the terminal row, the barrier rolls back as a whole.
-            self._after_deletion_barrier_locked(
-                DeletionTarget(
-                    target_kind=kind,
-                    namespace=ns,
-                    target_id=target,
-                    status=DELETION_PENDING_CLEANUP,
-                    authorization_ref=authorization,
-                    created_at=now,
-                    updated_at=now,
-                    last_error=None,
-                )
-            )
-            return DeletionTarget(
-                target_kind=kind,
+            return self._commit_barrier_locked(
                 namespace=ns,
+                target_kind=kind,
                 target_id=target,
-                status=DELETION_PENDING_CLEANUP,
+                target_version=0,
                 authorization_ref=authorization,
-                created_at=now,
-                updated_at=now,
-                last_error=None,
             )
+
+    def _commit_barrier_locked(
+        self,
+        *,
+        namespace: str,
+        target_kind: str,
+        target_id: str,
+        target_version: int,
+        authorization_ref: str,
+    ) -> DeletionTarget:
+        """Insert one barrier row and advance both watermarks exactly once.
+
+        The caller owns the transaction.  A repeated request for the same
+        ``(namespace, kind, id, version)`` returns the existing row and moves
+        no watermark, which keeps barrier retries idempotent.
+        """
+
+        if self._tx_depth == 0:  # pragma: no cover - callers own the transaction
+            raise RuntimeError(
+                "_commit_barrier_locked must run inside the caller's transaction"
+            )
+        if target_kind not in INTERNAL_DELETION_TARGET_KINDS:
+            raise InvalidDeletionTarget(
+                f"target_kind must be one of {', '.join(INTERNAL_DELETION_TARGET_KINDS)}"
+            )
+        if type(target_version) is not int or target_version < 0:
+            raise InvalidInput("target_version must be a non-negative integer")
+        existing = self._load_target_locked(
+            namespace, target_kind, target_id, target_version
+        )
+        if existing is not None:
+            return _target_from_row(existing)
+
+        now = utc_now_rfc3339()
+        connection = self._require_connection()
+        connection.execute(
+            "INSERT INTO deletion_targets ("
+            "target_kind, namespace, target_id, target_version, status, "
+            "authorization_ref, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                target_kind,
+                namespace,
+                target_id,
+                target_version,
+                DELETION_PENDING_CLEANUP,
+                authorization_ref,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO namespace_state (namespace, state_revision, privacy_epoch) "
+            "VALUES (?, 1, 1) "
+            "ON CONFLICT(namespace) DO UPDATE SET "
+            "state_revision = namespace_state.state_revision + 1, "
+            "privacy_epoch = namespace_state.privacy_epoch + 1",
+            (namespace,),
+        )
+        target = DeletionTarget(
+            target_kind=target_kind,
+            namespace=namespace,
+            target_id=target_id,
+            target_version=target_version,
+            status=DELETION_PENDING_CLEANUP,
+            authorization_ref=authorization_ref,
+            created_at=now,
+            updated_at=now,
+            last_error=None,
+        )
+        self._after_deletion_barrier_locked(target)
+        return target
 
     # ---------------------------------------------------------------- cleanup
 
@@ -296,7 +338,7 @@ class DeletionMixin:
         if namespace is not None:
             sql += " AND namespace = ?"
             parameters.append(identifiers.require_namespace(namespace))
-        sql += " ORDER BY created_at, target_kind, target_id"
+        sql += " ORDER BY created_at, target_kind, target_id, target_version"
         if limit is not None:
             if type(limit) is not int or limit < 1:
                 raise InvalidInput("limit must be a positive integer or null")
@@ -408,13 +450,14 @@ class DeletionMixin:
         self._require_connection().execute(
             "UPDATE deletion_targets SET status = ?, updated_at = ?, last_error = NULL "
             "WHERE namespace = ? AND target_kind = ? AND target_id = ? "
-            "AND status = ?",
+            "AND target_version = ? AND status = ?",
             (
                 DELETION_CLEANED,
                 utc_now_rfc3339(),
                 target.namespace,
                 target.target_kind,
                 target.target_id,
+                target.target_version,
                 DELETION_PENDING_CLEANUP,
             ),
         )
@@ -445,13 +488,14 @@ class DeletionMixin:
         self._require_connection().execute(
             "UPDATE deletion_targets SET last_error = ?, updated_at = ? "
             "WHERE namespace = ? AND target_kind = ? AND target_id = ? "
-            "AND status = ?",
+            "AND target_version = ? AND status = ?",
             (
                 message,
                 utc_now_rfc3339(),
                 target.namespace,
                 target.target_kind,
                 target.target_id,
+                target.target_version,
                 DELETION_PENDING_CLEANUP,
             ),
         )
@@ -469,7 +513,7 @@ class DeletionMixin:
             target = identifiers.require_record_id(target_id)
         else:
             target = identifiers.require_event_id(target_id)
-        row = self._load_target_locked(ns, kind, target)
+        row = self._load_target_locked(ns, kind, target, 0)
         return None if row is None else _target_from_row(row)
 
     def deletion_targets(
@@ -492,7 +536,7 @@ class DeletionMixin:
             parameters.append(status)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY created_at, target_kind, target_id"
+        sql += " ORDER BY created_at, target_kind, target_id, target_version"
         rows = self._require_connection().execute(sql, tuple(parameters)).fetchall()
         return tuple(_target_from_row(row) for row in rows)
 
@@ -515,17 +559,25 @@ class DeletionMixin:
         return row is not None
 
     def _load_target_locked(
-        self, namespace: str, target_kind: str, target_id: str
+        self,
+        namespace: str,
+        target_kind: str,
+        target_id: str,
+        target_version: int,
     ) -> Any:
         return self._require_connection().execute(
             f"SELECT {_TARGET_COLUMNS} FROM deletion_targets "
-            "WHERE namespace = ? AND target_kind = ? AND target_id = ?",
-            (namespace, target_kind, target_id),
+            "WHERE namespace = ? AND target_kind = ? AND target_id = ? "
+            "AND target_version = ?",
+            (namespace, target_kind, target_id, target_version),
         ).fetchone()
 
     def _load_public_target(self, target: DeletionTarget) -> DeletionTarget:
         row = self._load_target_locked(
-            target.namespace, target.target_kind, target.target_id
+            target.namespace,
+            target.target_kind,
+            target.target_id,
+            target.target_version,
         )
         if row is None:  # pragma: no cover - rows are never deleted in this card
             raise CorruptStore("deletion target disappeared during cleanup")
@@ -569,6 +621,7 @@ def _target_from_row(row: Any) -> DeletionTarget:
         target_kind=row["target_kind"],
         namespace=row["namespace"],
         target_id=row["target_id"],
+        target_version=int(row["target_version"]),
         status=row["status"],
         authorization_ref=row["authorization_ref"],
         created_at=row["created_at"],
@@ -587,6 +640,7 @@ __all__ = [
     "DELETION_RECORD",
     "DELETION_STATUSES",
     "DELETION_TARGET_KINDS",
+    "INTERNAL_DELETION_TARGET_KINDS",
     "DeletionMixin",
     "DeletionTarget",
     "LAST_ERROR_MAX_LENGTH",

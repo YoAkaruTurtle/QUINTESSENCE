@@ -50,6 +50,7 @@ from ..foundation.jsonutil import (
     strict_json_loads,
 )
 from ..foundation.timeutil import utc_now_rfc3339
+from .collaboration import CollaborationMixin
 from .deletion import DELETION_EVENT, DELETION_RECORD, DeletionTarget
 from .domain import DomainStore
 from .errors import ContextTooLarge, NeedsContext, WorkAlreadyCompleted
@@ -91,7 +92,6 @@ CONTEXT_REF_KINDS = (CONTEXT_REF_KIND_EVENT, CONTEXT_REF_KIND_RECORD)
 #: leaves it NULL (C1/C3).
 _CONTEXT_REQUIRED_COLUMNS = (
     "run_id",
-    "trigger_ref_json",
     "profile_ref_json",
     "read_set_json",
     "memory_hits_json",
@@ -117,7 +117,7 @@ _CONTEXT_COLUMNS = (
     "unknown_execution_ids_json, permission_view_ref, budget_view_json, "
     "pending_source_event_refs_json, omissions_json, index_generation, "
     "index_coverage_json, content_hash, model_input_complete, "
-    "rendered_input_payload_ref, adapter_kind"
+    "rendered_input_payload_ref, adapter_kind, context_kind"
 )
 
 _SOURCE_COLUMNS = "context_id, ref_kind, ref_id, ref_version"
@@ -213,6 +213,7 @@ class ContextSnapshot:
     rendered_input: str
     created_at: str
     sources: tuple[ContextSource, ...] = ()
+    context_kind: str = "review"
 
 
 @dataclass(frozen=True)
@@ -283,7 +284,9 @@ class ContextStateMixin:
 
     # ---------------------------------------------------------------- insert
 
-    def insert_context_snapshot_locked(self, entry: ContextInsert) -> ContextSnapshot:
+    def insert_context_snapshot_locked(
+        self, entry: ContextInsert, *, context_kind: str = "review"
+    ) -> ContextSnapshot:
         """Persist one full Context; caller supplies the surrounding transaction.
 
         The snapshot row, its source rows and the controlled payload all commit
@@ -296,7 +299,22 @@ class ContextStateMixin:
             )
         ns = identifiers.require_namespace(entry.namespace)
         run_id = _require_bounded_text(entry.run_id, "run_id", 256)
-        trigger_ref = _require_plain_object(entry.trigger_ref, "trigger_ref")
+        if context_kind not in ("review", "consult"):
+            raise InvalidInput("context_kind must be 'review' or 'consult'")
+        raw_trigger = entry.trigger_ref
+        if raw_trigger is None or (
+            isinstance(raw_trigger, Mapping) and not raw_trigger
+        ):
+            trigger_ref = {}
+            trigger_json: str | None = None
+        else:
+            trigger_ref = _require_plain_object(raw_trigger, "trigger_ref")
+            trigger_json = canonical_json_text(trigger_ref)
+        if context_kind == "consult":
+            if trigger_json is not None:
+                raise InvalidInput("a consult Context has no trigger")
+        elif trigger_json is None:
+            raise InvalidInput("a complete review Context requires a trigger")
         profile_ref = _require_plain_object(entry.profile_ref, "profile_ref")
         read_set = _require_object_list(entry.read_set, "read_set")
         memory_hits = _require_object_list(entry.memory_hits, "memory_hits")
@@ -378,8 +396,8 @@ class ContextStateMixin:
             "unknown_execution_ids_json, permission_view_ref, budget_view_json, "
             "pending_source_event_refs_json, omissions_json, index_generation, "
             "index_coverage_json, content_hash, model_input_complete, "
-            "rendered_input_payload_ref, adapter_kind"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "rendered_input_payload_ref, adapter_kind, context_kind"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 context_id,
                 ns,
@@ -388,7 +406,7 @@ class ContextStateMixin:
                 entry.privacy_epoch,
                 created_at,
                 run_id,
-                canonical_json_text(trigger_ref),
+                trigger_json,
                 canonical_json_text(profile_ref),
                 canonical_json_text(read_set),
                 canonical_json_text(memory_hits),
@@ -406,6 +424,7 @@ class ContextStateMixin:
                 1 if model_input_complete else 0,
                 payload_ref,
                 adapter_kind,
+                context_kind,
             ),
         )
         for source in stored_sources:
@@ -442,6 +461,7 @@ class ContextStateMixin:
             rendered_input=rendered_input,
             created_at=created_at,
             sources=stored_sources,
+            context_kind=context_kind,
         )
 
     # ------------------------------------------------------------------ read
@@ -471,6 +491,13 @@ class ContextStateMixin:
                 f"context {cid} predates PCS2-008 and lacks "
                 f"{', '.join(missing)}; it cannot be used as a Context"
             )
+        context_kind = row["context_kind"]
+        if context_kind not in ("review", "consult"):
+            raise CorruptStore(f"context {cid} has an unknown context_kind")
+        if context_kind == "review" and row["trigger_ref_json"] is None:
+            raise CorruptStore(f"context {cid} is a review Context without a trigger")
+        if context_kind == "consult" and row["trigger_ref_json"] is not None:
+            raise CorruptStore(f"context {cid} is a consult Context with a trigger")
 
         payload_ref = row["rendered_input_payload_ref"]
         payload_row = self._require_connection().execute(
@@ -511,7 +538,11 @@ class ContextStateMixin:
         if document.get("namespace") != row["namespace"]:
             raise CorruptStore(f"context {cid} rendered input names another namespace")
 
-        trigger_ref = _decode_object(row["trigger_ref_json"], "trigger_ref_json", cid)
+        trigger_ref = (
+            {}
+            if context_kind == "consult"
+            else _decode_object(row["trigger_ref_json"], "trigger_ref_json", cid)
+        )
         profile_ref = _decode_object(row["profile_ref_json"], "profile_ref_json", cid)
         read_set = _decode_object_list(row["read_set_json"], "read_set_json", cid)
         memory_hits = _decode_object_list(row["memory_hits_json"], "memory_hits_json", cid)
@@ -573,6 +604,7 @@ class ContextStateMixin:
             rendered_input=rendered_input,
             created_at=row["created_at"],
             sources=self.context_sources(cid),
+            context_kind=context_kind,
         )
 
     def context_sources(self, context_id: str) -> tuple[ContextSource, ...]:
@@ -1005,6 +1037,8 @@ class ContextStateMixin:
         while the text itself becomes unrecoverable (``REDACTED`` on read).
         """
 
+        if target.target_kind not in (DELETION_RECORD, DELETION_EVENT):
+            return super()._after_target_cleared_locked(target)
         ref_kind = (
             CONTEXT_REF_KIND_RECORD
             if target.target_kind == DELETION_RECORD
@@ -1029,7 +1063,7 @@ class ContextStateMixin:
         return cleared
 
 
-class CognitionStore(ModelLedgerMixin, ContextStateMixin, DomainStore):
+class CognitionStore(ModelLedgerMixin, CollaborationMixin, ContextStateMixin, DomainStore):
     """PCS2-008/009 store: domain + Contexts + work + model attempt ledger."""
 
     @classmethod
