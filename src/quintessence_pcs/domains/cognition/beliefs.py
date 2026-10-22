@@ -43,7 +43,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ...foundation import identifiers
 from ...foundation.errors import (
@@ -64,6 +64,9 @@ from ..refs import EventRef, RecordRef
 from ..scope import normalize_scope
 from .context_guard import require_live_context
 from .errors import EvidenceMissing, InvalidTransition, UnsupportedOperation
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
+    from ...store.tx_b import CommitGuard
 
 BELIEF_KIND = "belief"
 BELIEF_SCHEMA_VERSION = "1"
@@ -256,14 +259,22 @@ class BeliefService:
         context_id: str,
         request_id: str,
         proposal: Mapping[str, Any],
-        work_id: str,
+        work_id: str | None,
+        commit_basis: tuple[str, Mapping[str, Any]] | None = None,
+        guard: "CommitGuard | None" = None,
     ) -> BeliefSubmission:
-        """Runtime entry: commit a FakeModel proposal and its work progress.
+        """Runtime entry: commit a parsed proposal and optional work progress.
 
         The structural proposal has already been parsed by the runtime; this
         method re-validates the body and runs the store-dependent checks inside
-        the same Tx B transaction that appends the version and writes
-        ``work_progress``.
+        the same Tx B transaction that appends the version and, when
+        ``work_id`` is not ``None``, writes ``work_progress``.
+
+        ``commit_basis`` and ``guard`` are the C06a candidate path.  When both
+        are supplied, the Tx B command identity (operation and request payload)
+        is the candidate's original proposal, not the internal domain payload;
+        ``guard`` runs inside that same transaction.  With ``commit_basis=None``
+        the legacy runtime identity is unchanged byte for byte.
         """
 
         operation = proposal.get("operation")
@@ -275,6 +286,8 @@ class BeliefService:
                 body=proposal["body"],
                 scope=proposal["scope"],
                 work_id=work_id,
+                commit_basis=commit_basis,
+                guard=guard,
             )
         if operation == "revise_belief":
             return self._revise(
@@ -286,6 +299,8 @@ class BeliefService:
                 scope=proposal["scope"],
                 retract=bool(proposal.get("retract", False)),
                 work_id=work_id,
+                commit_basis=commit_basis,
+                guard=guard,
             )
         if operation == "retract_belief":
             target_ref = RecordRef.from_value(
@@ -320,6 +335,8 @@ class BeliefService:
                 scope=current.scope or {},
                 retract=True,
                 work_id=work_id,
+                commit_basis=commit_basis,
+                guard=guard,
             )
         raise UnsupportedOperation(
             f"PCS2-008 cannot submit {operation!r}; allowed: propose_belief, "
@@ -337,6 +354,8 @@ class BeliefService:
         body: Mapping[str, Any],
         scope: Mapping[str, Any],
         work_id: str | None,
+        commit_basis: tuple[str, Mapping[str, Any]] | None = None,
+        guard: "CommitGuard | None" = None,
     ) -> BeliefSubmission:
         ns = identifiers.require_namespace(namespace)
         cid = identifiers.require_context_id(context_id)
@@ -373,17 +392,24 @@ class BeliefService:
                     outcome="committed",
                 )
 
-        receipt = self._store.commit_command(
-            context_id=cid,
-            request_id=rid,
-            operation="belief.propose",
-            request_payload={
+        if commit_basis is None:
+            operation = "belief.propose"
+            payload: Mapping[str, Any] = {
                 "belief": validated,
                 "scope": normalized_scope,
                 "work_id": work_id,
-            },
+            }
+        else:
+            # C06a: the candidate proposal *is* the Tx B command identity.
+            operation, payload = commit_basis
+        receipt = self._store.commit_command(
+            context_id=cid,
+            request_id=rid,
+            operation=operation,
+            request_payload=payload,
             apply=apply,
             namespace=ns,
+            guard=guard,
         )
         if result:
             return BeliefSubmission(
@@ -406,6 +432,8 @@ class BeliefService:
         scope: Mapping[str, Any],
         retract: bool,
         work_id: str | None,
+        commit_basis: tuple[str, Mapping[str, Any]] | None = None,
+        guard: "CommitGuard | None" = None,
     ) -> BeliefSubmission:
         ns = identifiers.require_namespace(namespace)
         cid = identifiers.require_context_id(context_id)
@@ -499,19 +527,28 @@ class BeliefService:
                     outcome="committed",
                 )
 
-        receipt = self._store.commit_command(
-            context_id=cid,
-            request_id=rid,
-            operation="belief.revise",
-            request_payload={
+        if commit_basis is None:
+            operation = "belief.revise"
+            payload: Mapping[str, Any] = {
                 "target": target_ref.to_dict(),
                 "belief": validated,
                 "scope": normalized_scope,
                 "retract": bool(retract),
                 "work_id": work_id,
-            },
+            }
+        else:
+            # C06a: retraction still reuses this method, but the command
+            # identity stays the candidate's original proposal.  The internal
+            # `retract=True` transformation must not change what was received.
+            operation, payload = commit_basis
+        receipt = self._store.commit_command(
+            context_id=cid,
+            request_id=rid,
+            operation=operation,
+            request_payload=payload,
             apply=apply,
             namespace=ns,
+            guard=guard,
         )
         if result:
             return BeliefSubmission(

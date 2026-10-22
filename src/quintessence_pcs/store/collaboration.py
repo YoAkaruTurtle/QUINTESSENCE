@@ -737,6 +737,27 @@ class CollaborationMixin:
                 )
         return identifier
 
+    def interaction_activation_kind(
+        self, *, namespace: str, interaction_id: str
+    ) -> str:
+        """Read the persisted trigger kind of one interaction.
+
+        ``activation_kind`` is protected by the 0008 update trigger, so it is
+        fixed at creation.  C06a reads the trigger kind here, inside its Tx B
+        transaction, and never accepts one from the caller.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        iid = _require_uuid(interaction_id, "interaction_id")
+        row = self._require_connection().execute(
+            "SELECT activation_kind FROM collab_interactions "
+            "WHERE namespace = ? AND interaction_id = ?",
+            (ns, iid),
+        ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"no interaction {iid} in {ns!r}")
+        return str(row["activation_kind"])
+
     # ------------------------------------------------------------- artifacts
 
     def register_artifact(
@@ -1365,6 +1386,23 @@ class CollaborationMixin:
                     return True
             return False
         raise CorruptStore(f"unknown stored source kind {kind!r}")
+
+    def artifact_barred(
+        self, *, namespace: str, artifact_id: str, artifact_version: int = 1
+    ) -> bool:
+        """Whether one artifact version is inside a deletion barrier.
+
+        Recursive for artifact sources, exactly like the read path.  C06a calls
+        it inside the Tx B transaction, after :func:`require_live_context`, to
+        prove the candidate itself did not become a derived deletion copy.
+        """
+
+        return self._source_barred_locked(
+            namespace=identifiers.require_namespace(namespace),
+            kind=COLLAB_ARTIFACT,
+            ref_id=_require_uuid(artifact_id, "artifact_id"),
+            version=_require_version(artifact_version, "artifact_version"),
+        )
 
     def context_barred(self, *, namespace: str, context_id: str) -> bool:
         """True when any source this Context used is inside a barrier."""
@@ -2173,6 +2211,13 @@ class CollaborationMixin:
         C06a Tx B write transaction, after the Belief command has committed and
         produced its ``processed_commands`` receipt.  It never updates the work
         control and never advances ``state_revision``.
+
+        ``receipt.operation`` must be exactly the candidate proposal's own
+        ``operation`` token (``propose_belief`` / ``revise_belief`` /
+        ``retract_belief`` on the C06a path, or a legacy token only when the
+        candidate proposal itself carries that exact token).  A fixed tuple is
+        deliberately not accepted: a receipt for another command shape must
+        never be able to decide this candidate.
         """
 
         if self._tx_depth == 0:
@@ -2206,12 +2251,18 @@ class CollaborationMixin:
         digest = self.lookup_command_request_digest(
             namespace=ns, request_id=candidate.request_id
         )
+        proposal_operation = (
+            candidate.proposal.get("operation")
+            if isinstance(candidate.proposal, dict)
+            else None
+        )
         if (
             receipt is None
             or receipt.namespace != ns
             or receipt.request_id != candidate.request_id
             or receipt.context_id != candidate.context_id
-            or receipt.operation not in ("belief.propose", "belief.revise")
+            or not isinstance(proposal_operation, str)
+            or receipt.operation != proposal_operation
             or receipt.outcome not in ("committed", "noop")
             or digest is None
             or digest != candidate.command_digest
@@ -2234,6 +2285,33 @@ class CollaborationMixin:
         return self.load_artifact(
             namespace=ns, artifact_id=cid, artifact_version=1
         )
+
+    def require_current_candidate(
+        self, *, namespace: str, candidate_id: str
+    ) -> tuple[ArtifactRow, WorkControl]:
+        """Load one candidate and prove it is the current pending generation.
+
+        C06a's guard calls this first, inside the Tx B write transaction, so
+        the candidate state, its work control and the decision that follows
+        are all read from the same serialized snapshot.  It is a read: the
+        caller's transaction is never started or committed here.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        candidate = self.load_artifact(
+            namespace=ns, artifact_id=candidate_id, artifact_version=1
+        )
+        if candidate.kind != "candidate" or candidate.work_id is None:
+            raise CandidateTransitionDenied(
+                f"artifact {candidate_id} is not a candidate"
+            )
+        control = self._load_work_control_locked(ns, candidate.work_id)
+        if control is None:
+            raise CandidateTransitionDenied(
+                f"no work control for candidate {candidate_id}"
+            )
+        self._require_candidate_current_locked(candidate, control)
+        return candidate, control
 
     def _require_candidate_current_locked(
         self, candidate: ArtifactRow, control: WorkControl
@@ -2512,6 +2590,17 @@ class CollaborationMixin:
             (ns, identifier),
         ).fetchone()
         return None if row is None else _grant_from_row(row)
+
+    def grant_is_active(self, *, grant: GrantRow, now: str | None = None) -> bool:
+        """Whether one stored grant is unrevoked and unexpired at ``now``.
+
+        ``now`` is supplied by the caller's trusted clock; C06a reads it inside
+        the Tx B transaction.  ``None`` means "do not apply the expiry bound"
+        and is only for the read-only gate wrappers that keep their historical
+        behaviour.
+        """
+
+        return _grant_active(grant, now)
 
     def revoke_grant(
         self, *, namespace: str, grant_id: str, revoked_at: str | None = None

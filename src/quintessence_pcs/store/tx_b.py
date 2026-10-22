@@ -25,6 +25,19 @@ The transaction protocol is intentionally narrow:
 
 ``apply`` receives a :class:`TxScope`, not the connection.  That is an API
 boundary, not a security boundary: see ``docs/PCS2-006-TXB.md`` section 6.
+
+C06a adds one optional :class:`CommitGuard`.  Its two methods run **inside**
+the same write transaction as the domain append and the receipt:
+
+* ``before_apply`` runs after all three watermark checks and before the
+  ``TxScope`` is constructed, so a guard denial writes nothing;
+* ``after_receipt`` runs after the ``processed_commands`` row is inserted and
+  before the commit, so a failure there rolls the whole command back.
+
+A repeated ``(namespace, request_id)`` with the same digest returns the stored
+receipt without calling the guard: that early return writes nothing, and the
+receipt proves the command already committed.  See :class:`CommitGuard` for
+the capabilities a guard may use.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ..foundation import identifiers
 from ..foundation.errors import (
@@ -104,6 +117,54 @@ class CommitReceipt:
     state_revision: int
     record_refs: tuple[CommittedRecordRef, ...]
     committed_at: str
+
+
+@dataclass(frozen=True)
+class CommitBasis:
+    """The exact command identity a Tx B transaction is about to commit.
+
+    It is built by ``commit_command`` from the *stored* snapshot and the
+    digest it computed itself, never supplied by the caller.
+    """
+
+    namespace: str
+    context_id: str
+    request_id: str
+    operation: str
+    request_payload: Mapping[str, Any]
+    request_digest: str
+
+
+class CommitGuard(Protocol):
+    """Trusted hook that binds one Tx B command to a candidate (C06a only).
+
+    It is an **API boundary, not a security boundary**: only trusted
+    host/Facade code can construct a guard, and the protocol is not a token.
+
+    Both methods run inside the ``commit_command`` write transaction:
+
+    * ``before_apply`` runs after the three watermarks passed and before any
+      domain write.  It may use the store for SQLite reads (``load_artifact``,
+      ``require_current_candidate``, ``load_grant``, ``require_live_context``,
+      ``artifact_barred``) and for writes through a ``*_locked`` primitive
+      (``_mark_candidate_committed_locked`` in ``after_receipt``).  It must
+      not open a transaction, call a standalone API (``commit_command``,
+      ``request_deletion``, ``delete_experience``, ``cleanup_deletions``), or
+      perform file, network, subprocess or any other side effect.
+    * ``after_receipt`` runs after the receipt row was inserted and before the
+      commit.  It may write only through the store methods designed for that
+      transaction.
+
+    An exception from either method is never swallowed: it aborts the whole
+    transaction, so no record version, no receipt and no guard-side write
+    survive.  The same-digest early-return path does not call the guard.
+    """
+
+    def before_apply(self, basis: CommitBasis) -> None: ...
+
+    def after_receipt(
+        self, basis: CommitBasis, receipt: CommitReceipt
+    ) -> None: ...
 
 
 class TxScope:
@@ -341,6 +402,7 @@ class TxBMixin:
         request_payload: Mapping[str, Any],
         apply: Callable[[TxScope], None],
         namespace: str | None = None,
+        guard: CommitGuard | None = None,
     ) -> CommitReceipt:
         """Commit one command on top of a persisted snapshot.
 
@@ -349,6 +411,10 @@ class TxBMixin:
         ``SCOPE_VIOLATION``.  The digest is always computed here from
         ``(namespace, operation, context_id, canonical payload)``; callers
         cannot pass one in.
+
+        ``guard`` is the optional C06a in-transaction hook.  See
+        :class:`CommitGuard` for exactly when its methods run and what they
+        may do.  A guard exception rolls back the whole command.
         """
 
         self._require_standalone("commit_command")
@@ -411,6 +477,17 @@ class TxBMixin:
                     f"{current['state_revision']}; the proposal basis is stale"
                 )
 
+            basis = CommitBasis(
+                namespace=ns,
+                context_id=context_id,
+                request_id=request_id,
+                operation=operation,
+                request_payload=payload,
+                request_digest=digest,
+            )
+            if guard is not None:
+                guard.before_apply(basis)
+
             scope = TxScope(self, ns, context_id=context_id)
             apply(scope)
             if scope._write_failed:  # applied swallowed a failed store write
@@ -460,6 +537,8 @@ class TxBMixin:
                         f"request {request_id} was committed concurrently"
                     ) from exc
                 raise
+            if guard is not None:
+                guard.after_receipt(basis, receipt)
             return receipt
 
     # ----------------------------------------------------------- internals
@@ -651,6 +730,8 @@ def _receipt_from_json(text: str) -> CommitReceipt:
 
 __all__ = [
     "COMMIT_OUTCOMES",
+    "CommitBasis",
+    "CommitGuard",
     "CommitReceipt",
     "CommittedRecordRef",
     "OUTCOME_COMMITTED",
