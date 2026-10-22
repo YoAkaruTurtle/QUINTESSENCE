@@ -26,7 +26,8 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
 | `context_binding.json` | `context_snapshots` 行的 collab.v1 规范表示 |
 | `source_link.json` | Context / artifact 到来源的持久派生边 |
 | `grant.json` | 五分支授权：access / egress / commit(policy) / commit(work_generation) / rerun |
-| `experience_view.json` | 唯一读取视图（readability 只存在于此） |
+| `experience_view.json` | 唯一完整读取视图（readability 只存在于读取侧） |
+| `experience_unavailable.json` | 无存在性泄漏的不可用读取结果（只有调用方 ref 与固定状态） |
 | `examples/consult-chain.json` | consult 静态链（含删除与空读集变体） |
 | `examples/review-chain.json` | review 静态链（拒绝、重跑、人工批准） |
 | `examples/invalid.json` | Schema 层与语义层无效样例 |
@@ -46,7 +47,8 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
 - `retention` 是**有序闭集** `session < standard < durable`（最严格 → 最宽松）：
   `session` 会话结束即不可读，`standard` 由存储层策略表解析时长，`durable`
   长期保留直到显式删除。具体天数不写进契约；过期在每次读取时重判，不缓存。
-- `readability` 只出现在 `experience_view.json`。存储对象没有可读状态字段。
+- `readability` 只出现在读取侧（`experience_view.json` 与
+  `experience_unavailable.json`）。存储对象没有可读状态字段。
 
 ## 对象语义
 
@@ -247,13 +249,36 @@ delete_experience(collaboration_ref)
 不返回摘要、片段或计数。`collab_source_links` 的 owner 递归就是闭包；
 深度按 artifact→artifact 边计算，超过 8 硬失败，不做静默截断。
 
-## 读取接口
+## 读取接口与结果
 
 ```python
 list_experience_refs(access, *, namespace, after_cursor=None, limit=20)
-read_experience(access, *, ref, purpose) -> experience_view
+read_experience(access, *, ref, purpose)
+    -> experience_view | experience_unavailable
 ```
 
+`read_experience` 返回两个 DTO 的联合：
+
+- 对象存在且调用者有权访问 → `experience_view`。其 `readability` 为
+  `available` / `redacted` / `unavailable`，元数据真实；`unavailable` 表示
+  对象自身已被删除，`redacted` 表示派生对象仍有元数据但正文不可读。
+- 对象不存在、调用者无权访问、或来源隐私无法解析 →
+  `experience_unavailable`。该 DTO 只有调用方自己提供的 `ref` 与固定状态
+  `"unavailable"`，与“不存在”的返回完全同形，不泄漏存在性。
+
+`experience_unavailable` 是读取结果，不是存储对象；存储表没有可读状态列。
+
+未经任何 interaction 关联的 input 不是 experience：`list_experience_refs`
+不列举它，`read_experience` 对它返回 `experience_unavailable`。
+
+input 的 `interaction_id` 是**代表性关联（representative association）**：
+在全部链接该 input 的 interaction 中，按
+`(interaction.created_at, interaction_id)` 字典序最小者。它不是该 input 的
+永久来源身份，也不是唯一来源；正常追加更晚的链接不会改变该归属。两个字段
+都是持久列，重开数据库后结果不变。
+
+`list_experience_refs` 先按可见性过滤再应用 `limit`：不可见对象不占页位、
+不影响 `next_cursor`，页大小不暗示其存在；游标指向最后一条已返回记录。
 `purpose` 必填并进入审计；不做语义搜索、打分、摘要或 Episode。
 未授权统一 `unavailable`，不因“部分可读”而返回片段。
 

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExperienceUnavailable",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ref",
+    "readability"
+  ],
+  "properties": {
+    "ref": {
+      "$ref": "_common.json#/$defs/collaboration_ref"
+    },
+    "readability": {
+      "const": "unavailable"
+    }
+  }
+}

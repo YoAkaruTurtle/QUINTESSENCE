@@ -54,6 +54,7 @@ SCHEMA_FILES = {
     "source_link.json",
     "grant.json",
     "experience_view.json",
+    "experience_unavailable.json",
 }
 
 RULES = {f"R{number}" for number in range(1, 16)}
@@ -193,6 +194,10 @@ REQUIRED_FIELDS = {
         "attempt_ref",
         "source_refs",
         "created_at",
+    },
+    "experience_unavailable.json": {
+        "ref",
+        "readability",
     },
 }
 

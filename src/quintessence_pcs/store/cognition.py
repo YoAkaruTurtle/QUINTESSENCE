@@ -55,6 +55,7 @@ from .deletion import DELETION_EVENT, DELETION_RECORD, DeletionTarget
 from .domain import DomainStore
 from .errors import ContextTooLarge, NeedsContext, WorkAlreadyCompleted
 from .events import PendingWork
+from .experience import ExperienceMixin
 from .model import ModelLedgerMixin
 
 WORK_OUTCOME_COMMITTED = "committed"
@@ -1063,7 +1064,13 @@ class ContextStateMixin:
         return cleared
 
 
-class CognitionStore(ModelLedgerMixin, CollaborationMixin, ContextStateMixin, DomainStore):
+class CognitionStore(
+    ModelLedgerMixin,
+    CollaborationMixin,
+    ExperienceMixin,
+    ContextStateMixin,
+    DomainStore,
+):
     """PCS2-008/009 store: domain + Contexts + work + model attempt ledger."""
 
     @classmethod

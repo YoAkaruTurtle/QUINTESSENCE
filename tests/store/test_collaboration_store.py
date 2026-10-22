@@ -393,6 +393,7 @@ class CollaborationTestCase(StoreTestCase):
         target = self.tmp_path / "migrations-0007"
         shutil.copytree(default_migrations_dir(), target)
         (target / "0008_collaboration.sql").unlink()
+        (target / "0009_experience_audit.sql").unlink()
         return target
 
 
@@ -404,8 +405,8 @@ class MigrationTests(CollaborationTestCase):
                 "SELECT migration_id, name FROM schema_migrations ORDER BY migration_id"
             )
         ]
-        self.assertEqual(8, len(ledger))
-        self.assertEqual(("0008", "collaboration"), (f"{ledger[-1][0]:04d}", ledger[-1][1]))
+        self.assertEqual(9, len(ledger))
+        self.assertEqual(("0009", "experience_audit"), (f"{ledger[-1][0]:04d}", ledger[-1][1]))
         tables = {
             row[0]
             for row in self.store.connection.execute(
@@ -485,7 +486,7 @@ class MigrationTests(CollaborationTestCase):
                 "SELECT migration_id, name FROM schema_migrations ORDER BY migration_id"
             )
         ]
-        self.assertEqual(8, len(ledger))
+        self.assertEqual(9, len(ledger))
         target = upgraded.connection.execute(
             "SELECT target_kind, target_id, target_version, status, authorization_ref "
             "FROM deletion_targets"
