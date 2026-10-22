@@ -60,6 +60,25 @@ COLLAB_SCHEMA_VERSION = "collab.v1"
 #: strictest collaboration source's rank (C05a R15).
 RETENTION_ORDER = ("session", "standard", "durable")
 RETENTION_RANK = {name: rank for rank, name in enumerate(RETENTION_ORDER)}
+#: The frozen interaction lifecycle labels (0008 CHECK constraint).
+INTERACTION_RESULTS = (
+    "answered",
+    "waiting",
+    "candidate_pending",
+    "committed",
+    "rejected",
+    "stale",
+    "denied",
+    "failed",
+    "incomplete",
+)
+#: Results that describe unfinished work and therefore carry no completion time.
+NON_TERMINAL_INTERACTION_RESULTS = ("candidate_pending", "incomplete")
+#: Results that close an interaction and may carry ``completed_at``.
+TERMINAL_INTERACTION_RESULTS = tuple(
+    value for value in INTERACTION_RESULTS
+    if value not in NON_TERMINAL_INTERACTION_RESULTS
+)
 
 COLLAB_INPUT = DELETION_COLLAB_INPUT
 COLLAB_ARTIFACT = DELETION_COLLAB_ARTIFACT
@@ -191,6 +210,44 @@ class ArtifactRow:
     status: str | None = None
     decided_at: str | None = None
     decision_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class InteractionRow:
+    """One stored interaction envelope, without any payload or body."""
+
+    interaction_id: str
+    namespace: str
+    mode: str
+    activation_kind: str
+    trigger_ref: dict[str, Any] | None
+    work_id: str | None
+    work_generation: int | None
+    context_id: str | None
+    result: str | None
+    receipt_request_id: str | None
+    access_ref: str
+    policy_ref: str
+    created_at: str
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
+class CandidateState:
+    """The candidate columns C06c needs to bind a receipt, and nothing else.
+
+    It deliberately carries no body text or proposal payload: recovery must be
+    able to describe a candidate after its payload has been cleared.
+    """
+
+    artifact_id: str
+    interaction_id: str
+    status: str
+    request_id: str | None
+    context_id: str
+    work_id: str | None
+    work_generation: int | None
+    command_digest: str | None
 
 
 @dataclass(frozen=True)
@@ -677,17 +734,7 @@ class CollaborationMixin:
             else _require_uuid(receipt_request_id, "receipt_request_id")
         )
         completed = _nullable_timestamp(completed_at, "completed_at")
-        if result is not None and result not in (
-            "answered",
-            "waiting",
-            "candidate_pending",
-            "committed",
-            "rejected",
-            "stale",
-            "denied",
-            "failed",
-            "incomplete",
-        ):
+        if result is not None and result not in INTERACTION_RESULTS:
             raise InvalidInput("result is not a frozen interaction result")
         refs: list[tuple[str, int]] = []
         for value in input_refs:
@@ -757,6 +804,223 @@ class CollaborationMixin:
         if row is None:
             raise RecordNotFound(f"no interaction {iid} in {ns!r}")
         return str(row["activation_kind"])
+
+    def interaction(
+        self, *, namespace: str, interaction_id: str
+    ) -> InteractionRow | None:
+        """Read one interaction envelope; ``None`` when it does not exist.
+
+        Only ``trigger_ref_json`` is decoded (with strict JSON); no payload or
+        artifact body is touched.  A malformed trigger is ``CORRUPT_STORE``.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        iid = _require_uuid(interaction_id, "interaction_id")
+        row = self._require_connection().execute(
+            "SELECT interaction_id, namespace, mode, activation_kind, "
+            "trigger_ref_json, work_id, work_generation, context_id, result, "
+            "receipt_request_id, access_ref, policy_ref, created_at, completed_at "
+            "FROM collab_interactions "
+            "WHERE namespace = ? AND interaction_id = ?",
+            (ns, iid),
+        ).fetchone()
+        if row is None:
+            return None
+        trigger = _decode_json(row["trigger_ref_json"], "trigger_ref_json")
+        if trigger is not None and not isinstance(trigger, dict):
+            raise CorruptStore(
+                f"interaction {iid} has a non-object trigger reference"
+            )
+        return InteractionRow(
+            interaction_id=row["interaction_id"],
+            namespace=row["namespace"],
+            mode=row["mode"],
+            activation_kind=row["activation_kind"],
+            trigger_ref=trigger,
+            work_id=row["work_id"],
+            work_generation=(
+                None
+                if row["work_generation"] is None
+                else int(row["work_generation"])
+            ),
+            context_id=row["context_id"],
+            result=row["result"],
+            receipt_request_id=row["receipt_request_id"],
+            access_ref=row["access_ref"],
+            policy_ref=row["policy_ref"],
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
+        )
+
+    def candidate_states_for_interaction(
+        self, *, namespace: str, interaction_id: str
+    ) -> tuple[CandidateState, ...]:
+        """Read the candidate envelope columns for one interaction.
+
+        No ``private_payloads`` row is read, so this keeps working after a
+        deletion cleanup cleared the candidate body and proposal.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        iid = _require_uuid(interaction_id, "interaction_id")
+        rows = self._require_connection().execute(
+            "SELECT artifact_id, interaction_id, status, request_id, "
+            "context_id, work_id, work_generation, command_digest "
+            "FROM collab_artifacts "
+            "WHERE namespace = ? AND interaction_id = ? AND kind = 'candidate' "
+            "ORDER BY created_at, artifact_id",
+            (ns, iid),
+        ).fetchall()
+        return tuple(
+            CandidateState(
+                artifact_id=row["artifact_id"],
+                interaction_id=row["interaction_id"],
+                status=str(row["status"]),
+                request_id=row["request_id"],
+                context_id=row["context_id"],
+                work_id=row["work_id"],
+                work_generation=(
+                    None
+                    if row["work_generation"] is None
+                    else int(row["work_generation"])
+                ),
+                command_digest=row["command_digest"],
+            )
+            for row in rows
+        )
+
+    def complete_interaction(
+        self,
+        *,
+        namespace: str,
+        interaction_id: str,
+        result: str,
+        receipt_request_id: str | None = None,
+        completed_at: str | None = None,
+    ) -> InteractionRow:
+        """Move one interaction label and completion time; nothing else.
+
+        The 0008 update trigger allows exactly these three columns to change.
+        This method never touches candidate, Belief, command or model-attempt
+        rows, and it never fabricates a receipt: it only records the label the
+        caller already proved from an authoritative ``processed_commands`` row.
+
+        Transition rules (C06c):
+
+        * ``NULL``/``incomplete`` may move to any frozen result;
+        * ``candidate_pending`` may only move to ``committed``/``rejected``/
+          ``stale``/``denied``/``failed`` (or stay identical);
+        * an identical result is idempotent and only fills empty fields;
+        * any other terminal-to-different transition is ``CORRUPT_STORE``.
+
+        ``completed_at`` is forbidden (and must stay NULL) for
+        ``candidate_pending``/``incomplete``; every terminal result gets the
+        existing value or ``now``.  An existing completion time is never
+        overwritten, and an illegal downgrade is ``CORRUPT_STORE``.  A different
+        ``receipt_request_id`` on an already-bound interaction is likewise
+        ``CORRUPT_STORE``.  No change means no UPDATE.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        iid = _require_uuid(interaction_id, "interaction_id")
+        if result not in INTERACTION_RESULTS:
+            raise InvalidInput("result is not a frozen interaction result")
+        receipt = (
+            None
+            if receipt_request_id is None
+            else _require_uuid(receipt_request_id, "receipt_request_id")
+        )
+        completed = _nullable_timestamp(completed_at, "completed_at")
+
+        with self.transaction():
+            current = self.interaction(namespace=ns, interaction_id=iid)
+            if current is None:
+                raise RecordNotFound(f"no interaction {iid} in {ns!r}")
+            if current.result in (None, *NON_TERMINAL_INTERACTION_RESULTS) and (
+                current.completed_at is not None
+            ):
+                raise CorruptStore(
+                    f"interaction {iid} has a completion time while still "
+                    "non-terminal"
+                )
+            self._check_interaction_transition_locked(current, result)
+            if result in NON_TERMINAL_INTERACTION_RESULTS:
+                if completed is not None:
+                    raise InvalidInput(
+                        "a non-terminal interaction result cannot carry "
+                        "completed_at"
+                    )
+                if current.completed_at is not None:
+                    raise CorruptStore(
+                        f"interaction {iid} is {result!r} but already has a "
+                        "completion time; the state was downgraded"
+                    )
+                new_completed = None
+            else:
+                new_completed = (
+                    current.completed_at or completed or utc_now_rfc3339()
+                )
+            if current.receipt_request_id is not None:
+                if (
+                    receipt is not None
+                    and receipt != current.receipt_request_id
+                ):
+                    raise CorruptStore(
+                        f"interaction {iid} is already bound to another receipt"
+                    )
+                new_receipt = current.receipt_request_id
+            else:
+                new_receipt = receipt
+            if (
+                current.result == result
+                and current.receipt_request_id == new_receipt
+                and current.completed_at == new_completed
+            ):
+                return current
+            cursor = self._require_connection().execute(
+                "UPDATE collab_interactions SET result = ?, "
+                "receipt_request_id = ?, completed_at = ? "
+                "WHERE namespace = ? AND interaction_id = ?",
+                (result, new_receipt, new_completed, ns, iid),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - row was just read
+                raise CorruptStore(
+                    f"interaction {iid} disappeared during its label update"
+                )
+            updated = self.interaction(namespace=ns, interaction_id=iid)
+            if updated is None:  # pragma: no cover - row was just updated
+                raise CorruptStore(
+                    f"interaction {iid} cannot be read back after its update"
+                )
+            return updated
+
+    def _check_interaction_transition_locked(
+        self, current: InteractionRow, result: str
+    ) -> None:
+        """Validate one interaction label transition (no write)."""
+
+        previous = current.result
+        if previous == result:
+            return
+        if previous is None or previous == "incomplete":
+            return
+        if previous == "candidate_pending":
+            if result in (
+                "committed",
+                "rejected",
+                "stale",
+                "denied",
+                "failed",
+            ):
+                return
+            raise CorruptStore(
+                f"interaction {current.interaction_id} cannot move from "
+                f"candidate_pending to {result!r}"
+            )
+        raise CorruptStore(
+            f"interaction {current.interaction_id} is terminal at {previous!r}; "
+            f"it cannot move to {result!r}"
+        )
 
     # ------------------------------------------------------------- artifacts
 
@@ -2852,17 +3116,22 @@ __all__ = [
     "COLLAB_INPUT",
     "COLLAB_SCHEMA_VERSION",
     "COLLAB_SOURCE_KINDS",
+    "CandidateState",
     "CollaborationMixin",
     "DECIDED_STATUSES",
     "Decision",
     "GrantRow",
     "INPUT_ORIGIN_KINDS",
     "INTERACTION_MODES",
+    "INTERACTION_RESULTS",
     "InputRow",
+    "InteractionRow",
     "MAX_BODY_CHARS",
     "MAX_CLOSURE_DEPTH",
+    "NON_TERMINAL_INTERACTION_RESULTS",
     "ORIGIN_KINDS",
     "RETENTION_ORDER",
     "RETENTION_RANK",
+    "TERMINAL_INTERACTION_RESULTS",
     "WorkControl",
 ]

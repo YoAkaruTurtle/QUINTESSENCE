@@ -1,4 +1,4 @@
-"""C06a/C06b: the trusted candidate commit and review-resolution service.
+"""C06a/C06b/C06c: trusted commit, review resolution and result recovery.
 
 One call to :meth:`CollaborationService.commit_candidate` performs the whole
 decision as **one** Tx B write transaction:
@@ -44,6 +44,13 @@ deletion-barrier checks re-applied before a public Facade returns it: a
 successful historical commit does not prove current access authorization.
 This card adds no ACL, token or identity system, and it does not change
 :class:`CommitAuthority` or the C06a commit semantics.
+
+C06c adds :meth:`CollaborationService.get_result`: it treats the
+``processed_commands`` receipt as the only authority for "committed", repairs
+only the interaction's ``result``/``receipt_request_id``/``completed_at``
+labels, and returns no body text.  The C06b write entry points settle those
+labels after their authoritative write; a crash between the two is the W2
+window that ``get_result`` repairs on the next call.
 """
 
 from __future__ import annotations
@@ -67,10 +74,13 @@ from ..foundation.jsonutil import canonical_json_text
 from ..foundation.timeutil import utc_now_rfc3339
 from ..runtime.proposal_generation import validate_proposal
 from ..store.collaboration import (
+    NON_TERMINAL_INTERACTION_RESULTS,
     Approval,
     ArtifactRow,
+    CandidateState,
     Decision,
     GrantRow,
+    InteractionRow,
     WorkControl,
 )
 from ..store.errors import CandidateTransitionDenied
@@ -108,6 +118,28 @@ class Resolution:
     status: str
     receipt: CommitReceipt | None
     control: WorkControl | None
+
+
+@dataclass(frozen=True)
+class InteractionResult:
+    """The recovered lifecycle conclusion for one interaction.
+
+    ``result`` is the interaction label (the lifecycle conclusion), while
+    ``candidate_status`` is the raw persisted candidate state.  They may
+    legitimately differ -- a deleted candidate can make the interaction
+    ``stale`` while the candidate row is still ``pending``.  Recovery never
+    rewrites the candidate to match ``result``.
+    """
+
+    interaction_id: str
+    namespace: str
+    mode: str
+    result: str
+    receipt: CommitReceipt | None
+    candidate_id: str | None
+    candidate_status: str | None
+    repaired: bool
+    completed_at: str | None
 
 
 class CollaborationService:
@@ -278,12 +310,20 @@ class CollaborationService:
                 f"work generation moved from {work_generation} "
                 f"to {decision.generation}"
             )
-        return self._store.register_candidate(
+        candidate = self._store.register_candidate(
             namespace=ns,
             work_id=work_id,
             work_generation=work_generation,
             **candidate_fields,
         )
+        # An idempotent retry may return a candidate that has already moved on;
+        # only a still-pending row may be labelled candidate_pending.  Any
+        # other state is repaired from the authoritative facts by get_result.
+        if candidate.status == "pending":
+            self._settle_interaction(
+                ns, candidate.interaction_id, "candidate_pending"
+            )
+        return candidate
 
     def resolve_candidate(
         self,
@@ -329,10 +369,21 @@ class CollaborationService:
                 raise InvalidInput("approve requires a CommitAuthority")
             candidate = self._load_candidate(ns, candidate_id)
             if candidate.status == "committed":
-                return self._committed_resolution(ns, candidate)
+                resolution = self._committed_resolution(ns, candidate)
+                self._settle_interaction(
+                    ns,
+                    candidate.interaction_id,
+                    "committed",
+                    resolution.receipt,
+                )
+                return resolution
             if candidate.status != "pending":
                 # A rejected candidate can never be revived, and stale/failed
-                # candidates are terminal too.  Report the state, write nothing.
+                # candidates are terminal too.  Report the state, write no
+                # candidate row, and mirror it in the interaction label.
+                self._settle_interaction(
+                    ns, candidate.interaction_id, candidate.status
+                )
                 return Resolution(
                     candidate=candidate,
                     status=candidate.status,
@@ -351,8 +402,18 @@ class CollaborationService:
                 # commit transaction.  Re-read once and report its state.
                 current = self._load_candidate(ns, candidate_id)
                 if current.status == "committed":
-                    return self._committed_resolution(ns, current)
+                    resolution = self._committed_resolution(ns, current)
+                    self._settle_interaction(
+                        ns,
+                        current.interaction_id,
+                        "committed",
+                        resolution.receipt,
+                    )
+                    return resolution
                 if current.status != "pending":
+                    self._settle_interaction(
+                        ns, current.interaction_id, current.status
+                    )
                     return Resolution(
                         candidate=current,
                         status=current.status,
@@ -360,7 +421,7 @@ class CollaborationService:
                         control=None,
                     )
                 raise
-            return Resolution(
+            resolution = Resolution(
                 candidate=outcome.candidate,
                 status=(
                     "already_committed"
@@ -370,13 +431,27 @@ class CollaborationService:
                 receipt=outcome.receipt,
                 control=None,
             )
+            self._settle_interaction(
+                ns,
+                outcome.candidate.interaction_id,
+                "committed",
+                outcome.receipt,
+            )
+            return resolution
 
         # decision == DECISION_REJECT
         if authority is not None:
             raise InvalidInput("reject does not accept a commit authority")
         candidate = self._load_candidate(ns, candidate_id)
         if candidate.status == "committed":
-            return self._committed_resolution(ns, candidate)
+            resolution = self._committed_resolution(ns, candidate)
+            self._settle_interaction(
+                ns,
+                candidate.interaction_id,
+                "committed",
+                resolution.receipt,
+            )
+            return resolution
         if candidate.status in ("stale", "failed"):
             raise CandidateTransitionDenied(
                 f"candidate {candidate.artifact_id} is {candidate.status!r}; "
@@ -393,16 +468,384 @@ class CollaborationService:
             # into a resolution here; every other refusal is re-raised.
             current = self._load_candidate(ns, candidate_id)
             if current.status == "committed":
-                return self._committed_resolution(ns, current)
+                resolution = self._committed_resolution(ns, current)
+                self._settle_interaction(
+                    ns,
+                    current.interaction_id,
+                    "committed",
+                    resolution.receipt,
+                )
+                return resolution
             raise
-        return Resolution(
+        resolution = Resolution(
             candidate=rejected,
             status="rejected",
             receipt=None,
             control=control,
         )
+        self._settle_interaction(
+            ns, rejected.interaction_id, "rejected"
+        )
+        return resolution
+
+    def get_result(
+        self, *, namespace: str, interaction_id: str
+    ) -> InteractionResult:
+        """Recover one interaction result from the authoritative receipt.
+
+        The stored ``processed_commands`` receipt is the only authority for
+        "this command committed"; this method may repair interaction labels but
+        never fabricates one, never marks a pending candidate committed, and
+        never writes a Belief, command, candidate or model-attempt row.
+
+        Recovery is idempotent: the second call returns the same result with
+        ``repaired=False`` and performs no UPDATE.  Historical commits keep
+        their receipts even after a grant is revoked or expired; current body
+        reads remain a separate ``read_experience`` decision.  This is a
+        trusted internal API and returns no body text: C07 must re-check current
+        access and the deletion barrier before showing a receipt externally.
+
+        ``result`` is the interaction lifecycle conclusion; ``candidate_status``
+        is the raw storage fact.  They can differ (for example ``stale`` versus
+        ``pending``) and the former never rewrites the latter.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        interaction = self._store.interaction(
+            namespace=ns, interaction_id=interaction_id
+        )
+        if interaction is None:
+            raise RecordNotFound(
+                f"no interaction {interaction_id} in {ns!r}"
+            )
+        states = self._store.candidate_states_for_interaction(
+            namespace=ns, interaction_id=interaction_id
+        )
+        if len(states) > 1:
+            raise CorruptStore(
+                "ambiguous candidates for one interaction"
+            )
+        candidate = states[0] if states else None
+
+        # ---- authoritative receipt resolution (label vs candidate request id)
+        label = interaction.receipt_request_id
+        candidate_request = (
+            None if candidate is None else candidate.request_id
+        )
+        if (
+            label is not None
+            and candidate_request is not None
+            and label != candidate_request
+        ):
+            raise CorruptStore(
+                "the interaction receipt label disagrees with the candidate "
+                "request id"
+            )
+        receipt = None
+        if label is not None:
+            # The interaction itself named a receipt: it must exist.
+            receipt = self._store.lookup_command_receipt(
+                namespace=ns, request_id=label
+            )
+            if receipt is None:
+                raise CorruptStore(
+                    f"interaction {interaction_id} names a receipt that does "
+                    "not exist"
+                )
+        elif candidate_request is not None:
+            # No label yet: a missing receipt is the normal pre-TxB state.
+            receipt = self._store.lookup_command_receipt(
+                namespace=ns, request_id=candidate_request
+            )
+
+        # ---- result derived from the receipt, or from the candidate state
+        if receipt is not None:
+            if receipt.operation == "cognition.wait":
+                if candidate is not None:
+                    raise CorruptStore(
+                        "a wait receipt cannot belong to an interaction with a "
+                        "candidate"
+                    )
+                self._validate_wait_receipt(ns, interaction, receipt)
+                result = "waiting"
+            else:
+                if candidate is None:
+                    raise CorruptStore(
+                        "a belief receipt cannot belong to an interaction "
+                        "without a candidate"
+                    )
+                self._validate_belief_receipt(
+                    ns, interaction, candidate, receipt
+                )
+                if candidate.status == "pending":
+                    # W3: the command committed but the candidate decision did
+                    # not.  The history stays auditable; never auto-repair it.
+                    raise CorruptStore(
+                        "a pending candidate has a committed command receipt"
+                    )
+                if candidate.status != "committed":
+                    raise CorruptStore(
+                        f"candidate status {candidate.status!r} cannot carry a "
+                        "committed belief receipt"
+                    )
+                result = "committed"
+        else:
+            if interaction.result == "committed":
+                raise CorruptStore(
+                    "interaction is committed but has no command receipt"
+                )
+            if candidate is None:
+                result = interaction.result or "incomplete"
+            elif candidate.status == "committed":
+                raise CorruptStore(
+                    "candidate is committed but has no command receipt"
+                )
+            elif candidate.status == "pending":
+                # P4: check the barrier before the Context; a deleted candidate
+                # or source means stale even while the row stays pending.
+                if self._store.artifact_barred(
+                    namespace=ns, artifact_id=candidate.artifact_id
+                ):
+                    result = "stale"
+                else:
+                    try:
+                        require_live_context(
+                            self._store,
+                            context_id=candidate.context_id,
+                            namespace=ns,
+                        )
+                    except ContextStale:
+                        result = "stale"
+                    else:
+                        result = "candidate_pending"
+            else:
+                result = candidate.status
+
+        # ---- label repair (independent transaction, after any commit)
+        if (
+            result in NON_TERMINAL_INTERACTION_RESULTS
+            and interaction.completed_at is not None
+        ):
+            raise CorruptStore(
+                "a non-terminal interaction result carries a completion time"
+            )
+        completed = (
+            None
+            if result in NON_TERMINAL_INTERACTION_RESULTS
+            else (interaction.completed_at or utc_now_rfc3339())
+        )
+        need_label = (
+            interaction.result != result
+            or (
+                receipt is not None
+                and interaction.receipt_request_id != receipt.request_id
+            )
+            or (
+                result not in NON_TERMINAL_INTERACTION_RESULTS
+                and interaction.completed_at is None
+            )
+        )
+        if need_label:
+            updated = self._store.complete_interaction(
+                namespace=ns,
+                interaction_id=interaction_id,
+                result=result,
+                receipt_request_id=(
+                    None if receipt is None else receipt.request_id
+                ),
+                completed_at=completed,
+            )
+            completed = updated.completed_at
+            repaired = True
+        else:
+            repaired = False
+
+        return InteractionResult(
+            interaction_id=interaction.interaction_id,
+            namespace=ns,
+            mode=interaction.mode,
+            result=result,
+            receipt=receipt,
+            candidate_id=(
+                None if candidate is None else candidate.artifact_id
+            ),
+            candidate_status=(
+                None if candidate is None else candidate.status
+            ),
+            repaired=repaired,
+            completed_at=completed,
+        )
 
     # ------------------------------------------------------------- internals
+
+    def _validate_wait_receipt(
+        self,
+        namespace: str,
+        interaction: InteractionRow,
+        receipt: CommitReceipt,
+    ) -> None:
+        """Prove a WAIT receipt belongs to this review interaction (A.1)."""
+
+        if interaction.mode != "review":
+            raise CorruptStore(
+                "a wait receipt requires a review interaction"
+            )
+        if interaction.work_id is None:
+            raise CorruptStore(
+                "a wait receipt requires a work-bound interaction"
+            )
+        if interaction.context_id is None:
+            raise CorruptStore(
+                "a wait receipt requires a context-bound interaction"
+            )
+        if receipt.namespace != namespace:
+            raise CorruptStore(
+                "the wait receipt belongs to another namespace"
+            )
+        if (
+            interaction.receipt_request_id is None
+            or receipt.request_id != interaction.receipt_request_id
+        ):
+            raise CorruptStore(
+                "the wait receipt does not match the interaction receipt label"
+            )
+        if receipt.context_id != interaction.context_id:
+            raise CorruptStore(
+                "the wait receipt context does not match the interaction context"
+            )
+        if receipt.operation != "cognition.wait":
+            raise CorruptStore("the receipt is not a wait command")
+        if receipt.record_refs:
+            raise CorruptStore(
+                "a wait receipt must not append a record version"
+            )
+        if interaction.result not in (None, "incomplete", "waiting"):
+            raise CorruptStore(
+                f"interaction result {interaction.result!r} cannot accept a "
+                "wait receipt"
+            )
+
+    def _validate_belief_receipt(
+        self,
+        namespace: str,
+        interaction: InteractionRow,
+        candidate: CandidateState,
+        receipt: CommitReceipt,
+    ) -> None:
+        """Prove a Belief receipt binds this exact candidate and interaction."""
+
+        if receipt.namespace != namespace:
+            raise CorruptStore(
+                "the belief receipt belongs to another namespace"
+            )
+        if (
+            candidate.request_id is None
+            or receipt.request_id != candidate.request_id
+        ):
+            raise CorruptStore(
+                "the belief receipt request id does not match the candidate"
+            )
+        if receipt.context_id != candidate.context_id:
+            raise CorruptStore(
+                "the belief receipt context does not match the candidate"
+            )
+        if receipt.operation not in PROPOSAL_OPERATIONS:
+            raise CorruptStore(
+                "the receipt operation is not a commit-capable belief operation"
+            )
+        proposal_operation = self._candidate_proposal_operation(
+            namespace, candidate
+        )
+        if proposal_operation is None:
+            # The payload may have been cleared by a deletion cleanup.  Only a
+            # candidate already recorded as committed may omit the equality
+            # check; everything else fails closed.
+            if candidate.status != "committed":
+                raise CorruptStore(
+                    "the candidate proposal is unavailable and the candidate "
+                    "is not committed"
+                )
+        elif receipt.operation != proposal_operation:
+            raise CorruptStore(
+                "the receipt operation does not match the candidate proposal"
+            )
+        digest = self._store.lookup_command_request_digest(
+            namespace=namespace, request_id=receipt.request_id
+        )
+        if (
+            digest is None
+            or candidate.command_digest is None
+            or digest != candidate.command_digest
+        ):
+            raise CorruptStore(
+                "the belief receipt request digest does not match the "
+                "candidate command digest"
+            )
+        if candidate.interaction_id != interaction.interaction_id:
+            raise CorruptStore(
+                "the candidate belongs to another interaction"
+            )
+        if candidate.context_id != interaction.context_id:
+            raise CorruptStore(
+                "the candidate context does not match the interaction context"
+            )
+        if (
+            interaction.work_id is not None
+            and candidate.work_id != interaction.work_id
+        ):
+            raise CorruptStore(
+                "the candidate work does not match the interaction work"
+            )
+        if (
+            interaction.work_generation is not None
+            and candidate.work_generation != interaction.work_generation
+        ):
+            raise CorruptStore(
+                "the candidate generation does not match the interaction "
+                "generation"
+            )
+
+    def _candidate_proposal_operation(
+        self, namespace: str, candidate: CandidateState
+    ) -> str | None:
+        """Read the candidate proposal operation, or ``None`` if unavailable."""
+
+        try:
+            artifact = self._store.load_artifact(
+                namespace=namespace,
+                artifact_id=candidate.artifact_id,
+                artifact_version=1,
+            )
+        except (Redacted, RecordNotFound):
+            return None
+        if not isinstance(artifact.proposal, dict):
+            return None
+        operation = artifact.proposal.get("operation")
+        return operation if isinstance(operation, str) else None
+
+    def _settle_interaction(
+        self,
+        namespace: str,
+        interaction_id: str,
+        result: str,
+        receipt: CommitReceipt | None = None,
+    ) -> None:
+        """Write one interaction label after the authoritative write.
+
+        This is an independent transaction, deliberately outside the C06a
+        CommitGuard: a crash between the commit and this label is exactly the
+        W2 window that :meth:`get_result` repairs.  Storage errors propagate.
+        """
+
+        self._store.complete_interaction(
+            namespace=namespace,
+            interaction_id=interaction_id,
+            result=result,
+            receipt_request_id=(
+                None if receipt is None else receipt.request_id
+            ),
+            completed_at=None,
+        )
 
     def _committed_resolution(
         self, namespace: str, candidate: ArtifactRow
