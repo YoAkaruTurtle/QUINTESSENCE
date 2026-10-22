@@ -55,6 +55,8 @@ ALL_PERMISSIONS = FACADE_PERMISSIONS
 WIDE_PRIVACY = frozenset(identifiers.PRIVACY_CLASSES)
 NARROW_PRIVACY = frozenset({"public-example"})
 REVIEW_PURPOSE = frozenset({"review"})
+GRANT_RERUN = "14141414-1414-4414-8414-141414141414"
+TS = "2026-10-23T00:00:00Z"
 
 
 class ScriptedModel:
@@ -1091,6 +1093,101 @@ class ReviewFacadeTests(CognitionTestCase):
         self.assertEqual("stale", interaction.result)
         self.assertEqual((), self.candidates(view.interaction_id))
         self.assertIsNotNone(self.store.work_progress(work.work_id))
+
+    # ------------------------- 28. an authorized rerun lands the next candidate
+
+    def test_review_after_authorized_rerun_lands_candidate(self) -> None:
+        event, work = self.pending_event()
+        model = ScriptedModel(
+            [
+                self.raw(self.proposal(event)),
+                self.raw(self.proposal(event)),
+                self.raw(self.proposal(event)),
+            ]
+        )
+        facade = self.make_facade(model)
+        access = self.access()
+
+        # 1) One committed review; 2) one rejected review blocks the Work.
+        first = self.review(facade, access, event, work)
+        self.assertEqual("pending", first.state)
+        self.assertEqual(
+            "committed",
+            self.approve(facade, access, first.candidate_id).state,
+        )
+        second = self.review(facade, access, event, work)
+        self.assertEqual("pending", second.state)
+        self.assertEqual(
+            "rejected",
+            self.reject(facade, access, second.candidate_id).state,
+        )
+        control = self.store.work_control(
+            namespace=NS, work_id=work.work_id
+        )
+        self.assertTrue(control.blocked_after_rejection)
+        self.assertEqual(1, control.generation)
+        self.assertIsNone(control.rerun_authorization_ref)
+
+        # 3) A rerun without a registered authorization is still denied and
+        # never reaches the model.
+        calls_before = model.calls
+        denied = self.review(facade, access, event, work)
+        self.assertEqual("denied", denied.state)
+        self.assertEqual(calls_before, model.calls)
+
+        # 4) The host registers and authorizes one exact rerun grant (gen 1).
+        self.store.register_grant(
+            {
+                "grant_id": GRANT_RERUN,
+                "namespace": NS,
+                "schema_version": "collab.v1",
+                "kind": "rerun",
+                "grant_version": 1,
+                "subject": HOST,
+                "authorization_ref": "authorization:rerun:c07",
+                "issued_at": TS,
+                "expires_at": None,
+                "revoked_at": None,
+                "work_id": work.work_id,
+                "generation": 1,
+            }
+        )
+        self.store.authorize_rerun(
+            namespace=NS, work_id=work.work_id, grant_id=GRANT_RERUN
+        )
+
+        # 5) The start gate now allows the next generation.
+        decision = self.store.review_start_decision(
+            namespace=NS, work_id=work.work_id
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(1, decision.generation)
+
+        # 6-7) The candidate lands at generation 1 with the exact registered
+        # rerun reference; the Facade never invents or widens one.
+        rerun = self.review(facade, access, event, work)
+        self.assertEqual("pending", rerun.state)
+        candidate = self.store.load_artifact(
+            namespace=NS,
+            artifact_id=rerun.candidate_id,
+            artifact_version=1,
+        )
+        self.assertEqual(1, candidate.work_generation)
+        self.assertEqual(GRANT_RERUN, candidate.rerun_authorization_ref)
+
+        # 8-9) Committing does not silently unblock the Work or consume the
+        # registered rerun reference.
+        approved = self.approve(
+            facade,
+            access,
+            rerun.candidate_id,
+            decision_id="decision:approve:c07:rerun",
+        )
+        self.assertEqual("committed", approved.state)
+        final = self.store.work_control(namespace=NS, work_id=work.work_id)
+        self.assertTrue(final.blocked_after_rejection)
+        self.assertEqual(1, final.generation)
+        self.assertEqual(GRANT_RERUN, final.rerun_authorization_ref)
 
 
 if __name__ == "__main__":

@@ -690,6 +690,7 @@ class ReviewFacade:
         try:
             with self._store.transaction():
                 current = self._store.unfinished_work_for_event(ns, event_id)
+                rerun_ref: str | None = None
                 if not any(item.work_id == work_id for item in current):
                     self._store.complete_interaction(
                         namespace=ns,
@@ -698,6 +699,35 @@ class ReviewFacade:
                     )
                     moved = True
                 else:
+                    # A blocked Work may only cite the exact rerun reference
+                    # already registered on its control.  C05d re-validates
+                    # that reference (equality, grant state and the start
+                    # gate) inside ``register_candidate``; nothing here is
+                    # relaxed or reconstructed.
+                    control = self._store.work_control(
+                        namespace=ns, work_id=work_id
+                    )
+                    if control is not None and control.generation != generation:
+                        self._store.complete_interaction(
+                            namespace=ns,
+                            interaction_id=interaction_id,
+                            result="stale",
+                        )
+                        moved = True
+                    elif (
+                        control is not None
+                        and control.blocked_after_rejection
+                    ):
+                        rerun_ref = control.rerun_authorization_ref
+                        if rerun_ref is None:
+                            self._store.complete_interaction(
+                                namespace=ns,
+                                interaction_id=interaction_id,
+                                result="stale",
+                            )
+                            moved = True
+
+                if not moved:
                     candidate = self._service.register_review_candidate(
                         namespace=ns,
                         work_id=work_id,
@@ -710,6 +740,7 @@ class ReviewFacade:
                         proposal_version="v1",
                         request_id=str(uuid.uuid4()),
                         sources=sources,
+                        rerun_authorization_ref=rerun_ref,
                     )
         except CandidateTransitionDenied:
             # The store gate refused the landing (a rejection or a generation
