@@ -52,6 +52,7 @@ from ..store.cognition import (
     WORK_OUTCOME_COMMITTED,
 )
 from ..store.tx_b import CommitReceipt
+from .candidate import MAX_MODEL_CALLS, GenerationBudget, generate_candidate
 from .context import ContextEnvelope, ContextService
 from .fake_model import FakeModel
 from .proposal_generation import (
@@ -72,7 +73,6 @@ STEP_OUTCOMES = (
 )
 
 MODEL_FAILURE_CODE = "MODEL_FAILURE"
-MAX_MODEL_CALLS = 2  # one attempt plus one format repair
 
 
 @dataclass(frozen=True)
@@ -205,113 +205,19 @@ class CognitionRuntime:
             )
         work = works[0]
 
-        # A real adapter may refuse before any Context material is assembled
-        # (missing/expired authorization, missing key, exhausted budget).  This
-        # is a local refusal, not a fallback to FakeModel.
-        preflight = getattr(self._model, "preflight", None)
-        if preflight is not None:
-            try:
-                preflight(namespace=ns)
-            except (CorruptStore, DbBusy):
-                raise
-            except Exception as exc:  # noqa: BLE001 - adapter refusal is a result
-                return StepResult(
-                    outcome=OUTCOME_FAILED,
-                    namespace=ns,
-                    trigger_ref=trigger,
-                    work_id=work.work_id,
-                    state_revision=self._store.current_state_revision(ns),
-                    error_code=MODEL_FAILURE_CODE,
-                    error_message=f"{type(exc).__name__}: {exc}",
-                )
-
-        try:
-            context = self._contexts.build_context(
-                namespace=ns,
-                trigger_ref=trigger.to_dict(),
-                adapter_kind=self._model.adapter_kind,
-            )
-        except StorageError as exc:
-            if isinstance(exc, (CorruptStore, DbBusy)):
-                raise
-            return self._failure(ns, trigger, work.work_id, None, exc)
-
-        calls = 0
-        repairs = 0
-        proposal: dict[str, Any] | None = None
-        last_error: StorageError | None = None
-        while calls < MAX_MODEL_CALLS:
-            calls += 1
-            binder = getattr(self._model, "bind_run", None)
-            scope = (
-                binder(namespace=ns, context=context)
-                if binder is not None
-                else nullcontext()
-            )
-            try:
-                with scope:
-                    raw = self._model.propose(
-                        rendered_input=context.rendered_input,
-                        references=context.available_references,
-                        feedback=feedback,
-                    )
-            except (CorruptStore, DbBusy):
-                raise
-            except Exception as exc:  # noqa: BLE001 - model failures are a result
-                if last_error is not None and calls > 1:
-                    # The model produced syntactically valid JSON that failed
-                    # validation, and the one repair could not be sent (for
-                    # example the scenario quota refused the next attempt).
-                    # Keep the original validation error; record the repair
-                    # failure separately so the budget refusal cannot hide it.
-                    return StepResult(
-                        outcome=OUTCOME_FAILED,
-                        namespace=ns,
-                        trigger_ref=trigger,
-                        work_id=work.work_id,
-                        context_id=context.context_id,
-                        state_revision=self._store.current_state_revision(ns),
-                        model_calls=calls,
-                        repairs=repairs,
-                        error_code=getattr(last_error, "code", "INVALID_SCHEMA"),
-                        error_message=str(last_error),
-                        repair_error=f"{type(exc).__name__}: {exc}",
-                    )
-                return StepResult(
-                    outcome=OUTCOME_FAILED,
-                    namespace=ns,
-                    trigger_ref=trigger,
-                    work_id=work.work_id,
-                    context_id=context.context_id,
-                    state_revision=self._store.current_state_revision(ns),
-                    model_calls=calls,
-                    repairs=repairs,
-                    error_code=MODEL_FAILURE_CODE,
-                    error_message=f"{type(exc).__name__}: {exc}",
-                )
-            try:
-                proposal = parse_proposal(raw)
-                if proposal["operation"] != "wait":
-                    validate_proposal(ns, proposal)
-                break
-            except (StorageError, ValueError) as exc:
-                last_error = exc if isinstance(exc, StorageError) else None
-                proposal = None
-                if calls >= MAX_MODEL_CALLS:
-                    return StepResult(
-                        outcome=OUTCOME_FAILED,
-                        namespace=ns,
-                        trigger_ref=trigger,
-                        work_id=work.work_id,
-                        context_id=context.context_id,
-                        state_revision=self._store.current_state_revision(ns),
-                        model_calls=calls,
-                        repairs=repairs,
-                        error_code=getattr(exc, "code", "INVALID_SCHEMA"),
-                        error_message=str(exc),
-                    )
-                repairs += 1
-                feedback = repair_feedback(exc)
+        generation_budget = GenerationBudget()
+        candidate = generate_candidate(
+            namespace=ns,
+            trigger_ref=trigger,
+            context_service=self._contexts,
+            model=self._model,
+            generation_budget=generation_budget,
+            feedback=feedback,
+        )
+        if candidate.failure is not None:
+            return self._candidate_failure(ns, trigger, work.work_id, candidate)
+        context = candidate.context
+        proposal = candidate.proposal
 
         if proposal is None:  # pragma: no cover - loop always sets or returns
             raise CorruptStore("the model loop ended without a proposal")
@@ -336,8 +242,8 @@ class CognitionRuntime:
                         context_id=context.context_id,
                         state_revision=progress.completed_state_revision,
                         receipt=receipt,
-                        model_calls=calls,
-                        repairs=repairs,
+                        model_calls=generation_budget.calls,
+                        repairs=generation_budget.repairs,
                         validation_retries=tuple(validation_retries),
                     )
                 request_id = str(uuid.uuid4())
@@ -381,15 +287,15 @@ class CognitionRuntime:
                         record_version=submission.version.record_version,
                     ),
                     belief_status=submission.version.status,
-                    model_calls=calls,
-                    repairs=repairs,
+                    model_calls=generation_budget.calls,
+                    repairs=generation_budget.repairs,
                     validation_retries=tuple(validation_retries),
                 )
             except StorageError as exc:
                 if isinstance(exc, (CorruptStore, DbBusy)):
                     raise
                 validation_retries.append(str(exc))
-                if calls >= MAX_MODEL_CALLS:
+                if generation_budget.calls >= MAX_MODEL_CALLS:
                     return StepResult(
                         outcome=OUTCOME_FAILED,
                         namespace=ns,
@@ -397,16 +303,19 @@ class CognitionRuntime:
                         work_id=work.work_id,
                         context_id=context.context_id,
                         state_revision=self._store.current_state_revision(ns),
-                        model_calls=calls,
-                        repairs=repairs,
+                        model_calls=generation_budget.calls,
+                        repairs=generation_budget.repairs,
                         validation_retries=tuple(validation_retries),
                         error_code=getattr(exc, "code", "CORRUPT_STORE"),
                         error_message=str(exc),
                     )
                 # One bounded semantic repair.  The rejected transaction did
                 # not change state, so the same live Context is still valid.
-                repairs += 1
-                calls += 1
+                generation_budget.note_repair()
+                if not generation_budget.claim_call():  # pragma: no cover
+                    raise CorruptStore(
+                        "semantic retry exceeded the shared model-call budget"
+                    )
                 binder = getattr(self._model, "bind_run", None)
                 scope = (
                     binder(namespace=ns, context=context)
@@ -430,8 +339,8 @@ class CognitionRuntime:
                         work_id=work.work_id,
                         context_id=context.context_id,
                         state_revision=self._store.current_state_revision(ns),
-                        model_calls=calls,
-                        repairs=repairs,
+                        model_calls=generation_budget.calls,
+                        repairs=generation_budget.repairs,
                         validation_retries=tuple(validation_retries),
                         error_code=getattr(exc, "code", "CORRUPT_STORE"),
                         error_message=str(exc),
@@ -449,8 +358,8 @@ class CognitionRuntime:
                         work_id=work.work_id,
                         context_id=context.context_id,
                         state_revision=self._store.current_state_revision(ns),
-                        model_calls=calls,
-                        repairs=repairs,
+                        model_calls=generation_budget.calls,
+                        repairs=generation_budget.repairs,
                         validation_retries=tuple(validation_retries),
                         error_code=getattr(retry_exc, "code", "INVALID_SCHEMA"),
                         error_message=str(retry_exc),
@@ -505,6 +414,82 @@ class CognitionRuntime:
             state_revision=self._store.current_state_revision(ns),
             error_code=getattr(exc, "code", "CORRUPT_STORE"),
             error_message=str(exc),
+        )
+
+    def _candidate_failure(
+        self,
+        ns: str,
+        trigger: EventRef,
+        work_id: str,
+        candidate: Any,
+    ) -> StepResult:
+        """Map a generation failure to the same StepResult as before C03."""
+
+        failure = candidate.failure
+        if failure.phase == "preflight":
+            return StepResult(
+                outcome=OUTCOME_FAILED,
+                namespace=ns,
+                trigger_ref=trigger,
+                work_id=work_id,
+                state_revision=self._store.current_state_revision(ns),
+                error_code=MODEL_FAILURE_CODE,
+                error_message=f"{type(failure.cause).__name__}: {failure.cause}",
+            )
+        if failure.phase == "context":
+            return self._failure(ns, trigger, work_id, None, failure.cause)
+        if failure.phase == "model":
+            if (
+                failure.last_validation_error is not None
+                and candidate.model_calls > 1
+            ):
+                # The model produced syntactically valid JSON that failed
+                # validation, and the one repair could not be sent (for
+                # example the scenario quota refused the next attempt).
+                # Keep the original validation error; record the repair
+                # failure separately so the budget refusal cannot hide it.
+                return StepResult(
+                    outcome=OUTCOME_FAILED,
+                    namespace=ns,
+                    trigger_ref=trigger,
+                    work_id=work_id,
+                    context_id=candidate.context.context_id,
+                    state_revision=self._store.current_state_revision(ns),
+                    model_calls=candidate.model_calls,
+                    repairs=candidate.repairs,
+                    error_code=getattr(
+                        failure.last_validation_error, "code", "INVALID_SCHEMA"
+                    ),
+                    error_message=str(failure.last_validation_error),
+                    repair_error=f"{type(failure.cause).__name__}: {failure.cause}",
+                )
+            return StepResult(
+                outcome=OUTCOME_FAILED,
+                namespace=ns,
+                trigger_ref=trigger,
+                work_id=work_id,
+                context_id=candidate.context.context_id,
+                state_revision=self._store.current_state_revision(ns),
+                model_calls=candidate.model_calls,
+                repairs=candidate.repairs,
+                error_code=MODEL_FAILURE_CODE,
+                error_message=f"{type(failure.cause).__name__}: {failure.cause}",
+            )
+        if failure.phase == "proposal":
+            return StepResult(
+                outcome=OUTCOME_FAILED,
+                namespace=ns,
+                trigger_ref=trigger,
+                work_id=work_id,
+                context_id=candidate.context.context_id,
+                state_revision=self._store.current_state_revision(ns),
+                model_calls=candidate.model_calls,
+                repairs=candidate.repairs,
+                error_code=getattr(failure.cause, "code", "INVALID_SCHEMA"),
+                error_message=str(failure.cause),
+            )
+        raise CorruptStore(
+            f"unknown candidate failure phase {failure.phase!r}"
         )
 
 
