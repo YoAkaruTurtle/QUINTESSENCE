@@ -38,6 +38,7 @@ from quintessence_pcs.store.experience import (  # noqa: E402
 NS = "example.test.experience"
 NS_B = "example.test.experience.other"
 TS = "2026-10-22T00:00:00Z"
+_AUTO_CONTEXT = object()
 
 INPUT_A = "11111111-1111-4111-8111-111111111111"
 INPUT_B = "12121212-1212-4212-8212-121212121212"
@@ -129,7 +130,7 @@ class ExperienceReadTests(StoreTestCase):
         self,
         *,
         input_refs=(),
-        context_id: str | None = None,
+        context_id: str | None | object = _AUTO_CONTEXT,
         created_at: str = TS,
         result: str | None = None,
         mode: str = "consult",
@@ -147,9 +148,9 @@ class ExperienceReadTests(StoreTestCase):
             policy_ref="policy:collab.v1",
             input_refs=input_refs,
             context_id=(
-                context_id
-                if context_id is not None
-                else self.make_context(namespace)
+                self.make_context(namespace)
+                if context_id is _AUTO_CONTEXT
+                else context_id
             ),
             trigger_ref=trigger_ref,
             work_id=work_id,
@@ -1191,6 +1192,156 @@ class ExperienceReadTests(StoreTestCase):
         )
         self.assertEqual(view, again)
         self.assertEqual(first, again.interaction_id)
+
+    def test_host_supplied_input_is_readable(self) -> None:
+        row = self.make_input(
+            input_id=INPUT_A,
+            body="synthetic host-supplied statement",
+            origin_kind="host_supplied",
+        )
+        context = self.make_context()
+        interaction = self.make_interaction(
+            context_id=context,
+            result="answered",
+            input_refs=[(row.input_id, row.content_version)],
+        )
+        view = self.store.read_experience(
+            self.wide, ref=self.input_ref(row), purpose="consult"
+        )
+        self.assertIsInstance(view, ExperienceView)
+        self.assertEqual("host_supplied", view.origin_kind)
+        self.assertEqual("available", view.readability)
+        self.assertEqual("synthetic host-supplied statement", view.body)
+        self.assertEqual(context, view.context_ref)
+        self.assertEqual(interaction, view.interaction_id)
+        self.assertEqual(1, self.audit_count())
+
+    def test_input_without_context_has_null_context_ref(self) -> None:
+        row = self.make_input(
+            input_id=INPUT_A, body="synthetic contextless statement"
+        )
+        interaction = self.make_interaction(
+            context_id=None,
+            input_refs=[(row.input_id, row.content_version)],
+        )
+        view = self.store.read_experience(
+            self.wide, ref=self.input_ref(row), purpose="consult"
+        )
+        self.assertIsInstance(view, ExperienceView)
+        self.assertIsNone(view.context_ref)
+        self.assertEqual("available", view.readability)
+        self.assertEqual("synthetic contextless statement", view.body)
+        self.assertEqual(interaction, view.interaction_id)
+        stored = self.store.connection.execute(
+            "SELECT context_id FROM collab_interactions WHERE interaction_id = ?",
+            (interaction,),
+        ).fetchone()
+        self.assertIsNone(stored[0])
+        self.assertEqual(1, self.audit_count())
+
+    def test_listed_refs_are_readable_with_wide_access(self) -> None:
+        host = self.make_input(
+            input_id=INPUT_A,
+            origin_kind="host_supplied",
+            recorded_at="2026-10-22T00:00:01Z",
+        )
+        self.make_interaction(
+            context_id=self.make_context(),
+            created_at="2026-10-22T00:00:01Z",
+            input_refs=[(host.input_id, host.content_version)],
+        )
+        contextless = self.make_input(
+            input_id=INPUT_B,
+            recorded_at="2026-10-22T00:00:02Z",
+        )
+        self.make_interaction(
+            context_id=None,
+            created_at="2026-10-22T00:00:02Z",
+            input_refs=[(contextless.input_id, contextless.content_version)],
+        )
+        reply = self.make_artifact(
+            artifact_id=ARTIFACT_A,
+            created_at="2026-10-22T00:00:03Z",
+        )
+
+        page = self.store.list_experience_refs(
+            self.wide, namespace=NS, limit=100
+        )
+        self.assertEqual(
+            (
+                self.input_ref(host),
+                self.input_ref(contextless),
+                self.artifact_ref(reply),
+            ),
+            page.refs,
+        )
+        self.assertIsNone(page.next_cursor)
+
+        views = []
+        for ref in page.refs:
+            view = self.store.read_experience(
+                self.wide, ref=ref, purpose="consult"
+            )
+            self.assertIsInstance(
+                view, ExperienceView, f"{ref!r} was listed but not readable"
+            )
+            views.append(view)
+        self.assertEqual(
+            ["available", "available", "available"],
+            [view.readability for view in views],
+        )
+        self.assertEqual(3, self.audit_count())
+
+    def test_unauthorized_host_supplied_is_not_listed_or_readable(self) -> None:
+        row = self.make_input(
+            input_id=INPUT_A,
+            origin_kind="host_supplied",
+            privacy="private",
+        )
+        self.link_input(row)
+        self.assertEqual(
+            ExperiencePage((), None),
+            self.store.list_experience_refs(self.strict, namespace=NS),
+        )
+        denied = self.store.read_experience(
+            self.strict, ref=self.input_ref(row), purpose="consult"
+        )
+        missing = self.store.read_experience(
+            self.strict,
+            ref={
+                "ref_type": "collab_input",
+                "namespace": NS,
+                "input_id": MISSING_INPUT,
+                "content_version": 1,
+            },
+            purpose="consult",
+        )
+        self.assertIsInstance(denied, ExperienceUnavailable)
+        self.assertIsInstance(missing, ExperienceUnavailable)
+        self.assertEqual("unavailable", denied.readability)
+        self.assertEqual("unavailable", missing.readability)
+        self.assertEqual(
+            ["ref", "readability"],
+            [field.name for field in dataclasses.fields(denied)],
+        )
+        self.assertEqual(
+            ["ref", "readability"],
+            [field.name for field in dataclasses.fields(missing)],
+        )
+        self.assertEqual(0, self.audit_count())
+
+    def test_artifact_view_context_ref_is_never_null(self) -> None:
+        artifact = self.make_artifact(artifact_id=ARTIFACT_A)
+        view = self.store.read_experience(
+            self.wide, ref=self.artifact_ref(artifact), purpose="consult"
+        )
+        self.assertIsInstance(view, ExperienceView)
+        self.assertIsNotNone(view.context_ref)
+        stored = self.store.connection.execute(
+            "SELECT context_id FROM collab_artifacts WHERE artifact_id = ?",
+            (artifact.artifact_id,),
+        ).fetchone()
+        self.assertEqual(stored[0], view.context_ref)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
 
 - 所有 DTO 的 `schema_version` 固定为 `"collab.v1"`。改形状必须新建目录，
   不允许原地修改本目录的已冻结文件。
+- **例外（C05a-R2，2026-10-23）**：`experience_view.json` 做过一次向后兼容
+  的放宽——`origin_kind` 增加 `host_supplied`，`context_ref` 允许 input 视图
+  为 `null`。不升协议版本、不改表、不改删除/授权语义；详见“读取接口与结果”。
 - 引用一律是**类型化对象**，裸 ID 不可表示。`ref_type` 的取值：
   `event`、`record`（pcs.v2）与 `collab_input`、`collab_artifact`（本契约）。
 - `namespace` 与 pcs.v2 相同；所有引用都必须落在 owner 的 namespace 内。
@@ -141,6 +144,23 @@ source 集合必须等于其 `source_refs`。
 - egress 与 `model_authorizations` 是**两道独立闸门**：账本管 calls/预算/
   manifest，egress 管“该类私人内容能否发出”。两者必须同时有效，egress
   不能抬高账本上限。
+
+### experience_view
+
+唯一完整读取视图。`origin_kind` 是对象来源：`user_statement`（用户直接陈述）、
+`host_supplied`（可信宿主提供、非用户直接陈述）、`model_output`（模型输出）、
+`deterministic_query`（确定性查询结果）。**`host_supplied` 仅描述来源类别；
+它不构成事实校验，也不得绕过 R1 成为 EvidenceRef 或进入
+`read_set`/`evidence_links`。** 它不新增任何证据转换或校验流程。
+
+`context_ref` 是对象所属 Context：input 视图取代表交互的 `context_id`，
+artifact 视图取 artifact 自身的 `context_id`。`null` 只允许出现在 input 视图，
+且仅当代表交互尚未装配 Context；它不是“隐藏的 Context”，也不是“已删除”的
+表示（删除用 `readability`）。artifact 视图的 `context_ref` 永远非 `null`。
+字段仍然必填，只是值可以为 `null`。
+
+`readability` 与 `body` 仍按 R11：`body` 非 `null` 当且仅当
+`readability = "available"`；删除后按屏障规则返回 `redacted`/`unavailable`。
 
 ## 权限分离（R13）与单一检查点（R14）
 
@@ -281,6 +301,16 @@ input 的 `interaction_id` 是**代表性关联（representative association）*
 不影响 `next_cursor`，页大小不暗示其存在；游标指向最后一条已返回记录。
 `purpose` 必填并进入审计；不做语义搜索、打分、摘要或 Episode。
 未授权统一 `unavailable`，不因“部分可读”而返回片段。
+
+**列举/读取一致性**：在同一个稳定状态、同一个 access 与允许的 purpose 下，
+任何被 `list_experience_refs` 返回的 ref，`read_experience` 必须返回
+`ExperienceView`（`available` / `redacted` / 删除后的 `unavailable`），不得
+因为契约无法表达而返回 `ExperienceUnavailable`。`read_experience` 每次重新
+检查隐私、purpose 与删除屏障，不缓存列举结果；两次调用之间发生删除、清理、
+权限变更或新写入时，行为仍以当时的隐私/屏障规则为准。
+
+以上是 `collab.v1` 内的兼容性修正（C05a-R2）：不升协议版本、不改表、不改
+删除或授权语义。
 
 ## 两层静态校验
 

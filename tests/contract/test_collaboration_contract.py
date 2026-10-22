@@ -1153,7 +1153,12 @@ class CollaborationContractTests(unittest.TestCase):
 
         view = load(CONTRACT_DIR / "experience_view.json")["properties"]
         self.assertEqual(
-            {"user_statement", "model_output", "deterministic_query"},
+            {
+                "user_statement",
+                "host_supplied",
+                "model_output",
+                "deterministic_query",
+            },
             set(view["origin_kind"]["enum"]),
         )
         self.assertEqual(
@@ -1172,6 +1177,37 @@ class CollaborationContractTests(unittest.TestCase):
             set(view["processing"]["enum"]),
         )
         self.assertEqual({"string", "null"}, set(view["body"]["type"]))
+
+    # -------------------------------------------------------------- S3b
+    def test_experience_view_accepts_host_supplied_and_null_context(self) -> None:
+        namespace = "example.private"
+        view = {
+            "ref": {
+                "ref_type": "collab_input",
+                "namespace": namespace,
+                "input_id": "22222222-2222-4222-8222-222222222222",
+                "content_version": 1,
+            },
+            "namespace": namespace,
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "mode": "consult",
+            "origin_kind": "host_supplied",
+            "processing": "in_progress",
+            "readability": "available",
+            "body": "synthetic host-supplied body",
+            "retention": "standard",
+            "context_ref": None,
+            "attempt_ref": None,
+            "source_refs": [],
+            "created_at": "2026-10-22T00:00:00Z",
+        }
+        failures = self.checker.validate("experience_view.json", view)
+        self.assertEqual([], [failure.as_tuple() for failure in failures])
+
+        bad = dict(view, origin_kind="unknown_origin")
+        failures = self.checker.validate("experience_view.json", bad)
+        tuples = {(failure.path, failure.keyword) for failure in failures}
+        self.assertIn(("/origin_kind", "enum"), tuples)
 
     # ---------------------------------------------------------------- S4
     def test_permission_separation_is_structural_and_operational(self) -> None:

@@ -70,10 +70,15 @@ PROCESSING_RESULTS = (
     "failed",
     "incomplete",
 )
-#: The frozen ``experience_view.origin_kind`` enum.  An input may also be
-#: ``host_supplied``, which the view contract cannot represent; such a
-#: reference is returned as unavailable rather than fabricating an origin.
-VIEW_ORIGIN_KINDS = ("user_statement", "model_output", "deterministic_query")
+#: The frozen ``experience_view.origin_kind`` enum.  ``host_supplied`` is a
+#: provenance label only; it does not validate facts and never makes a view
+#: evidence (R1).
+VIEW_ORIGIN_KINDS = (
+    "user_statement",
+    "host_supplied",
+    "model_output",
+    "deterministic_query",
+)
 
 REF_TYPES = (COLLAB_INPUT, COLLAB_ARTIFACT)
 READ_AUDIT_TABLE = "collab_experience_reads"
@@ -116,7 +121,7 @@ class ExperienceView:
     readability: str
     body: str | None
     retention: str
-    context_ref: str
+    context_ref: str | None
     attempt_ref: dict[str, Any] | None
     source_refs: tuple[dict[str, Any], ...]
     created_at: str
@@ -498,11 +503,7 @@ class ExperienceMixin:
         )
         if interaction is None:
             return ExperienceUnavailable(ref)
-        if interaction["context_id"] is None:
-            # The frozen view requires a Context UUID; do not invent one.
-            return ExperienceUnavailable(ref)
         if row["origin_kind"] not in VIEW_ORIGIN_KINDS:
-            # ``host_supplied`` is representable as an input but not as a view.
             return ExperienceUnavailable(ref)
 
         processing = self._processing(interaction["result"])

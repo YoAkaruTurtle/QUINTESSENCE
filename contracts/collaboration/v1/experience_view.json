@@ -39,8 +39,10 @@
     },
     "origin_kind": {
       "type": "string",
+      "description": "Provenance of the referenced object: user_statement is a direct user statement, host_supplied is trusted host material that is not a direct user statement, model_output is a model result, deterministic_query is a deterministic query result. host_supplied is only a provenance label: it is not factual validation and never makes the view evidence (R1).",
       "enum": [
         "user_statement",
+        "host_supplied",
         "model_output",
         "deterministic_query"
       ]
@@ -76,7 +78,15 @@
       "$ref": "_common.json#/$defs/retention"
     },
     "context_ref": {
-      "$ref": "_common.json#/$defs/uuid"
+      "description": "Context of the object: for an input view, the Context of its representative interaction; for an artifact view, the artifact's own Context. null is allowed only for an input view whose representative interaction has not been bound to a Context yet. It is neither a hidden Context nor a deleted one (deletion is expressed by readability), and an artifact view is always non-null. The field remains required; only its value may be null.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "attempt_ref": {
       "oneOf": [
