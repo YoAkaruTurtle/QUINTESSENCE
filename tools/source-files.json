@@ -24,6 +24,7 @@
   "contracts/v2/response.json",
   "contracts/v2/scope.json",
   "docs/development/MIGRATION-BOUNDARY.md",
+  "docs/development/STATUS.md",
   "pyproject.toml",
   "src/quintessence_pcs/__init__.py",
   "src/quintessence_pcs/domains/__init__.py",
