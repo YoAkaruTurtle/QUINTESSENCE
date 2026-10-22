@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "candidate.json",
+  "title": "CollaborationCandidate",
+  "description": "Storage shape of one review candidate. It repeats the artifact fields explicitly and adds the proposal, the work generation and the two independent authorization references. rerun_authorization_ref records how the generation was authorized; commit_authorization_ref records how the commit was authorized. Under manual approval commit_authorization_ref is null. Only status, decided_at and decision_ref change after creation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_id",
+    "namespace",
+    "schema_version",
+    "artifact_version",
+    "kind",
+    "interaction_id",
+    "context_id",
+    "attempt_ref",
+    "origin_kind",
+    "body",
+    "content_digest",
+    "source_refs",
+    "created_at",
+    "proposal",
+    "proposal_digest",
+    "proposal_version",
+    "work_id",
+    "work_generation",
+    "request_id",
+    "command_digest",
+    "structural_validation",
+    "rerun_authorization_ref",
+    "commit_authorization_ref",
+    "status",
+    "decided_at",
+    "decision_ref"
+  ],
+  "properties": {
+    "artifact_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "artifact_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "kind": {
+      "const": "candidate"
+    },
+    "interaction_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "context_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "attempt_ref": {
+      "$ref": "_common.json#/$defs/attempt_ref"
+    },
+    "origin_kind": {
+      "const": "model_output"
+    },
+    "body": {
+      "type": "string",
+      "description": "Raw model output text. content_digest is sha256 over its UTF-8 bytes.",
+      "minLength": 1,
+      "maxLength": 262144
+    },
+    "content_digest": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/source_ref"
+      }
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "proposal": {
+      "type": "object",
+      "description": "Parsed and domain-normalised commit basis. Its canonical form is exactly the request_payload C05d passes to commit_command, without request_id or digest."
+    },
+    "proposal_digest": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "proposal_version": {
+      "$ref": "_common.json#/$defs/proposal_version"
+    },
+    "work_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "work_generation": {
+      "$ref": "_common.json#/$defs/generation"
+    },
+    "request_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "command_digest": {
+      "type": "string",
+      "description": "Must equal Tx B _request_digest(namespace, operation, context_id, request_payload). Bare 64-character lower-case hex.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "structural_validation": {
+      "const": "passed",
+      "description": "Only a structurally valid proposal becomes a candidate; a failed parse is an interaction failure, not a candidate."
+    },
+    "rerun_authorization_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "grant_id of the rerun grant that authorised this generation; null at generation 0 when the work was never rejected.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "commit_authorization_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "grant_id of the commit grant that authorised this commit; null when the commit path is manual approval.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "committed",
+        "rejected",
+        "stale",
+        "failed"
+      ]
+    },
+    "decided_at": {
+      "$ref": "_common.json#/$defs/nullable_timestamp_utc"
+    },
+    "decision_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Audit reference of the approval/rejection decision; null while pending.",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

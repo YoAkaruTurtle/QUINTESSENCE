@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source_ref.json",
+  "title": "SourceRef",
+  "description": "Thin DTO wrapper around the four-branch source reference union in _common.json. It exists so a bare source reference can be validated on its own; the shape is not re-implemented here.",
+  "$ref": "_common.json#/$defs/source_ref"
+}

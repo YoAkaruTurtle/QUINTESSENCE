@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "artifact.json",
+  "title": "CollaborationArtifact",
+  "description": "Storage shape of one immutable collaboration artifact version: an ordinary reply or a deterministic query result. Readability is deliberately absent; it exists only on experience_view. Cleanup clears the payload, not the identity, version, digest or authorizations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_id",
+    "namespace",
+    "schema_version",
+    "artifact_version",
+    "kind",
+    "interaction_id",
+    "context_id",
+    "attempt_ref",
+    "origin_kind",
+    "body",
+    "content_digest",
+    "source_refs",
+    "created_at"
+  ],
+  "properties": {
+    "artifact_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "artifact_version": {
+      "type": "integer",
+      "description": "Artifact version, starting at 1. A v1 artifact is always version 1.",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "reply",
+        "query_result"
+      ]
+    },
+    "interaction_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "context_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "attempt_ref": {
+      "description": "Model attempt that produced the body; null for deterministic_query.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/attempt_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "origin_kind": {
+      "type": "string",
+      "enum": [
+        "model_output",
+        "deterministic_query"
+      ]
+    },
+    "body": {
+      "type": "string",
+      "description": "Artifact text. The storage contract freezes the created shape; after an authorized deletion the payload is cleared and the reference is read through experience_view only.",
+      "minLength": 1,
+      "maxLength": 262144
+    },
+    "content_digest": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "source_refs": {
+      "type": "array",
+      "description": "Exact sources behind this artifact. Collaboration refs are allowed here; they are never evidence and never a read_set entry.",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/source_ref"
+      }
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    }
+  }
+}

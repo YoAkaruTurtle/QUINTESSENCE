@@ -1,0 +1,2160 @@
+{
+  "format": "collab.v1-invalid-vectors-1",
+  "protocol_version": "collab.v1",
+  "cases": [
+    {
+      "layer": "schema",
+      "name": "interaction.result_unknown",
+      "schema": "interaction.json",
+      "instance": {
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "mode": "consult",
+        "activation_kind": "user_input",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "trigger_ref": null,
+        "work_id": null,
+        "work_generation": null,
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "result": "open",
+        "receipt_request_id": null,
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:collab.v1",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": null
+      },
+      "expect_path": "/result",
+      "expect_keyword": "enum"
+    },
+    {
+      "layer": "schema",
+      "name": "interaction.missing_namespace",
+      "schema": "interaction.json",
+      "instance": {
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "schema_version": "collab.v1",
+        "mode": "consult",
+        "activation_kind": "user_input",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "trigger_ref": null,
+        "work_id": null,
+        "work_generation": null,
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "result": null,
+        "receipt_request_id": null,
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:collab.v1",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": null
+      },
+      "expect_path": "",
+      "expect_keyword": "required"
+    },
+    {
+      "layer": "schema",
+      "name": "input.content_digest_malformed",
+      "schema": "input.json",
+      "instance": {
+        "input_id": "22222222-2222-4222-8222-222222222222",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "content_version": 1,
+        "origin_kind": "user_statement",
+        "body": "I want to turn last week's argument into a testable conclusion.",
+        "content_digest": "sha256:NOT-A-DIGEST",
+        "privacy_class": "private",
+        "retention": "standard",
+        "observed_at": "2026-10-22T09:00:00Z",
+        "recorded_at": "2026-10-22T09:00:00Z",
+        "supersedes": null
+      },
+      "expect_path": "/content_digest",
+      "expect_keyword": "pattern"
+    },
+    {
+      "layer": "schema",
+      "name": "input.body_empty",
+      "schema": "input.json",
+      "instance": {
+        "input_id": "22222222-2222-4222-8222-222222222222",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "content_version": 1,
+        "origin_kind": "user_statement",
+        "body": "",
+        "content_digest": "sha256:08133b71ef03823bd254626105f31614111bb9454aa130f6c07454f6b71875b9",
+        "privacy_class": "private",
+        "retention": "standard",
+        "observed_at": "2026-10-22T09:00:00Z",
+        "recorded_at": "2026-10-22T09:00:00Z",
+        "supersedes": null
+      },
+      "expect_path": "/body",
+      "expect_keyword": "minLength"
+    },
+    {
+      "layer": "schema",
+      "name": "artifact.kind_unknown",
+      "schema": "artifact.json",
+      "instance": {
+        "artifact_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "note",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": {
+          "authorization_id": "20202020-2020-4020-8020-202020202020",
+          "attempt_id": "19191919-1919-4919-8919-191919191919",
+          "attempt_no": 1,
+          "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+        },
+        "origin_kind": "model_output",
+        "body": "A reply that cites the user's input without treating it as evidence.",
+        "content_digest": "sha256:393723eca70407c237619aa48c0fc508a9f48933720ff744c38abab8ab172877",
+        "source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "created_at": "2026-10-22T09:00:04Z"
+      },
+      "expect_path": "/kind",
+      "expect_keyword": "enum"
+    },
+    {
+      "layer": "schema",
+      "name": "candidate.command_digest_upper",
+      "schema": "candidate.json",
+      "instance": {
+        "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "attempt_no": 2,
+          "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+        "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:05Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate two"
+        },
+        "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "proposal_version": "v1",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 1,
+        "request_id": "22223333-4444-4555-8666-777788889999",
+        "command_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+        "commit_authorization_ref": null,
+        "status": "pending",
+        "decided_at": null,
+        "decision_ref": null
+      },
+      "expect_path": "/command_digest",
+      "expect_keyword": "pattern"
+    },
+    {
+      "layer": "schema",
+      "name": "candidate.missing_proposal_version",
+      "schema": "candidate.json",
+      "instance": {
+        "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "attempt_no": 2,
+          "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+        "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:05Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate two"
+        },
+        "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 1,
+        "request_id": "22223333-4444-4555-8666-777788889999",
+        "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+        "commit_authorization_ref": null,
+        "status": "pending",
+        "decided_at": null,
+        "decision_ref": null
+      },
+      "expect_path": "",
+      "expect_keyword": "required"
+    },
+    {
+      "layer": "schema",
+      "name": "work_control.negative_generation",
+      "schema": "work_control.json",
+      "instance": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "schema_version": "collab.v1",
+        "generation": -1,
+        "blocked_after_rejection": false,
+        "control_version": 1,
+        "rerun_authorization_ref": null,
+        "block_reason": null,
+        "updated_at": "2026-10-22T09:00:00Z",
+        "last_candidate_ref": null
+      },
+      "expect_path": "/generation",
+      "expect_keyword": "minimum"
+    },
+    {
+      "layer": "schema",
+      "name": "context_binding.read_set_duplicate",
+      "schema": "context_binding.json",
+      "instance": {
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "context_kind": "consult",
+        "envelope_version": "collab.v1",
+        "trigger_ref": null,
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "state_revision": 7,
+        "context_event_seq": 21,
+        "privacy_epoch": 2,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 3
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "usage": "pinned_asset"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "usage": "pinned_asset"
+          }
+        ],
+        "collab_source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "renderer_version": "collab.renderer.v1",
+        "policy_ref": "collab.v1",
+        "content_hash": "sha256:ade2bb66a0ff4872d948be79c39bd1e01caca58830564f31bb7a4adc9d87df87",
+        "model_input_complete": true,
+        "created_at": "2026-10-22T09:00:02Z"
+      },
+      "expect_path": "/read_set/1",
+      "expect_keyword": "uniqueItems"
+    },
+    {
+      "layer": "schema",
+      "name": "source_link.owner_version_zero",
+      "schema": "source_link.json",
+      "instance": {
+        "namespace": "example.private",
+        "owner_kind": "context",
+        "owner_id": "33333333-3333-4333-8333-333333333333",
+        "owner_version": 0,
+        "source": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "created_at": "2026-10-22T09:00:05Z"
+      },
+      "expect_path": "/owner_version",
+      "expect_keyword": "oneOf"
+    },
+    {
+      "layer": "schema",
+      "name": "grant.commit_policy_missing_operations",
+      "schema": "grant.json",
+      "instance": {
+        "grant_id": "13131313-1313-4313-8313-131313131313",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "kind": "commit",
+        "grant_version": 1,
+        "subject": "host:synthetic-1",
+        "authorization_ref": "authorization:commit:1",
+        "issued_at": "2026-10-22T09:00:00Z",
+        "expires_at": "2026-10-23T09:00:00Z",
+        "revoked_at": null,
+        "scope": "policy",
+        "trigger_kinds": [
+          "manual_review"
+        ]
+      },
+      "expect_path": "",
+      "expect_keyword": "oneOf"
+    },
+    {
+      "layer": "schema",
+      "name": "grant.access_with_egress_field",
+      "schema": "grant.json",
+      "instance": {
+        "grant_id": "16161616-1616-4616-8616-161616161616",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "kind": "access",
+        "grant_version": 1,
+        "subject": "host:synthetic-1",
+        "authorization_ref": "authorization:access:1",
+        "issued_at": "2026-10-22T09:00:00Z",
+        "expires_at": "2026-10-23T09:00:00Z",
+        "revoked_at": null,
+        "purposes": [
+          "consult"
+        ],
+        "data_classes": [
+          "private"
+        ],
+        "provider": "synthetic-provider"
+      },
+      "expect_path": "",
+      "expect_keyword": "oneOf"
+    },
+    {
+      "layer": "schema",
+      "name": "experience_view.readability_unknown",
+      "schema": "experience_view.json",
+      "instance": {
+        "ref": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "namespace": "example.private",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "mode": "consult",
+        "origin_kind": "user_statement",
+        "processing": "answered",
+        "readability": "hidden",
+        "body": "I want to turn last week's argument into a testable conclusion.",
+        "retention": "standard",
+        "context_ref": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": null,
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:06Z"
+      },
+      "expect_path": "/readability",
+      "expect_keyword": "enum"
+    },
+    {
+      "layer": "schema",
+      "name": "source_ref.missing_event_id",
+      "schema": "source_ref.json",
+      "instance": {
+        "ref_type": "event",
+        "namespace": "example.private"
+      },
+      "expect_path": "",
+      "expect_keyword": "oneOf"
+    },
+    {
+      "layer": "semantic",
+      "name": "artifacts.cycle",
+      "rule": "R7",
+      "objects": [
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "30303030-3030-4030-8030-303030303030",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "query result a",
+            "content_digest": "sha256:efaab9a95055c64015e72789158c80c6163bed25247e17789a71699ee3310b76",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "31313131-3131-4131-8131-313131313131",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "31313131-3131-4131-8131-313131313131",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "query result b",
+            "content_digest": "sha256:c262027e3889011192159e1473cf4fc775a38ff5999fe9ed1aa7a6007e9a7516",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "30303030-3030-4030-8030-303030303030",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "30303030-3030-4030-8030-303030303030",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "31313131-3131-4131-8131-313131313131",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "31313131-3131-4131-8131-313131313131",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "30303030-3030-4030-8030-303030303030",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "artifacts.depth_over_eight",
+      "rule": "R7",
+      "objects": [
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "40404040-40404040-4400-84000-404040404040",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 0",
+            "content_digest": "sha256:49bc11cfcb9931c665a2b23c7093202f3960d2560fe61dfca154571b15931132",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "41414141-41414141-4410-84100-414141414141",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "40404040-40404040-4400-84000-404040404040",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "41414141-41414141-4410-84100-414141414141",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "41414141-41414141-4410-84100-414141414141",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 1",
+            "content_digest": "sha256:4d3ead64b92d734c4d8007052d7a622f420749f58b69c79792972e77a6e3c430",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "42424242-42424242-4420-84200-424242424242",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "41414141-41414141-4410-84100-414141414141",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "42424242-42424242-4420-84200-424242424242",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "42424242-42424242-4420-84200-424242424242",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 2",
+            "content_digest": "sha256:eff45baf3ee5f075ffa203e46c9fd3e39ab375aa027df352a0620520ac17f69a",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "43434343-43434343-4430-84300-434343434343",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "42424242-42424242-4420-84200-424242424242",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "43434343-43434343-4430-84300-434343434343",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "43434343-43434343-4430-84300-434343434343",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 3",
+            "content_digest": "sha256:95451f3be19b72606f0db23c55a192d7fd327822de83608beba47613c8cb9514",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "44444444-44444444-4440-84400-444444444444",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "43434343-43434343-4430-84300-434343434343",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "44444444-44444444-4440-84400-444444444444",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "44444444-44444444-4440-84400-444444444444",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 4",
+            "content_digest": "sha256:338e5548686e68e1e9762e6dc4d3f3ba80039d8027c96fff581c11a498c9092a",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "45454545-45454545-4450-84500-454545454545",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "44444444-44444444-4440-84400-444444444444",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "45454545-45454545-4450-84500-454545454545",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "45454545-45454545-4450-84500-454545454545",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 5",
+            "content_digest": "sha256:e1dd5587cbac574538729e54a11343bd4762f12b060440423de2ca01379fdc6a",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "46464646-46464646-4460-84600-464646464646",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "45454545-45454545-4450-84500-454545454545",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "46464646-46464646-4460-84600-464646464646",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "46464646-46464646-4460-84600-464646464646",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 6",
+            "content_digest": "sha256:c55e372f39b87f6462f39b96ed7508606a060e1eff4fca3d56aeab5f9175a010",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "47474747-47474747-4470-84700-474747474747",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "46464646-46464646-4460-84600-464646464646",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "47474747-47474747-4470-84700-474747474747",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "47474747-47474747-4470-84700-474747474747",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 7",
+            "content_digest": "sha256:3956bfc07e3595f7e302ec2b1c2173fdbe0332f0280ff5fb5fee7fa130b20465",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "48484848-48484848-4480-84800-484848484848",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "47474747-47474747-4470-84700-474747474747",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "48484848-48484848-4480-84800-484848484848",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "48484848-48484848-4480-84800-484848484848",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 8",
+            "content_digest": "sha256:6ace9cd339c50e4c0ad5b2c4ec41fb1cfdf03d27f0e016f3e67d00b75a4cbd6b",
+            "source_refs": [
+              {
+                "ref_type": "collab_artifact",
+                "namespace": "example.private",
+                "artifact_id": "49494949-49494949-4490-84900-494949494949",
+                "artifact_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "48484848-48484848-4480-84800-484848484848",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "49494949-49494949-4490-84900-494949494949",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "49494949-49494949-4490-84900-494949494949",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "depth artifact 9",
+            "content_digest": "sha256:9efc0cd14621259e3b90e83349b69ffba303c44f32af91d6fab54816be713613",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "context_binding.consult_with_trigger",
+      "rule": "R12",
+      "objects": [
+        {
+          "type": "synthetic_externals",
+          "value": {
+            "events": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "66666666-6666-4666-8666-666666666666"
+              }
+            ],
+            "records": [
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "55555555-5555-4555-8555-555555555555",
+                "record_version": 3
+              },
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "18181818-1818-4818-8818-181818181818",
+                "record_version": 2
+              }
+            ]
+          }
+        },
+        {
+          "type": "context_binding",
+          "value": {
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "context_kind": "consult",
+            "envelope_version": "collab.v1",
+            "trigger_ref": {
+              "ref_type": "event",
+              "namespace": "example.private",
+              "event_id": "66666666-6666-4666-8666-666666666666"
+            },
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "state_revision": 7,
+            "context_event_seq": 21,
+            "privacy_epoch": 2,
+            "profile_ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "read_set": [
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "55555555-5555-4555-8555-555555555555",
+                  "record_version": 3
+                },
+                "usage": "pinned_asset"
+              }
+            ],
+            "collab_source_refs": [],
+            "renderer_version": "collab.renderer.v1",
+            "policy_ref": "collab.v1",
+            "content_hash": "sha256:ade2bb66a0ff4872d948be79c39bd1e01caca58830564f31bb7a4adc9d87df87",
+            "model_input_complete": true,
+            "created_at": "2026-10-22T09:00:02Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "context_binding.review_without_trigger",
+      "rule": "R12",
+      "objects": [
+        {
+          "type": "synthetic_externals",
+          "value": {
+            "events": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "66666666-6666-4666-8666-666666666666"
+              }
+            ],
+            "records": [
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "55555555-5555-4555-8555-555555555555",
+                "record_version": 3
+              },
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "18181818-1818-4818-8818-181818181818",
+                "record_version": 2
+              }
+            ]
+          }
+        },
+        {
+          "type": "context_binding",
+          "value": {
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "context_kind": "review",
+            "envelope_version": "pcs.v2",
+            "trigger_ref": null,
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "state_revision": 9,
+            "context_event_seq": 30,
+            "privacy_epoch": 2,
+            "profile_ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "read_set": [
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "55555555-5555-4555-8555-555555555555",
+                  "record_version": 3
+                },
+                "usage": "pinned_asset"
+              },
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "18181818-1818-4818-8818-181818181818",
+                  "record_version": 2
+                },
+                "usage": "historical"
+              }
+            ],
+            "collab_source_refs": [],
+            "renderer_version": "pcs.renderer.v2",
+            "policy_ref": "pcs.v2",
+            "content_hash": "sha256:81e0939819502a436dcd08c595384e27c72bc280bbb1aa0a5ed00b96ed3a90fa",
+            "model_input_complete": true,
+            "created_at": "2026-10-22T09:00:01Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "interaction.review_missing_work",
+      "rule": "R12",
+      "objects": [
+        {
+          "type": "synthetic_externals",
+          "value": {
+            "events": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "66666666-6666-4666-8666-666666666666"
+              }
+            ],
+            "records": [
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "55555555-5555-4555-8555-555555555555",
+                "record_version": 3
+              },
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "18181818-1818-4818-8818-181818181818",
+                "record_version": 2
+              }
+            ]
+          }
+        },
+        {
+          "type": "interaction",
+          "value": {
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "mode": "review",
+            "activation_kind": "manual_review",
+            "host_instance": "host:synthetic-1",
+            "input_refs": [],
+            "trigger_ref": {
+              "ref_type": "event",
+              "namespace": "example.private",
+              "event_id": "66666666-6666-4666-8666-666666666666"
+            },
+            "work_id": null,
+            "work_generation": null,
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "result": null,
+            "receipt_request_id": null,
+            "access_ref": "authorization:access:1",
+            "policy_ref": "policy:pcs.v2",
+            "created_at": "2026-10-22T09:00:00Z",
+            "completed_at": null
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "context_binding.snapshot_content_hash_mismatch",
+      "rule": "R12",
+      "objects": [
+        {
+          "type": "synthetic_externals",
+          "value": {
+            "events": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "66666666-6666-4666-8666-666666666666"
+              }
+            ],
+            "records": [
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "55555555-5555-4555-8555-555555555555",
+                "record_version": 3
+              },
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "18181818-1818-4818-8818-181818181818",
+                "record_version": 2
+              }
+            ]
+          }
+        },
+        {
+          "type": "context_binding",
+          "value": {
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "context_kind": "review",
+            "envelope_version": "pcs.v2",
+            "trigger_ref": {
+              "ref_type": "event",
+              "namespace": "example.private",
+              "event_id": "66666666-6666-4666-8666-666666666666"
+            },
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "state_revision": 9,
+            "context_event_seq": 30,
+            "privacy_epoch": 2,
+            "profile_ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "read_set": [
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "55555555-5555-4555-8555-555555555555",
+                  "record_version": 3
+                },
+                "usage": "pinned_asset"
+              },
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "18181818-1818-4818-8818-181818181818",
+                  "record_version": 2
+                },
+                "usage": "historical"
+              }
+            ],
+            "collab_source_refs": [],
+            "renderer_version": "pcs.renderer.v2",
+            "policy_ref": "pcs.v2",
+            "content_hash": "sha256:81e0939819502a436dcd08c595384e27c72bc280bbb1aa0a5ed00b96ed3a90fa",
+            "model_input_complete": true,
+            "created_at": "2026-10-22T09:00:01Z"
+          }
+        },
+        {
+          "type": "context_snapshot",
+          "value": {
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "namespace": "example.private",
+            "trigger_ref": {
+              "ref_type": "event",
+              "namespace": "example.private",
+              "event_id": "66666666-6666-4666-8666-666666666666"
+            },
+            "state_revision": 9,
+            "context_event_seq": 30,
+            "privacy_epoch": 2,
+            "profile_ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "read_set": [
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "55555555-5555-4555-8555-555555555555",
+                  "record_version": 3
+                },
+                "usage": "pinned_asset"
+              },
+              {
+                "ref": {
+                  "ref_type": "record",
+                  "namespace": "example.private",
+                  "record_id": "18181818-1818-4818-8818-181818181818",
+                  "record_version": 2
+                },
+                "usage": "historical"
+              }
+            ],
+            "content_hash": "sha256:a4e6d615425b81b39b4155309abbc2cb0e55a6d7554c01859d71451398b97236"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "experience_view.available_without_body",
+      "rule": "R11",
+      "objects": [
+        {
+          "type": "experience_view",
+          "value": {
+            "ref": {
+              "ref_type": "collab_input",
+              "namespace": "example.private",
+              "input_id": "22222222-2222-4222-8222-222222222222",
+              "content_version": 1
+            },
+            "namespace": "example.private",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "mode": "consult",
+            "origin_kind": "user_statement",
+            "processing": "answered",
+            "readability": "available",
+            "body": null,
+            "retention": "standard",
+            "context_ref": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:06Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "context_binding.read_set_holds_collab_ref",
+      "rule": "R1",
+      "objects": [
+        {
+          "type": "context_binding",
+          "value": {
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "context_kind": "consult",
+            "envelope_version": "collab.v1",
+            "trigger_ref": null,
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "state_revision": 7,
+            "context_event_seq": 21,
+            "privacy_epoch": 2,
+            "profile_ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "read_set": [
+              {
+                "ref": {
+                  "ref_type": "collab_input",
+                  "namespace": "example.private",
+                  "input_id": "22222222-2222-4222-8222-222222222222",
+                  "content_version": 1
+                },
+                "usage": "current"
+              }
+            ],
+            "collab_source_refs": [],
+            "renderer_version": "collab.renderer.v1",
+            "policy_ref": "collab.v1",
+            "content_hash": "sha256:ade2bb66a0ff4872d948be79c39bd1e01caca58830564f31bb7a4adc9d87df87",
+            "model_input_complete": true,
+            "created_at": "2026-10-22T09:00:02Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "source_link.artifact_sources_disagree",
+      "rule": "R2",
+      "objects": [
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "44444444-4444-4444-8444-444444444444",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "reply",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": {
+              "authorization_id": "20202020-2020-4020-8020-202020202020",
+              "attempt_id": "19191919-1919-4919-8919-191919191919",
+              "attempt_no": 1,
+              "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+            },
+            "origin_kind": "model_output",
+            "body": "A reply that cites the user's input without treating it as evidence.",
+            "content_digest": "sha256:393723eca70407c237619aa48c0fc508a9f48933720ff744c38abab8ab172877",
+            "source_refs": [
+              {
+                "ref_type": "collab_input",
+                "namespace": "example.private",
+                "input_id": "22222222-2222-4222-8222-222222222222",
+                "content_version": 1
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "44444444-4444-4444-8444-444444444444",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "collab_artifact",
+              "namespace": "example.private",
+              "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "artifact_version": 1
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "interaction.cross_namespace_input",
+      "rule": "R2",
+      "objects": [
+        {
+          "type": "interaction",
+          "value": {
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "mode": "consult",
+            "activation_kind": "user_input",
+            "host_instance": "host:synthetic-1",
+            "input_refs": [
+              {
+                "ref_type": "collab_input",
+                "namespace": "example.other",
+                "input_id": "32323232-3232-4232-8232-323232323232",
+                "content_version": 1
+              }
+            ],
+            "trigger_ref": null,
+            "work_id": null,
+            "work_generation": null,
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "result": null,
+            "receipt_request_id": null,
+            "access_ref": "authorization:access:1",
+            "policy_ref": "policy:collab.v1",
+            "created_at": "2026-10-22T09:00:00Z",
+            "completed_at": null
+          }
+        },
+        {
+          "type": "input",
+          "value": {
+            "input_id": "32323232-3232-4232-8232-323232323232",
+            "namespace": "example.other",
+            "schema_version": "collab.v1",
+            "content_version": 1,
+            "origin_kind": "user_statement",
+            "body": "I want to turn last week's argument into a testable conclusion.",
+            "content_digest": "sha256:08133b71ef03823bd254626105f31614111bb9454aa130f6c07454f6b71875b9",
+            "privacy_class": "private",
+            "retention": "standard",
+            "observed_at": "2026-10-22T09:00:00Z",
+            "recorded_at": "2026-10-22T09:00:00Z",
+            "supersedes": null
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "source_ref.undeclared_external",
+      "rule": "R2",
+      "objects": [
+        {
+          "type": "synthetic_externals",
+          "value": {
+            "events": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "66666666-6666-4666-8666-666666666666"
+              }
+            ],
+            "records": [
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "55555555-5555-4555-8555-555555555555",
+                "record_version": 3
+              },
+              {
+                "ref_type": "record",
+                "namespace": "example.private",
+                "record_id": "18181818-1818-4818-8818-181818181818",
+                "record_version": 2
+              }
+            ]
+          }
+        },
+        {
+          "type": "artifact",
+          "value": {
+            "artifact_id": "44444444-4444-4444-8444-444444444444",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "query_result",
+            "interaction_id": "11111111-1111-4111-8111-111111111111",
+            "context_id": "33333333-3333-4333-8333-333333333333",
+            "attempt_ref": null,
+            "origin_kind": "deterministic_query",
+            "body": "query over an undeclared event",
+            "content_digest": "sha256:3ded821a73bcb5f593323cd4705c7b5cbf1254b4e5eff2ee0cc84518b3ddff05",
+            "source_refs": [
+              {
+                "ref_type": "event",
+                "namespace": "example.private",
+                "event_id": "33333333-3333-4333-8333-333333333333"
+              }
+            ],
+            "created_at": "2026-10-22T09:00:04Z"
+          }
+        },
+        {
+          "type": "source_link",
+          "value": {
+            "namespace": "example.private",
+            "owner_kind": "artifact",
+            "owner_id": "44444444-4444-4444-8444-444444444444",
+            "owner_version": 1,
+            "source": {
+              "ref_type": "event",
+              "namespace": "example.private",
+              "event_id": "33333333-3333-4333-8333-333333333333"
+            },
+            "created_at": "2026-10-22T09:00:05Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "work_control.pending_candidate_behind_generation",
+      "rule": "R4",
+      "objects": [
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 2,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:03Z",
+            "last_candidate_ref": "99999999-9999-4999-8999-999999999999"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "pending",
+            "decided_at": null,
+            "decision_ref": null
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "decision.rerun_as_commit",
+      "rule": "R13",
+      "objects": [
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "12121212-1212-4212-8212-121212121212",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "rerun",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:rerun:1",
+            "issued_at": "2026-10-22T09:00:03Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "generation": 1
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "99999999-9999-4999-8999-999999999999",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "attempt_no": 1,
+              "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+            "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:02Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate one"
+            },
+            "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "11112222-3333-4444-8555-666677778888",
+            "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:03Z",
+            "decision_ref": "decision:reject:1"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "pending",
+            "decided_at": null,
+            "decision_ref": null
+          }
+        },
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 3,
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:04Z",
+            "last_candidate_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        },
+        {
+          "type": "commit_decision",
+          "value": {
+            "namespace": "example.private",
+            "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "allowed": true,
+            "approval_ref": null,
+            "basis_grant_id": "12121212-1212-4212-8212-121212121212",
+            "operation": "propose_belief",
+            "trigger_kind": "manual_review",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "decision.commit_as_rerun",
+      "rule": "R13",
+      "objects": [
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "13131313-1313-4313-8313-131313131313",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "commit",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:commit:1",
+            "issued_at": "2026-10-22T09:00:00Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "scope": "policy",
+            "operations": [
+              "propose_belief"
+            ],
+            "trigger_kinds": [
+              "manual_review"
+            ]
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "99999999-9999-4999-8999-999999999999",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "attempt_no": 1,
+              "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+            "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:02Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate one"
+            },
+            "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "11112222-3333-4444-8555-666677778888",
+            "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:03Z",
+            "decision_ref": "decision:reject:1"
+          }
+        },
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 2,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:03Z",
+            "last_candidate_ref": "99999999-9999-4999-8999-999999999999"
+          }
+        },
+        {
+          "type": "review_start_decision",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "allowed": true,
+            "reason": "rerun_grant",
+            "basis_grant_id": "13131313-1313-4313-8313-131313131313",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "decision.egress_as_commit",
+      "rule": "R13",
+      "objects": [
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "14141414-1414-4414-8414-141414141414",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "egress",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:egress:1",
+            "issued_at": "2026-10-22T09:00:00Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "provider": "synthetic-provider",
+            "endpoint": "https://model.invalid/v1",
+            "model": "synthetic-model",
+            "manifest_hash": "sha256:99d35512273e0bf7ceb7a67b0ec97805a5c6cfb2b30a8852e5c452c6cf6a108f",
+            "privacy_classes": [
+              "private"
+            ],
+            "purposes": [
+              "consult"
+            ],
+            "model_authorization_ref": "24242424-2424-4424-8424-242424242424"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "99999999-9999-4999-8999-999999999999",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "attempt_no": 1,
+              "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+            "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:02Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate one"
+            },
+            "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "11112222-3333-4444-8555-666677778888",
+            "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:03Z",
+            "decision_ref": "decision:reject:1"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "pending",
+            "decided_at": null,
+            "decision_ref": null
+          }
+        },
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 2,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:03Z",
+            "last_candidate_ref": "99999999-9999-4999-8999-999999999999"
+          }
+        },
+        {
+          "type": "commit_decision",
+          "value": {
+            "namespace": "example.private",
+            "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "allowed": true,
+            "approval_ref": null,
+            "basis_grant_id": "14141414-1414-4414-8414-141414141414",
+            "operation": "propose_belief",
+            "trigger_kind": "manual_review",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "candidate.attempt_hash_mismatch",
+      "rule": "R9",
+      "objects": [
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "99999999-9999-4999-8999-999999999999",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "attempt_no": 1,
+              "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+            "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:02Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate one"
+            },
+            "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "11112222-3333-4444-8555-666677778888",
+            "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:03Z",
+            "decision_ref": "decision:reject:1"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "pending",
+            "decided_at": null,
+            "decision_ref": null
+          }
+        },
+        {
+          "type": "model_attempt",
+          "value": {
+            "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_no": 2,
+            "request_hash": "sha256:bee2d1bb62fa8e21db31a4757503050ac3eff2bac340f8810040bbc8427dd1fe"
+          }
+        },
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 2,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:03Z",
+            "last_candidate_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    {
+      "layer": "semantic",
+      "name": "decision.commit_after_commit",
+      "rule": "R14",
+      "objects": [
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "13131313-1313-4313-8313-131313131313",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "commit",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:commit:1",
+            "issued_at": "2026-10-22T09:00:00Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "scope": "policy",
+            "operations": [
+              "propose_belief"
+            ],
+            "trigger_kinds": [
+              "manual_review"
+            ]
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "99999999-9999-4999-8999-999999999999",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "attempt_no": 1,
+              "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+            "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:02Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate one"
+            },
+            "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 0,
+            "request_id": "11112222-3333-4444-8555-666677778888",
+            "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": null,
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:03Z",
+            "decision_ref": "decision:reject:1"
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "committed",
+            "decided_at": "2026-10-22T09:00:06Z",
+            "decision_ref": "15151515-1515-4515-8515-151515151515"
+          }
+        },
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 2,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:03Z",
+            "last_candidate_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        },
+        {
+          "type": "commit_decision",
+          "value": {
+            "namespace": "example.private",
+            "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "allowed": true,
+            "approval_ref": null,
+            "basis_grant_id": "13131313-1313-4313-8313-131313131313",
+            "operation": "propose_belief",
+            "trigger_kind": "manual_review",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ]
+    }
+  ]
+}

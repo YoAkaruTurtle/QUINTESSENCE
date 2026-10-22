@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source_link.json",
+  "title": "CollaborationSourceLink",
+  "description": "One persisted derivation edge from a Context or an artifact to one exact source. Owner and source share a namespace. For an artifact owner, owner_version is that artifact's artifact_version and the set of links equals the artifact's source_refs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "owner_kind",
+    "owner_id",
+    "owner_version",
+    "source",
+    "created_at"
+  ],
+  "properties": {
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "owner_kind": {
+      "type": "string",
+      "description": "context owners are keyed by context_id; artifact owners by artifact_id.",
+      "enum": [
+        "context",
+        "artifact"
+      ]
+    },
+    "owner_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "owner_version": {
+      "description": "artifact_version for an artifact owner; null for a context owner.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "$ref": "_common.json#/$defs/source_ref"
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    }
+  }
+}

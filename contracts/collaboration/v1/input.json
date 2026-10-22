@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "input.json",
+  "title": "CollaborationInput",
+  "description": "One immutable collaboration input version. Rewriting text creates a new input_id/content_version; the original row is never edited. content_digest is sha256 over the UTF-8 bytes of body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "input_id",
+    "namespace",
+    "schema_version",
+    "content_version",
+    "origin_kind",
+    "body",
+    "content_digest",
+    "privacy_class",
+    "retention",
+    "observed_at",
+    "recorded_at",
+    "supersedes"
+  ],
+  "properties": {
+    "input_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "content_version": {
+      "$ref": "_common.json#/$defs/content_version"
+    },
+    "origin_kind": {
+      "type": "string",
+      "description": "user_statement is text the user wrote; host_supplied is trusted host material. Neither is evidence.",
+      "enum": [
+        "user_statement",
+        "host_supplied"
+      ]
+    },
+    "body": {
+      "type": "string",
+      "description": "Exact input text, 1 to 262144 UTF-8 characters. Digest and deletion both name this exact text.",
+      "minLength": 1,
+      "maxLength": 262144
+    },
+    "content_digest": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "privacy_class": {
+      "$ref": "_common.json#/$defs/privacy_class"
+    },
+    "retention": {
+      "$ref": "_common.json#/$defs/retention"
+    },
+    "observed_at": {
+      "$ref": "_common.json#/$defs/nullable_timestamp_utc"
+    },
+    "recorded_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "supersedes": {
+      "description": "Earlier input version this text replaces; null when it replaces nothing.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/collab_input_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

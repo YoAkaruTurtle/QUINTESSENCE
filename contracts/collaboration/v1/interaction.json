@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "interaction.json",
+  "title": "CollaborationInteraction",
+  "description": "One consult or review interaction. A review interaction is pinned to a work generation and a trigger event; a consult interaction has neither. result is null while the interaction is open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "interaction_id",
+    "namespace",
+    "schema_version",
+    "mode",
+    "activation_kind",
+    "host_instance",
+    "input_refs",
+    "trigger_ref",
+    "work_id",
+    "work_generation",
+    "context_id",
+    "result",
+    "receipt_request_id",
+    "access_ref",
+    "policy_ref",
+    "created_at",
+    "completed_at"
+  ],
+  "properties": {
+    "interaction_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1",
+      "description": "Frozen data-contract version. A change of shape requires a new directory, never an in-place edit."
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "consult",
+        "review"
+      ]
+    },
+    "activation_kind": {
+      "type": "string",
+      "description": "Trusted entry point that started the interaction.",
+      "enum": [
+        "user_input",
+        "manual_review"
+      ]
+    },
+    "host_instance": {
+      "type": "string",
+      "description": "Stable identifier of the host instance that owned the interaction.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "input_refs": {
+      "type": "array",
+      "description": "Inputs newly supplied by this interaction. A review may legitimately add none.",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/collab_input_ref"
+      }
+    },
+    "trigger_ref": {
+      "description": "Review trigger event; null for consult.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/event_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "work_id": {
+      "description": "Reviewed pending work; null for consult.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "work_generation": {
+      "description": "Work generation reviewed by this interaction; null for consult.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/generation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "context_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "result": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null while open; otherwise the frozen terminal result. candidate_pending is a terminal result of the interaction, not of the candidate.",
+      "enum": [
+        null,
+        "answered",
+        "waiting",
+        "candidate_pending",
+        "committed",
+        "rejected",
+        "stale",
+        "denied",
+        "failed",
+        "incomplete"
+      ]
+    },
+    "receipt_request_id": {
+      "description": "request_id of the processed_commands receipt produced by a WAIT or commit; null when no such receipt exists.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "access_ref": {
+      "type": "string",
+      "description": "Opaque reference to the access authorization used to read the interaction's inputs.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "policy_ref": {
+      "type": "string",
+      "description": "Opaque reference to the policy decision that allowed the interaction.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "completed_at": {
+      "$ref": "_common.json#/$defs/nullable_timestamp_utc"
+    }
+  }
+}

@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "grant.json",
+  "title": "CollaborationGrant",
+  "description": "One collaboration grant. There are exactly five mutually exclusive branches: access, egress, commit(policy), commit(work_generation) and rerun(work_id+generation). The four permissions never imply one another: a rerun grant permits starting a new generation only, a commit grant permits committing without manual approval only, and an egress grant permits sending named privacy classes only. A non-null revoked_at, or a passed expires_at evaluated at use time, makes the grant inactive.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "grant_id",
+    "namespace",
+    "schema_version",
+    "kind",
+    "grant_version",
+    "subject",
+    "authorization_ref",
+    "issued_at",
+    "expires_at",
+    "revoked_at"
+  ],
+  "properties": {
+    "grant_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "access",
+        "egress",
+        "commit",
+        "rerun"
+      ]
+    },
+    "grant_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "subject": {
+      "type": "string",
+      "description": "host_instance the grant was issued to.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "authorization_ref": {
+      "type": "string",
+      "description": "Opaque reference to the trusted authorization record behind this grant.",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "issued_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "expires_at": {
+      "$ref": "_common.json#/$defs/nullable_timestamp_utc"
+    },
+    "revoked_at": {
+      "$ref": "_common.json#/$defs/nullable_timestamp_utc"
+    },
+    "scope": {
+      "type": "string",
+      "description": "Commit grants only: policy covers operations/trigger_kinds, work_generation covers one generation.",
+      "enum": [
+        "policy",
+        "work_generation"
+      ]
+    },
+    "purposes": {
+      "type": "array",
+      "description": "Named purposes this grant covers.",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      }
+    },
+    "data_classes": {
+      "type": "array",
+      "description": "Access: privacy classes the holder may read.",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/privacy_class"
+      }
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "manifest_hash": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "privacy_classes": {
+      "type": "array",
+      "description": "Egress: privacy classes allowed to leave the host to this provider/model.",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/privacy_class"
+      }
+    },
+    "model_authorization_ref": {
+      "description": "model_authorizations row that supplies the call/budget/manifest ceiling. The egress grant can never raise that ceiling.",
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "operations": {
+      "type": "array",
+      "description": "Commit policy: operations this grant may commit.",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "trigger_kinds": {
+      "type": "array",
+      "description": "Commit policy: trigger kinds this grant covers.",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "work_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "generation": {
+      "$ref": "_common.json#/$defs/generation"
+    }
+  },
+  "oneOf": [
+    {
+      "title": "access grant",
+      "required": [
+        "purposes",
+        "data_classes"
+      ],
+      "properties": {
+        "kind": {
+          "const": "access"
+        },
+        "purposes": true,
+        "data_classes": true,
+        "scope": false,
+        "provider": false,
+        "endpoint": false,
+        "model": false,
+        "manifest_hash": false,
+        "privacy_classes": false,
+        "model_authorization_ref": false,
+        "operations": false,
+        "trigger_kinds": false,
+        "work_id": false,
+        "generation": false
+      }
+    },
+    {
+      "title": "egress grant",
+      "required": [
+        "provider",
+        "endpoint",
+        "model",
+        "manifest_hash",
+        "privacy_classes",
+        "purposes",
+        "model_authorization_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "egress"
+        },
+        "provider": true,
+        "endpoint": true,
+        "model": true,
+        "manifest_hash": true,
+        "privacy_classes": true,
+        "purposes": true,
+        "model_authorization_ref": true,
+        "data_classes": false,
+        "scope": false,
+        "operations": false,
+        "trigger_kinds": false,
+        "work_id": false,
+        "generation": false
+      }
+    },
+    {
+      "title": "commit grant, policy scope",
+      "required": [
+        "scope",
+        "operations",
+        "trigger_kinds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "commit"
+        },
+        "scope": {
+          "const": "policy"
+        },
+        "operations": true,
+        "trigger_kinds": true,
+        "purposes": false,
+        "data_classes": false,
+        "provider": false,
+        "endpoint": false,
+        "model": false,
+        "manifest_hash": false,
+        "privacy_classes": false,
+        "model_authorization_ref": false,
+        "work_id": false,
+        "generation": false
+      }
+    },
+    {
+      "title": "commit grant, work_generation scope",
+      "required": [
+        "scope",
+        "work_id",
+        "generation"
+      ],
+      "properties": {
+        "kind": {
+          "const": "commit"
+        },
+        "scope": {
+          "const": "work_generation"
+        },
+        "work_id": true,
+        "generation": true,
+        "purposes": false,
+        "data_classes": false,
+        "provider": false,
+        "endpoint": false,
+        "model": false,
+        "manifest_hash": false,
+        "privacy_classes": false,
+        "model_authorization_ref": false,
+        "operations": false,
+        "trigger_kinds": false
+      }
+    },
+    {
+      "title": "rerun grant",
+      "required": [
+        "work_id",
+        "generation"
+      ],
+      "properties": {
+        "kind": {
+          "const": "rerun"
+        },
+        "work_id": true,
+        "generation": true,
+        "scope": false,
+        "purposes": false,
+        "data_classes": false,
+        "provider": false,
+        "endpoint": false,
+        "model": false,
+        "manifest_hash": false,
+        "privacy_classes": false,
+        "model_authorization_ref": false,
+        "operations": false,
+        "trigger_kinds": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "experience_view.json",
+  "title": "ExperienceView",
+  "description": "The only read surface for an experience reference. It reports readability and, when not available, null body: it never returns summaries, fragments or counts, and an unauthorized read is uniformly unavailable. processing is in_progress or one of the nine terminal interaction results.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ref",
+    "namespace",
+    "interaction_id",
+    "mode",
+    "origin_kind",
+    "processing",
+    "readability",
+    "body",
+    "retention",
+    "context_ref",
+    "attempt_ref",
+    "source_refs",
+    "created_at"
+  ],
+  "properties": {
+    "ref": {
+      "$ref": "_common.json#/$defs/collaboration_ref"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "interaction_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "consult",
+        "review"
+      ]
+    },
+    "origin_kind": {
+      "type": "string",
+      "enum": [
+        "user_statement",
+        "model_output",
+        "deterministic_query"
+      ]
+    },
+    "processing": {
+      "type": "string",
+      "enum": [
+        "in_progress",
+        "answered",
+        "waiting",
+        "candidate_pending",
+        "committed",
+        "rejected",
+        "stale",
+        "denied",
+        "failed",
+        "incomplete"
+      ]
+    },
+    "readability": {
+      "$ref": "_common.json#/$defs/readability"
+    },
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Present iff readability is available (semantic rule R11); otherwise null, never a redaction marker or a fragment.",
+      "minLength": 1,
+      "maxLength": 262144
+    },
+    "retention": {
+      "$ref": "_common.json#/$defs/retention"
+    },
+    "context_ref": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "attempt_ref": {
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/attempt_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/source_ref"
+      }
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    }
+  }
+}

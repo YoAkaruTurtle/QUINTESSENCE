@@ -1,0 +1,411 @@
+{
+  "chain": "consult",
+  "synthetic_externals": {
+    "events": [],
+    "records": [
+      {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "55555555-5555-4555-8555-555555555555",
+        "record_version": 3
+      }
+    ]
+  },
+  "steps": [
+    {
+      "step": 1,
+      "action": "open consult interaction",
+      "object_type": "interaction",
+      "object": {
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "mode": "consult",
+        "activation_kind": "user_input",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "trigger_ref": null,
+        "work_id": null,
+        "work_generation": null,
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "result": null,
+        "receipt_request_id": null,
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:collab.v1",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 2,
+      "action": "record input v1",
+      "object_type": "input",
+      "object": {
+        "input_id": "22222222-2222-4222-8222-222222222222",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "content_version": 1,
+        "origin_kind": "user_statement",
+        "body": "I want to turn last week's argument into a testable conclusion.",
+        "content_digest": "sha256:08133b71ef03823bd254626105f31614111bb9454aa130f6c07454f6b71875b9",
+        "privacy_class": "private",
+        "retention": "standard",
+        "observed_at": "2026-10-22T09:00:00Z",
+        "recorded_at": "2026-10-22T09:00:00Z",
+        "supersedes": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 3,
+      "action": "assemble consult Context",
+      "object_type": "context_binding",
+      "object": {
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "context_kind": "consult",
+        "envelope_version": "collab.v1",
+        "trigger_ref": null,
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "state_revision": 7,
+        "context_event_seq": 21,
+        "privacy_epoch": 2,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 3
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "usage": "pinned_asset"
+          }
+        ],
+        "collab_source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "renderer_version": "collab.renderer.v1",
+        "policy_ref": "collab.v1",
+        "content_hash": "sha256:ade2bb66a0ff4872d948be79c39bd1e01caca58830564f31bb7a4adc9d87df87",
+        "model_input_complete": true,
+        "created_at": "2026-10-22T09:00:02Z"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 4,
+      "action": "record the model attempt behind the reply",
+      "object_type": "model_attempt",
+      "object": {
+        "attempt_id": "19191919-1919-4919-8919-191919191919",
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "attempt_no": 1,
+        "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+      },
+      "expect": "recorded"
+    },
+    {
+      "step": 5,
+      "action": "reply artifact",
+      "object_type": "artifact",
+      "object": {
+        "artifact_id": "44444444-4444-4444-8444-444444444444",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "reply",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "context_id": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": {
+          "authorization_id": "20202020-2020-4020-8020-202020202020",
+          "attempt_id": "19191919-1919-4919-8919-191919191919",
+          "attempt_no": 1,
+          "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+        },
+        "origin_kind": "model_output",
+        "body": "A reply that cites the user's input without treating it as evidence.",
+        "content_digest": "sha256:393723eca70407c237619aa48c0fc508a9f48933720ff744c38abab8ab172877",
+        "source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "created_at": "2026-10-22T09:00:04Z"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 6,
+      "action": "link the Context to input i1",
+      "object_type": "source_link",
+      "object": {
+        "namespace": "example.private",
+        "owner_kind": "context",
+        "owner_id": "33333333-3333-4333-8333-333333333333",
+        "owner_version": null,
+        "source": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "created_at": "2026-10-22T09:00:05Z"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 7,
+      "action": "link the reply to input i1",
+      "object_type": "source_link",
+      "object": {
+        "namespace": "example.private",
+        "owner_kind": "artifact",
+        "owner_id": "44444444-4444-4444-8444-444444444444",
+        "owner_version": 1,
+        "source": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "created_at": "2026-10-22T09:00:05Z"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 8,
+      "action": "read the input experience",
+      "object_type": "experience_view",
+      "object": {
+        "ref": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "namespace": "example.private",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "mode": "consult",
+        "origin_kind": "user_statement",
+        "processing": "answered",
+        "readability": "available",
+        "body": "I want to turn last week's argument into a testable conclusion.",
+        "retention": "standard",
+        "context_ref": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": null,
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:06Z"
+      },
+      "expect": "available"
+    },
+    {
+      "step": 9,
+      "action": "read the reply experience",
+      "object_type": "experience_view",
+      "object": {
+        "ref": {
+          "ref_type": "collab_artifact",
+          "namespace": "example.private",
+          "artifact_id": "44444444-4444-4444-8444-444444444444",
+          "artifact_version": 1
+        },
+        "namespace": "example.private",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "mode": "consult",
+        "origin_kind": "model_output",
+        "processing": "answered",
+        "readability": "available",
+        "body": "A reply that cites the user's input without treating it as evidence.",
+        "retention": "standard",
+        "context_ref": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": {
+          "authorization_id": "20202020-2020-4020-8020-202020202020",
+          "attempt_id": "19191919-1919-4919-8919-191919191919",
+          "attempt_no": 1,
+          "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+        },
+        "source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "created_at": "2026-10-22T09:00:06Z"
+      },
+      "expect": "available"
+    },
+    {
+      "step": 10,
+      "action": "delete_experience(input i1)",
+      "object_type": "deletion",
+      "object": {
+        "ref": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "phase": "cleaned",
+        "barrier": {
+          "privacy_epoch_delta": 1,
+          "state_revision_delta": 1
+        },
+        "contexts_invalidated": [
+          "33333333-3333-4333-8333-333333333333"
+        ],
+        "cleared": [
+          "collab_input.body",
+          "collab_artifact.body",
+          "context.rendered_input",
+          "model_attempt.request_payload",
+          "model_attempt.response_payload"
+        ],
+        "retained": [
+          "namespace",
+          "input_id",
+          "content_version",
+          "content_digest",
+          "artifact_id",
+          "artifact_version",
+          "created_at",
+          "status",
+          "authorization_ref"
+        ],
+        "closure": [
+          {
+            "owner_kind": "context",
+            "owner_id": "33333333-3333-4333-8333-333333333333"
+          },
+          {
+            "owner_kind": "artifact",
+            "owner_id": "44444444-4444-4444-8444-444444444444"
+          }
+        ]
+      },
+      "expect": "cleaned"
+    },
+    {
+      "step": 11,
+      "action": "read the deleted input experience",
+      "object_type": "experience_view",
+      "object": {
+        "ref": {
+          "ref_type": "collab_input",
+          "namespace": "example.private",
+          "input_id": "22222222-2222-4222-8222-222222222222",
+          "content_version": 1
+        },
+        "namespace": "example.private",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "mode": "consult",
+        "origin_kind": "user_statement",
+        "processing": "answered",
+        "readability": "redacted",
+        "body": null,
+        "retention": "standard",
+        "context_ref": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": null,
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:07Z"
+      },
+      "expect": "redacted"
+    },
+    {
+      "step": 12,
+      "action": "read the deleted reply experience",
+      "object_type": "experience_view",
+      "object": {
+        "ref": {
+          "ref_type": "collab_artifact",
+          "namespace": "example.private",
+          "artifact_id": "44444444-4444-4444-8444-444444444444",
+          "artifact_version": 1
+        },
+        "namespace": "example.private",
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "mode": "consult",
+        "origin_kind": "model_output",
+        "processing": "answered",
+        "readability": "redacted",
+        "body": null,
+        "retention": "standard",
+        "context_ref": "33333333-3333-4333-8333-333333333333",
+        "attempt_ref": {
+          "authorization_id": "20202020-2020-4020-8020-202020202020",
+          "attempt_id": "19191919-1919-4919-8919-191919191919",
+          "attempt_no": 1,
+          "request_hash": "sha256:ba18982f2d803dd90fa87cfe52178d5d639f4a60f2ddd4422f950cc5f5e12b21"
+        },
+        "source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "created_at": "2026-10-22T09:00:07Z"
+      },
+      "expect": "redacted"
+    }
+  ],
+  "alt": {
+    "empty_read_set": {
+      "note": "Structurally legal: read_set may be empty and profile_ref may be null. v1 assembly never produces this row; the case only proves the Schema does not force a non-empty read set.",
+      "object_type": "context_binding",
+      "object": {
+        "context_id": "25252525-2525-4525-8525-252525252525",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "context_kind": "consult",
+        "envelope_version": "collab.v1",
+        "trigger_ref": null,
+        "interaction_id": "11111111-1111-4111-8111-111111111111",
+        "state_revision": 7,
+        "context_event_seq": 21,
+        "privacy_epoch": 2,
+        "profile_ref": null,
+        "read_set": [],
+        "collab_source_refs": [
+          {
+            "ref_type": "collab_input",
+            "namespace": "example.private",
+            "input_id": "22222222-2222-4222-8222-222222222222",
+            "content_version": 1
+          }
+        ],
+        "renderer_version": "collab.renderer.v1",
+        "policy_ref": "collab.v1",
+        "content_hash": "sha256:a39d79dfc21b0429b5f4da50e81efde0459609199930454723da91cbca1f4024",
+        "model_input_complete": true,
+        "created_at": "2026-10-22T09:00:03Z"
+      },
+      "expect": "valid"
+    }
+  }
+}

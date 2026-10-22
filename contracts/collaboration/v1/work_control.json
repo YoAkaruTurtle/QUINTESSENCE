@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "work_control.json",
+  "title": "CollaborationWorkControl",
+  "description": "Per-work generation and rejection state. generation is incremented only inside the rejection transaction. rerun_authorization_ref stores a rerun grant only; this table neither stores nor implies any commit authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "work_id",
+    "schema_version",
+    "generation",
+    "blocked_after_rejection",
+    "control_version",
+    "rerun_authorization_ref",
+    "block_reason",
+    "updated_at",
+    "last_candidate_ref"
+  ],
+  "properties": {
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "work_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "generation": {
+      "$ref": "_common.json#/$defs/generation"
+    },
+    "blocked_after_rejection": {
+      "type": "boolean",
+      "description": "True from the rejection commit until a different work generation is reached. A rerun grant does not clear it."
+    },
+    "control_version": {
+      "type": "integer",
+      "description": "Optimistic-lock version of this control row; every trusted update increments it.",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "rerun_authorization_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "grant_id of the rerun grant written by the trusted re-authorization transaction; never a commit grant.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "block_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "rejected",
+        null
+      ]
+    },
+    "updated_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    },
+    "last_candidate_ref": {
+      "description": "artifact_id of the most recent candidate for this work, or null before the first candidate.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,673 @@
+{
+  "chain": "review",
+  "synthetic_externals": {
+    "events": [
+      {
+        "ref_type": "event",
+        "namespace": "example.private",
+        "event_id": "66666666-6666-4666-8666-666666666666"
+      }
+    ],
+    "records": [
+      {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "55555555-5555-4555-8555-555555555555",
+        "record_version": 3
+      },
+      {
+        "ref_type": "record",
+        "namespace": "example.private",
+        "record_id": "18181818-1818-4818-8818-181818181818",
+        "record_version": 2
+      }
+    ]
+  },
+  "steps": [
+    {
+      "step": 1,
+      "action": "open review interaction",
+      "object_type": "interaction",
+      "object": {
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "mode": "review",
+        "activation_kind": "manual_review",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [],
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "66666666-6666-4666-8666-666666666666"
+        },
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 0,
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "result": null,
+        "receipt_request_id": null,
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:pcs.v2",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 2,
+      "action": "assemble pcs.v2 review Context",
+      "object_type": "context_binding",
+      "object": {
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "context_kind": "review",
+        "envelope_version": "pcs.v2",
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "66666666-6666-4666-8666-666666666666"
+        },
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "state_revision": 9,
+        "context_event_seq": 30,
+        "privacy_epoch": 2,
+        "profile_ref": {
+          "ref_type": "record",
+          "namespace": "example.private",
+          "record_id": "55555555-5555-4555-8555-555555555555",
+          "record_version": 3
+        },
+        "read_set": [
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "55555555-5555-4555-8555-555555555555",
+              "record_version": 3
+            },
+            "usage": "pinned_asset"
+          },
+          {
+            "ref": {
+              "ref_type": "record",
+              "namespace": "example.private",
+              "record_id": "18181818-1818-4818-8818-181818181818",
+              "record_version": 2
+            },
+            "usage": "historical"
+          }
+        ],
+        "collab_source_refs": [],
+        "renderer_version": "pcs.renderer.v2",
+        "policy_ref": "pcs.v2",
+        "content_hash": "sha256:81e0939819502a436dcd08c595384e27c72bc280bbb1aa0a5ed00b96ed3a90fa",
+        "model_input_complete": true,
+        "created_at": "2026-10-22T09:00:01Z"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 3,
+      "action": "initial work control at generation 0",
+      "object_type": "work_control",
+      "object": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "schema_version": "collab.v1",
+        "generation": 0,
+        "blocked_after_rejection": false,
+        "control_version": 1,
+        "rerun_authorization_ref": null,
+        "block_reason": null,
+        "updated_at": "2026-10-22T09:00:00Z",
+        "last_candidate_ref": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 4,
+      "action": "record model attempt 1",
+      "object_type": "model_attempt",
+      "object": {
+        "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_no": 1,
+        "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+      },
+      "expect": "recorded"
+    },
+    {
+      "step": 5,
+      "action": "candidate 1 pending at generation 0",
+      "object_type": "candidate",
+      "object": {
+        "artifact_id": "99999999-9999-4999-8999-999999999999",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "attempt_no": 1,
+          "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+        "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:02Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate one"
+        },
+        "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+        "proposal_version": "v1",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 0,
+        "request_id": "11112222-3333-4444-8555-666677778888",
+        "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": null,
+        "commit_authorization_ref": null,
+        "status": "pending",
+        "decided_at": null,
+        "decision_ref": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 6,
+      "action": "reject candidate 1",
+      "object_type": "candidate",
+      "object": {
+        "artifact_id": "99999999-9999-4999-8999-999999999999",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "attempt_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "attempt_no": 1,
+          "request_hash": "sha256:451d1800bbaece557b293cac9c7d57abe6090d476924dd820a665c1ecc47da77"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate one\"}",
+        "content_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:02Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate one"
+        },
+        "proposal_digest": "sha256:a5be548f79a7a6ba5e7aa7a07124e9c40a53aa8004adb831fffcb9405b3677c1",
+        "proposal_version": "v1",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 0,
+        "request_id": "11112222-3333-4444-8555-666677778888",
+        "command_digest": "5ef29c30c5c9ceadb13b6e47c02352ff89dc57c65a615156dd3c9e5c0ecb07e5",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": null,
+        "commit_authorization_ref": null,
+        "status": "rejected",
+        "decided_at": "2026-10-22T09:00:03Z",
+        "decision_ref": "decision:reject:1"
+      },
+      "expect": "rejected"
+    },
+    {
+      "step": 7,
+      "action": "work control after rejection (generation 1, blocked)",
+      "object_type": "work_control",
+      "object": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "schema_version": "collab.v1",
+        "generation": 1,
+        "blocked_after_rejection": true,
+        "control_version": 2,
+        "rerun_authorization_ref": null,
+        "block_reason": "rejected",
+        "updated_at": "2026-10-22T09:00:03Z",
+        "last_candidate_ref": "99999999-9999-4999-8999-999999999999"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 8,
+      "action": "restart scan: start gate with no rerun grant",
+      "object_type": "review_start_decision",
+      "object": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "allowed": false,
+        "reason": "blocked_after_rejection",
+        "basis_grant_id": null,
+        "now": "2026-10-22T12:00:00Z"
+      },
+      "expect": "denied"
+    },
+    {
+      "step": 9,
+      "action": "trusted re-authorization: rerun grant at generation 1",
+      "object_type": "grant",
+      "object": {
+        "grant_id": "12121212-1212-4212-8212-121212121212",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "kind": "rerun",
+        "grant_version": 1,
+        "subject": "host:synthetic-1",
+        "authorization_ref": "authorization:rerun:1",
+        "issued_at": "2026-10-22T09:00:03Z",
+        "expires_at": "2026-10-23T09:00:00Z",
+        "revoked_at": null,
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "generation": 1
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 10,
+      "action": "work control after rerun authorization",
+      "object_type": "work_control",
+      "object": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "schema_version": "collab.v1",
+        "generation": 1,
+        "blocked_after_rejection": true,
+        "control_version": 3,
+        "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+        "block_reason": "rejected",
+        "updated_at": "2026-10-22T09:00:04Z",
+        "last_candidate_ref": "99999999-9999-4999-8999-999999999999"
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 11,
+      "action": "start gate with the matching rerun grant",
+      "object_type": "review_start_decision",
+      "object": {
+        "namespace": "example.private",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "allowed": true,
+        "reason": "rerun_grant",
+        "basis_grant_id": "12121212-1212-4212-8212-121212121212",
+        "now": "2026-10-22T12:00:00Z"
+      },
+      "expect": "allowed"
+    },
+    {
+      "step": 12,
+      "action": "record model attempt 2",
+      "object_type": "model_attempt",
+      "object": {
+        "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_no": 2,
+        "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+      },
+      "expect": "recorded"
+    },
+    {
+      "step": 13,
+      "action": "candidate 2 pending at generation 1",
+      "object_type": "candidate",
+      "object": {
+        "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "attempt_no": 2,
+          "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+        "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:05Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate two"
+        },
+        "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "proposal_version": "v1",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 1,
+        "request_id": "22223333-4444-4555-8666-777788889999",
+        "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+        "commit_authorization_ref": null,
+        "status": "pending",
+        "decided_at": null,
+        "decision_ref": null
+      },
+      "expect": "valid"
+    },
+    {
+      "step": 14,
+      "action": "manual approval bound to candidate 2",
+      "object_type": "approval",
+      "object": {
+        "approval_ref": "15151515-1515-4515-8515-151515151515",
+        "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "request_id": "22223333-4444-4555-8666-777788889999",
+        "approved_at": "2026-10-22T09:00:05Z",
+        "approver": "host:synthetic-1"
+      },
+      "expect": "recorded"
+    },
+    {
+      "step": 15,
+      "action": "commit gate under manual approval",
+      "object_type": "commit_decision",
+      "object": {
+        "namespace": "example.private",
+        "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "allowed": true,
+        "approval_ref": "15151515-1515-4515-8515-151515151515",
+        "basis_grant_id": null,
+        "operation": "propose_belief",
+        "trigger_kind": "manual_review",
+        "now": "2026-10-22T12:00:00Z"
+      },
+      "expect": "allowed"
+    },
+    {
+      "step": 16,
+      "action": "candidate 2 committed by manual approval",
+      "object_type": "candidate",
+      "object": {
+        "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "artifact_version": 1,
+        "kind": "candidate",
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "attempt_ref": {
+          "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "attempt_no": 2,
+          "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+        },
+        "origin_kind": "model_output",
+        "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+        "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "source_refs": [],
+        "created_at": "2026-10-22T09:00:05Z",
+        "proposal": {
+          "operation": "propose_belief",
+          "reason": "synthetic review candidate two"
+        },
+        "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+        "proposal_version": "v1",
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 1,
+        "request_id": "22223333-4444-4555-8666-777788889999",
+        "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+        "structural_validation": "passed",
+        "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+        "commit_authorization_ref": null,
+        "status": "committed",
+        "decided_at": "2026-10-22T09:00:06Z",
+        "decision_ref": "15151515-1515-4515-8515-151515151515"
+      },
+      "expect": "committed"
+    },
+    {
+      "step": 17,
+      "action": "close the review interaction",
+      "object_type": "interaction",
+      "object": {
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "mode": "review",
+        "activation_kind": "manual_review",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [],
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "66666666-6666-4666-8666-666666666666"
+        },
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 0,
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "result": "committed",
+        "receipt_request_id": "22223333-4444-4555-8666-777788889999",
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:pcs.v2",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": "2026-10-22T09:00:06Z"
+      },
+      "expect": "valid"
+    }
+  ],
+  "alt": {
+    "wait": {
+      "note": "A WAIT interaction is terminal with result waiting, a non-null receipt_request_id, and no candidate.",
+      "object_type": "interaction",
+      "object": {
+        "interaction_id": "77777777-7777-4777-8777-777777777777",
+        "namespace": "example.private",
+        "schema_version": "collab.v1",
+        "mode": "review",
+        "activation_kind": "manual_review",
+        "host_instance": "host:synthetic-1",
+        "input_refs": [],
+        "trigger_ref": {
+          "ref_type": "event",
+          "namespace": "example.private",
+          "event_id": "66666666-6666-4666-8666-666666666666"
+        },
+        "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "work_generation": 0,
+        "context_id": "88888888-8888-4888-8888-888888888888",
+        "result": "waiting",
+        "receipt_request_id": "33334444-5555-4666-8777-88889999aaaa",
+        "access_ref": "authorization:access:1",
+        "policy_ref": "policy:pcs.v2",
+        "created_at": "2026-10-22T09:00:00Z",
+        "completed_at": "2026-10-22T09:00:02Z"
+      },
+      "expect": "waiting"
+    },
+    "second_reject": {
+      "note": "A second rejection increments generation 1 -> 2; the old rerun grant no longer matches and cannot authorise a start.",
+      "objects": [
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 2,
+            "blocked_after_rejection": true,
+            "control_version": 4,
+            "rerun_authorization_ref": null,
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:07Z",
+            "last_candidate_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        },
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "12121212-1212-4212-8212-121212121212",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "rerun",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:rerun:1",
+            "issued_at": "2026-10-22T09:00:03Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "generation": 1
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "rejected",
+            "decided_at": "2026-10-22T09:00:07Z",
+            "decision_ref": "decision:reject:2"
+          }
+        },
+        {
+          "type": "review_start_decision",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "allowed": true,
+            "reason": "rerun_grant",
+            "basis_grant_id": "12121212-1212-4212-8212-121212121212",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ],
+      "expect_rule": "R5"
+    },
+    "commit_without_approval": {
+      "note": "Asking to commit with only a rerun grant is denied; the semantic layer returns R13 because rerun never implies commit.",
+      "objects": [
+        {
+          "type": "work_control",
+          "value": {
+            "namespace": "example.private",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "schema_version": "collab.v1",
+            "generation": 1,
+            "blocked_after_rejection": true,
+            "control_version": 3,
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "block_reason": "rejected",
+            "updated_at": "2026-10-22T09:00:04Z",
+            "last_candidate_ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+          }
+        },
+        {
+          "type": "grant",
+          "value": {
+            "grant_id": "12121212-1212-4212-8212-121212121212",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "kind": "rerun",
+            "grant_version": 1,
+            "subject": "host:synthetic-1",
+            "authorization_ref": "authorization:rerun:1",
+            "issued_at": "2026-10-22T09:00:03Z",
+            "expires_at": "2026-10-23T09:00:00Z",
+            "revoked_at": null,
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "generation": 1
+          }
+        },
+        {
+          "type": "candidate",
+          "value": {
+            "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "namespace": "example.private",
+            "schema_version": "collab.v1",
+            "artifact_version": 1,
+            "kind": "candidate",
+            "interaction_id": "77777777-7777-4777-8777-777777777777",
+            "context_id": "88888888-8888-4888-8888-888888888888",
+            "attempt_ref": {
+              "authorization_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "attempt_no": 2,
+              "request_hash": "sha256:5eb9263d304de0665a3654d477d34c330a5902dfa07a92a72eec947aa0d19306"
+            },
+            "origin_kind": "model_output",
+            "body": "{\"operation\":\"propose_belief\",\"reason\":\"synthetic review candidate two\"}",
+            "content_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "source_refs": [],
+            "created_at": "2026-10-22T09:00:05Z",
+            "proposal": {
+              "operation": "propose_belief",
+              "reason": "synthetic review candidate two"
+            },
+            "proposal_digest": "sha256:61c5ebbecdd1bb24cfb4f1d1abeb22e8601d9181ed3a402ec5d4c4f14177a83e",
+            "proposal_version": "v1",
+            "work_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "work_generation": 1,
+            "request_id": "22223333-4444-4555-8666-777788889999",
+            "command_digest": "e1b6472a74ac94e8e66adab41a0068aa431ab1fb18fde7156a26af43b6665209",
+            "structural_validation": "passed",
+            "rerun_authorization_ref": "12121212-1212-4212-8212-121212121212",
+            "commit_authorization_ref": null,
+            "status": "pending",
+            "decided_at": null,
+            "decision_ref": null
+          }
+        },
+        {
+          "type": "commit_decision",
+          "value": {
+            "namespace": "example.private",
+            "candidate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "allowed": true,
+            "approval_ref": null,
+            "basis_grant_id": "12121212-1212-4212-8212-121212121212",
+            "operation": "propose_belief",
+            "trigger_kind": "manual_review",
+            "now": "2026-10-22T12:00:00Z"
+          }
+        }
+      ],
+      "expect_rule": "R13"
+    }
+  }
+}

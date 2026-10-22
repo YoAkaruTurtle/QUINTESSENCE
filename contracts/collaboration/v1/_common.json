@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "_common.json",
+  "title": "collab.v1 shared schema definitions",
+  "description": "Shared $defs for the collab.v1 collaboration contracts frozen by C05a (REV-C). This file is a library, not a DTO: it has no golden vectors of its own. Every DTO in this directory is closed (additionalProperties false) and references these shapes by $ref.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "description": "Canonical lower-case UUID text (8-4-4-4-12). The version nibble is deliberately not restricted so a future UUIDv7 remains representable.",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Single collaboration namespace. Every reference in this directory is namespace-scoped and must stay inside the owner's namespace.",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "description": "UTC / RFC 3339 instant. The pattern checks syntactic shape only; calendar correctness belongs to the state layer.",
+      "minLength": 20,
+      "maxLength": 27,
+      "pattern": "^(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?Z$"
+    },
+    "nullable_timestamp_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "An unknown or not-yet-reached instant is null, never invented.",
+      "minLength": 20,
+      "maxLength": 27,
+      "pattern": "^(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6})?Z$"
+    },
+    "sha256_digest": {
+      "type": "string",
+      "description": "Prefixed SHA-256 digest of the exact UTF-8 bytes named by the field (body text, canonical JSON or rendered input).",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "hex64": {
+      "type": "string",
+      "description": "Bare 64-character lower-case hex digest, used where the store already owns an unprefixed hash (candidate.command_digest is the Tx B _request_digest value).",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "privacy_class": {
+      "type": "string",
+      "description": "Content privacy class, same closed set as pcs.v2. It is not an outbound-authorization flag.",
+      "enum": [
+        "private",
+        "restricted",
+        "public-example"
+      ]
+    },
+    "retention": {
+      "type": "string",
+      "description": "Named retention policy. Durations live in the store policy registry, not in this contract; expiry is evaluated when a reference is read, never cached.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+    },
+    "readability": {
+      "type": "string",
+      "description": "Read-side state of one experience reference. Storage objects never carry it.",
+      "enum": [
+        "available",
+        "redacted",
+        "unavailable"
+      ]
+    },
+    "content_version": {
+      "type": "integer",
+      "description": "Version of one immutable collaboration text (input or artifact), starting at 1.",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "generation": {
+      "type": "integer",
+      "description": "Work generation. It starts at 0 and is incremented only by the rejection transaction.",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "event_ref": {
+      "type": "object",
+      "description": "Typed reference to a pcs.v2 Event. A bare ID is not representable.",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "event_id"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "event"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "event_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "record_ref": {
+      "type": "object",
+      "description": "Typed reference to an exact pcs.v2 Record version.",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "record_id",
+        "record_version"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "record"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "record_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "read_set_entry": {
+      "type": "object",
+      "description": "One read-set entry. ref is always a RecordRef: collaboration references and EventRefs never enter a read_set.",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "usage"
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/record_ref"
+        },
+        "usage": {
+          "type": "string",
+          "enum": [
+            "current",
+            "historical",
+            "pinned_asset"
+          ]
+        }
+      }
+    },
+    "collab_input_ref": {
+      "type": "object",
+      "description": "Typed reference to one immutable collaboration input version.",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "input_id",
+        "content_version"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "collab_input"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "input_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "content_version": {
+          "$ref": "#/$defs/content_version"
+        }
+      }
+    },
+    "collab_artifact_ref": {
+      "type": "object",
+      "description": "Typed reference to one immutable collaboration artifact version (an ordinary reply or a candidate).",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "namespace",
+        "artifact_id",
+        "artifact_version"
+      ],
+      "properties": {
+        "ref_type": {
+          "const": "collab_artifact"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "collaboration_ref": {
+      "description": "Union of the two collaboration reference shapes accepted by delete_experience. Exactly one branch matches.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/collab_input_ref"
+        },
+        {
+          "$ref": "#/$defs/collab_artifact_ref"
+        }
+      ]
+    },
+    "source_ref": {
+      "description": "Union of the four legal source shapes: pcs.v2 event, pcs.v2 record, collaboration input, collaboration artifact. Exactly one branch matches.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/event_ref"
+        },
+        {
+          "$ref": "#/$defs/record_ref"
+        },
+        {
+          "$ref": "#/$defs/collab_input_ref"
+        },
+        {
+          "$ref": "#/$defs/collab_artifact_ref"
+        }
+      ]
+    },
+    "attempt_ref": {
+      "type": "object",
+      "description": "Reference to one model attempt. request_hash uses the stored model_attempts form (sha256:<hex>) and must equal it exactly.",
+      "additionalProperties": false,
+      "required": [
+        "authorization_id",
+        "attempt_id",
+        "attempt_no",
+        "request_hash"
+      ],
+      "properties": {
+        "authorization_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attempt_no": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_hash": {
+          "$ref": "#/$defs/sha256_digest"
+        }
+      }
+    },
+    "proposal_version": {
+      "type": "string",
+      "description": "Version label of the proposal contract applied to a candidate; lower-case dotted token.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    }
+  }
+}

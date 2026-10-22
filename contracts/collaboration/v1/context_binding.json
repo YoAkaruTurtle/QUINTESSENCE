@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "context_binding.json",
+  "title": "CollaborationContextBinding",
+  "description": "Canonical collab.v1 representation of one context_snapshots row. A review binding is identical to the pcs.v2 envelope on read_set, watermarks, profile_ref and content_hash; a consult binding has trigger_ref null, envelope_version collab.v1, and is rejected by the pcs.v2 reader. Collaboration references live in collab_source_refs, never in read_set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "context_id",
+    "namespace",
+    "schema_version",
+    "context_kind",
+    "envelope_version",
+    "trigger_ref",
+    "interaction_id",
+    "state_revision",
+    "context_event_seq",
+    "privacy_epoch",
+    "profile_ref",
+    "read_set",
+    "collab_source_refs",
+    "renderer_version",
+    "policy_ref",
+    "content_hash",
+    "model_input_complete",
+    "created_at"
+  ],
+  "properties": {
+    "context_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "namespace": {
+      "$ref": "_common.json#/$defs/namespace"
+    },
+    "schema_version": {
+      "const": "collab.v1"
+    },
+    "context_kind": {
+      "type": "string",
+      "enum": [
+        "review",
+        "consult"
+      ]
+    },
+    "envelope_version": {
+      "type": "string",
+      "description": "review keeps the pcs.v2 envelope; consult is collab.v1. The coupling with context_kind is semantic (R12).",
+      "enum": [
+        "pcs.v2",
+        "collab.v1"
+      ]
+    },
+    "trigger_ref": {
+      "description": "Review trigger event; must be null for consult.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/event_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "interaction_id": {
+      "$ref": "_common.json#/$defs/uuid"
+    },
+    "state_revision": {
+      "type": "integer",
+      "description": "Cognitive state revision at assembly. Collaboration metadata never advances it.",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "context_event_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "privacy_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "profile_ref": {
+      "description": "Pinned profile record used by assembly. v1 assembly always writes one; null is legal only for the empty-read-set variant and never used to hide a missing profile.",
+      "oneOf": [
+        {
+          "$ref": "_common.json#/$defs/record_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "read_set": {
+      "type": "array",
+      "description": "Records read by assembly. Only RecordRefs; EventRefs and collaboration refs are never read-set entries.",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/read_set_entry"
+      }
+    },
+    "collab_source_refs": {
+      "type": "array",
+      "description": "Collaboration inputs/artifacts rendered into this Context. Empty for a pure pcs.v2 review.",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/collaboration_ref"
+      }
+    },
+    "renderer_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "policy_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "content_hash": {
+      "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "model_input_complete": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "$ref": "_common.json#/$defs/timestamp_utc"
+    }
+  }
+}
