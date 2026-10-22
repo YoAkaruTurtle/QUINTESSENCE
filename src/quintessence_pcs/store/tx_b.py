@@ -481,6 +481,53 @@ class TxBMixin:
             (namespace, request_id),
         ).fetchone()
 
+    # ---------------------------------------------------------- receipt lookup
+
+    def lookup_command_receipt(
+        self, *, namespace: str, request_id: str
+    ) -> CommitReceipt | None:
+        """Return the stored receipt for one committed ``(namespace, request_id)``.
+
+        This is a **trusted internal Store API**, not a public query.  It reads
+        the receipt exactly as it was committed and returns ``None`` only when
+        that key never committed.  It is a single ``SELECT``: it opens no
+        transaction, takes no write lock, writes no row, and never consults the
+        current watermarks, the deletion barrier or ``private_payloads``.
+
+        What the result proves and what it does not:
+
+        * it proves the command **once committed successfully** — that is the
+          durable historical fact;
+        * it does **not** prove the Context that produced it is still fresh, and
+          it does **not** prove the records the receipt names are still readable
+          (they may be superseded or under a deletion barrier);
+        * a future public Facade must perform its own access and privacy
+          filtering before showing a receipt to anyone; this method deliberately
+          performs none.
+
+        The receipt carries no body: only IDs, versions, watermarks and
+        timestamps (see :class:`CommitReceipt`).
+
+        A stored receipt that fails its defensive parse raises
+        :class:`CorruptStore` and is never reported as "no such command"; a
+        receipt whose namespace/request key or operation disagrees with its row
+        is likewise corrupt.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        rid = identifiers.require_request_id(request_id)
+        row = self._load_command_locked(ns, rid)
+        if row is None:
+            return None
+        receipt = _receipt_from_json(row["receipt_json"])
+        if receipt.namespace != ns or receipt.request_id != rid:
+            raise CorruptStore("stored command receipt does not match its key")
+        if receipt.operation != row["operation"]:
+            raise CorruptStore(
+                "stored command receipt does not match its stored operation"
+            )
+        return receipt
+
     def _watermarks_locked(self, namespace: str) -> dict[str, int]:
         row = self._require_connection().execute(
             "SELECT state_revision, last_event_seq, privacy_epoch "

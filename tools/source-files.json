@@ -118,6 +118,7 @@
   "tests/store/test_deletion.py",
   "tests/store/test_event_store.py",
   "tests/store/test_migrations.py",
+  "tests/store/test_receipt_lookup.py",
   "tests/store/test_record_store.py",
   "tests/store/test_tx_b.py",
   "tests/test_isolation.py",
