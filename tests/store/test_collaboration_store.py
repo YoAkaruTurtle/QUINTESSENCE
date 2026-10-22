@@ -983,6 +983,12 @@ class DecisionTests(CollaborationTestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual("rerun_grant", decision.reason)
 
+    def test_review_start_decision_allows_work_without_control(self) -> None:
+        decision = self.store.review_start_decision(namespace=NS, work_id=WORK_ID)
+        self.assertTrue(decision.allowed)
+        self.assertEqual("not_blocked", decision.reason)
+        self.assertEqual(0, decision.generation)
+
     def test_commit_decision_rejects_a_rerun_grant(self) -> None:
         grant = self.store.register_grant(self.grant_rerun(generation=1))
         self.control(generation=1, blocked=True, rerun_ref=grant.grant_id)

@@ -1964,13 +1964,20 @@ class CollaborationMixin:
     def review_start_decision(
         self, *, namespace: str, work_id: str, now: str | None = None
     ) -> Decision:
+        """Start gate.
+
+        A work item with no control row has never been rejected, so it is not
+        blocked: the gate allows it at generation 0.  Only a committed
+        rejection can create a barrier.
+        """
+
         ns = identifiers.require_namespace(namespace)
         work = _require_uuid(work_id, "work_id")
         now = utc_now_rfc3339() if now is None else _require_timestamp(now, "now")
         with self.read_snapshot():
             control = self.work_control(namespace=ns, work_id=work)
             if control is None:
-                return Decision(False, "no_work_control", 0)
+                return Decision(True, "not_blocked", 0)
             grant = None
             if control.rerun_authorization_ref is not None:
                 loaded = self.load_grant(
@@ -1990,6 +1997,12 @@ class CollaborationMixin:
         trigger_kind: str | None = None,
         now: str | None = None,
     ) -> Decision:
+        """Commit gate.
+
+        A missing control row is an integrity guard here, not an "unblocked"
+        state: without it the candidate cannot be proven current.
+        """
+
         ns = identifiers.require_namespace(namespace)
         identifier = _require_uuid(candidate_id, "candidate_id")
         normalized_approval: Approval | None
