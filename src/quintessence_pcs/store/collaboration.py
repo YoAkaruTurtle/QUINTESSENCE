@@ -30,6 +30,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from ..foundation import identifiers
 from ..foundation.errors import (
     AuthorizationRequired,
+    CommandConflict,
     CorruptStore,
     InvalidInput,
     RecordNotFound,
@@ -52,6 +53,7 @@ from .deletion import (
     DELETION_RECORD,
     DeletionTarget,
 )
+from .errors import CandidateTransitionDenied
 
 COLLAB_SCHEMA_VERSION = "collab.v1"
 #: Most-to-least restrictive.  A derived object's rank may never exceed the
@@ -770,6 +772,11 @@ class CollaborationMixin:
         outside the barrier, and (when ``context_id`` is supplied) covering all
         of the Context's sources.  The artifact row, its payloads and every
         source link commit together; a failure leaves no readable artifact.
+
+        This is a **trusted low-level primitive**.  The production
+        collaboration chain (C06/C07) must not call it directly; it must use
+        :meth:`register_candidate`, :meth:`reject_candidate`,
+        :meth:`authorize_rerun` and the internal commit primitive instead.
         """
 
         ns = identifiers.require_namespace(namespace)
@@ -1650,6 +1657,14 @@ class CollaborationMixin:
         last_candidate_ref: str | None = None,
         updated_at: str | None = None,
     ) -> WorkControl:
+        """Create one work control row.
+
+        This is a **trusted low-level primitive**.  The production
+        collaboration chain (C06/C07) must not call it directly; it must use
+        the candidate state APIs, which create and update the control in the
+        same write transaction.
+        """
+
         ns = identifiers.require_namespace(namespace)
         work = _require_uuid(work_id, "work_id")
         gen = _require_generation(generation, "generation")
@@ -1713,6 +1728,607 @@ class CollaborationMixin:
             (ns, work),
         ).fetchone()
         return None if row is None else _work_control_from_row(row)
+
+    # ------------------------------------------------------- candidate state
+
+    def register_candidate(
+        self,
+        *,
+        namespace: str,
+        interaction_id: str,
+        context_id: str,
+        body: str,
+        retention: str,
+        proposal: Mapping[str, Any],
+        proposal_version: str,
+        work_id: str,
+        work_generation: int,
+        request_id: str,
+        command_digest: str | None = None,
+        sources: Iterable[Any] = (),
+        rerun_authorization_ref: str | None = None,
+        created_at: str | None = None,
+        artifact_id: str | None = None,
+        artifact_version: int = 1,
+    ) -> ArtifactRow:
+        """Register one pending candidate under a stable request key.
+
+        A retry with the same ``(namespace, request_id)`` is compared by the
+        complete identity fingerprint (see :meth:`_candidate_identity_matches_locked`),
+        never by a digest query.  An identical retry returns the stored row and
+        does not touch the control; a mismatch raises ``ID_CONFLICT``.  Retries
+        are intentionally not rejected just because the control generation has
+        since advanced: they return the candidate in its current terminal state.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        interaction = _require_uuid(interaction_id, "interaction_id")
+        context = _require_uuid(context_id, "context_id")
+        if not isinstance(body, str) or not body or len(body) > MAX_BODY_CHARS:
+            raise InvalidInput("candidate body must be 1..262144 characters")
+        policy = _require_retention(retention)
+        proposal_value = _require_mapping(proposal, "proposal")
+        proposal_text = canonical_json_text(proposal_value)
+        proposal_digest = _sha256_text(proposal_text)
+        operation = proposal_value.get("operation")
+        if not isinstance(operation, str) or not operation:
+            raise InvalidInput("candidate proposal must name an operation")
+        proposal_label = _require_text(proposal_version, "proposal_version", 64)
+        work = _require_uuid(work_id, "work_id")
+        generation = _require_generation(work_generation, "work_generation")
+        request = _require_uuid(request_id, "request_id")
+        identifier = (
+            None if artifact_id is None else _require_uuid(artifact_id, "artifact_id")
+        )
+        version = _require_version(artifact_version, "artifact_version")
+        if version != 1:
+            raise InvalidInput(
+                "a candidate is a single-version object; artifact_version must be 1"
+            )
+        created = utc_now_rfc3339() if created_at is None else _require_timestamp(
+            created_at, "created_at"
+        )
+        expected_digest = sha256_hex(
+            canonical_json_text(
+                {
+                    "context_id": context,
+                    "namespace": ns,
+                    "operation": operation,
+                    "request_payload": proposal_value,
+                }
+            )
+        )
+        if command_digest is not None:
+            if (
+                not isinstance(command_digest, str)
+                or len(command_digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in command_digest)
+            ):
+                raise InvalidInput("command_digest must be 64 lower-case hex")
+            if command_digest != expected_digest:
+                raise InvalidInput(
+                    "command_digest does not match the Tx B request digest"
+                )
+        command = expected_digest
+        rerun_ref = (
+            None
+            if rerun_authorization_ref is None
+            else _require_text(
+                rerun_authorization_ref, "rerun_authorization_ref", 256
+            )
+        )
+
+        normalized: list[tuple[str, str, int, dict[str, Any]]] = []
+        seen_sources: set[tuple[str, str, int]] = set()
+        for value in sources:
+            source = _source_value(value, ns)
+            key = (source[0], source[1], source[2])
+            if key in seen_sources:
+                raise InvalidInput("duplicate source reference")
+            seen_sources.add(key)
+            normalized.append(source)
+        source_keys = frozenset(seen_sources)
+        source_refs = [source[3] for source in normalized]
+        content_digest = _sha256_text(body)
+        identity = dict(
+            namespace=ns,
+            work_id=work,
+            work_generation=generation,
+            context_id=context,
+            interaction_id=interaction,
+            proposal_version=proposal_label,
+            command_digest=command,
+            content_digest=content_digest,
+            proposal_digest=proposal_digest,
+            retention=policy,
+            source_keys=source_keys,
+            artifact_id=identifier,
+        )
+
+        with self.transaction():
+            existing = self._load_candidate_by_request_locked(ns, request)
+            if existing is not None:
+                if self._candidate_identity_matches_locked(existing, **identity):
+                    return self.load_artifact(
+                        namespace=ns,
+                        artifact_id=existing["artifact_id"],
+                        artifact_version=1,
+                    )
+                raise CommandConflict(
+                    f"request {request} already names a different candidate"
+                )
+
+            if identifier is not None:
+                duplicate = self._require_connection().execute(
+                    "SELECT 1 FROM collab_artifacts WHERE namespace = ? "
+                    "AND artifact_id = ? AND kind = 'candidate' LIMIT 1",
+                    (ns, identifier),
+                ).fetchone()
+                if duplicate is not None:
+                    raise CommandConflict(
+                        f"candidate {identifier} already exists for another request"
+                    )
+
+            control = self._load_work_control_locked(ns, work)
+            if control is None:
+                control = self.register_work_control(
+                    namespace=ns,
+                    work_id=work,
+                    generation=0,
+                    blocked_after_rejection=False,
+                    control_version=1,
+                )
+            if generation != control.generation:
+                raise InvalidInput(
+                    f"work_generation {generation} is not the current "
+                    f"generation {control.generation}"
+                )
+
+            registered_rerun = control.rerun_authorization_ref
+            if not control.blocked_after_rejection:
+                if rerun_ref is not None:
+                    raise InvalidInput(
+                        "an unblocked work cannot cite a rerun authorization"
+                    )
+                candidate_rerun = None
+            else:
+                if registered_rerun is None:
+                    raise CandidateTransitionDenied(
+                        "blocked work has no registered rerun authorization"
+                    )
+                if rerun_ref != registered_rerun:
+                    raise CandidateTransitionDenied(
+                        "rerun authorization is not the one registered on the control"
+                    )
+                grant = self.load_grant(
+                    namespace=ns, grant_id=registered_rerun
+                )
+                if (
+                    grant is None
+                    or not _grant_active(grant, utc_now_rfc3339())
+                    or not self._review_start_decision(control, grant).allowed
+                ):
+                    raise CandidateTransitionDenied(
+                        "the registered rerun authorization is no longer valid"
+                    )
+                candidate_rerun = registered_rerun
+
+            connection = self._require_connection()
+            connection.execute("SAVEPOINT candidate_insert")
+            try:
+                candidate = self.register_artifact(
+                    namespace=ns,
+                    kind="candidate",
+                    interaction_id=interaction,
+                    context_id=context,
+                    origin_kind="model_output",
+                    body=body,
+                    retention=policy,
+                    sources=source_refs,
+                    artifact_id=identifier,
+                    artifact_version=1,
+                    created_at=created,
+                    proposal=proposal_value,
+                    proposal_version=proposal_label,
+                    work_id=work,
+                    work_generation=generation,
+                    request_id=request,
+                    command_digest=command,
+                    rerun_authorization_ref=candidate_rerun,
+                    status="pending",
+                )
+            except InvalidInput:
+                # A unique-index conflict is re-read inside the same
+                # transaction; the savepoint has already removed this attempt's
+                # payloads, so an idempotent return cannot commit orphans.
+                connection.execute("ROLLBACK TO candidate_insert")
+                connection.execute("RELEASE candidate_insert")
+                retried = self._load_candidate_by_request_locked(ns, request)
+                if retried is not None:
+                    if self._candidate_identity_matches_locked(
+                        retried, **identity
+                    ):
+                        return self.load_artifact(
+                            namespace=ns,
+                            artifact_id=retried["artifact_id"],
+                            artifact_version=1,
+                        )
+                    raise CommandConflict(
+                        f"request {request} already names a different candidate"
+                    )
+                if identifier is not None:
+                    duplicate = connection.execute(
+                        "SELECT 1 FROM collab_artifacts WHERE namespace = ? "
+                        "AND artifact_id = ? AND kind = 'candidate' LIMIT 1",
+                        (ns, identifier),
+                    ).fetchone()
+                    if duplicate is not None:
+                        raise CommandConflict(
+                            f"candidate {identifier} already exists for another request"
+                        )
+                raise
+            except BaseException:
+                connection.execute("ROLLBACK TO candidate_insert")
+                connection.execute("RELEASE candidate_insert")
+                raise
+            else:
+                connection.execute("RELEASE candidate_insert")
+            updated_at = utc_now_rfc3339()
+            cursor = self._require_connection().execute(
+                "UPDATE collab_work_control SET last_candidate_ref = ?, "
+                "control_version = ?, updated_at = ? "
+                "WHERE namespace = ? AND work_id = ? AND control_version = ?",
+                (
+                    candidate.artifact_id,
+                    control.control_version + 1,
+                    updated_at,
+                    ns,
+                    work,
+                    control.control_version,
+                ),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+                raise CorruptStore("work control changed during candidate registration")
+            return candidate
+
+    def reject_candidate(
+        self,
+        *,
+        namespace: str,
+        candidate_id: str,
+        decision_ref: str,
+        decided_at: str | None = None,
+    ) -> tuple[ArtifactRow, WorkControl]:
+        """Move one current pending candidate to ``rejected`` atomically.
+
+        The control moves to the next generation, clears its rerun reference and
+        becomes blocked; other pending candidates below the new generation
+        become ``stale``.  Repeating the same decision is idempotent; a different
+        decision for an already rejected candidate is denied.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        cid = _require_uuid(candidate_id, "candidate_id")
+        decision = _require_text(decision_ref, "decision_ref", 256)
+        decided = utc_now_rfc3339() if decided_at is None else _require_timestamp(
+            decided_at, "decided_at"
+        )
+        with self.transaction():
+            candidate = self.load_artifact(
+                namespace=ns, artifact_id=cid, artifact_version=1
+            )
+            if candidate.kind != "candidate":
+                raise CandidateTransitionDenied(
+                    f"artifact {cid} is not a candidate"
+                )
+            control = (
+                None
+                if candidate.work_id is None
+                else self._load_work_control_locked(ns, candidate.work_id)
+            )
+            if control is None:
+                raise RecordNotFound(
+                    f"no work control for candidate {cid} in {ns!r}"
+                )
+            if candidate.status == "rejected":
+                if candidate.decision_ref == decision:
+                    return candidate, control
+                raise CandidateTransitionDenied(
+                    "candidate was already rejected with a different decision"
+                )
+            if candidate.status != "pending":
+                raise CandidateTransitionDenied(
+                    f"candidate status {candidate.status!r} cannot be rejected"
+                )
+            self._require_candidate_current_locked(candidate, control)
+
+            new_generation = control.generation + 1
+            cursor = self._require_connection().execute(
+                "UPDATE collab_artifacts SET status = 'rejected', "
+                "decided_at = ?, decision_ref = ? "
+                "WHERE namespace = ? AND artifact_id = ? AND artifact_version = 1 "
+                "AND status = 'pending'",
+                (decided, decision, ns, cid),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+                raise CandidateTransitionDenied(
+                    "candidate changed before rejection could be applied"
+                )
+            cursor = self._require_connection().execute(
+                "UPDATE collab_work_control SET generation = ?, "
+                "blocked_after_rejection = 1, block_reason = 'rejected', "
+                "rerun_authorization_ref = NULL, control_version = ?, "
+                "last_candidate_ref = ?, updated_at = ? "
+                "WHERE namespace = ? AND work_id = ? AND control_version = ?",
+                (
+                    new_generation,
+                    control.control_version + 1,
+                    cid,
+                    utc_now_rfc3339(),
+                    ns,
+                    control.work_id,
+                    control.control_version,
+                ),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+                raise CorruptStore("work control changed during rejection")
+            self._require_connection().execute(
+                "UPDATE collab_artifacts SET status = 'stale' "
+                "WHERE namespace = ? AND work_id = ? AND kind = 'candidate' "
+                "AND status = 'pending' AND work_generation < ?",
+                (ns, control.work_id, new_generation),
+            )
+            rejected = self.load_artifact(
+                namespace=ns, artifact_id=cid, artifact_version=1
+            )
+            updated_control = self._load_work_control_locked(ns, control.work_id)
+            if updated_control is None:  # pragma: no cover
+                raise CorruptStore("work control disappeared during rejection")
+            return rejected, updated_control
+
+    def authorize_rerun(
+        self,
+        *,
+        namespace: str,
+        work_id: str,
+        grant_id: str,
+        now: str | None = None,
+    ) -> WorkControl:
+        """Register one valid rerun grant on a blocked work control.
+
+        Only the control's registered reference is trusted; the grant must match
+        the control's work and current generation, be unrevoked and unexpired.
+        Repeating the same grant is idempotent and does not bump the version.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        work = _require_uuid(work_id, "work_id")
+        identifier = _require_uuid(grant_id, "grant_id")
+        moment = utc_now_rfc3339() if now is None else _require_timestamp(now, "now")
+        with self.transaction():
+            control = self._load_work_control_locked(ns, work)
+            if control is None:
+                raise RecordNotFound(f"no work control {work} in {ns!r}")
+            if not control.blocked_after_rejection:
+                raise CandidateTransitionDenied(
+                    "an unblocked work has no rerun transition"
+                )
+            grant = self.load_grant(namespace=ns, grant_id=identifier)
+            if (
+                grant is None
+                or grant.kind != "rerun"
+                or grant.namespace != ns
+                or grant.work_id != work
+                or grant.generation != control.generation
+                or not _grant_active(grant, moment)
+            ):
+                raise CandidateTransitionDenied(
+                    "grant is not a valid rerun authorization for this generation"
+                )
+            if not self._review_start_decision(control, grant).allowed:
+                raise CandidateTransitionDenied(
+                    "the shared start decision does not allow this rerun grant"
+                )
+            if control.rerun_authorization_ref == identifier:
+                return control
+            cursor = self._require_connection().execute(
+                "UPDATE collab_work_control SET rerun_authorization_ref = ?, "
+                "control_version = ?, updated_at = ? "
+                "WHERE namespace = ? AND work_id = ? AND control_version = ?",
+                (
+                    identifier,
+                    control.control_version + 1,
+                    utc_now_rfc3339(),
+                    ns,
+                    work,
+                    control.control_version,
+                ),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+                raise CorruptStore("work control changed during rerun authorization")
+            updated = self._load_work_control_locked(ns, work)
+            if updated is None:  # pragma: no cover
+                raise CorruptStore("work control disappeared during rerun authorization")
+            return updated
+
+    def _mark_candidate_committed_locked(
+        self,
+        *,
+        namespace: str,
+        candidate_id: str,
+        decision_ref: str,
+        commit_authorization_ref: str | None = None,
+    ) -> ArtifactRow:
+        """Internal C06a primitive: bind a pending candidate to a real Tx B receipt.
+
+        This is **not** a public commit entry point.  It must run inside the
+        C06a Tx B write transaction, after the Belief command has committed and
+        produced its ``processed_commands`` receipt.  It never updates the work
+        control and never advances ``state_revision``.
+        """
+
+        if self._tx_depth == 0:
+            raise RuntimeError(
+                "_mark_candidate_committed_locked must run inside an open transaction"
+            )
+        ns = identifiers.require_namespace(namespace)
+        cid = _require_uuid(candidate_id, "candidate_id")
+        decision = _require_text(decision_ref, "decision_ref", 256)
+        commit = (
+            None
+            if commit_authorization_ref is None
+            else _require_text(
+                commit_authorization_ref, "commit_authorization_ref", 256
+            )
+        )
+        candidate = self.load_artifact(
+            namespace=ns, artifact_id=cid, artifact_version=1
+        )
+        if candidate.kind != "candidate" or candidate.work_id is None:
+            raise CandidateTransitionDenied(f"artifact {cid} is not a candidate")
+        control = self._load_work_control_locked(ns, candidate.work_id)
+        if control is None:
+            raise CandidateTransitionDenied(
+                f"no work control for candidate {cid}"
+            )
+        self._require_candidate_current_locked(candidate, control)
+        receipt = self.lookup_command_receipt(
+            namespace=ns, request_id=candidate.request_id
+        )
+        if (
+            receipt is None
+            or receipt.namespace != ns
+            or receipt.request_id != candidate.request_id
+            or receipt.context_id != candidate.context_id
+            or receipt.operation not in ("belief.propose", "belief.revise")
+            or receipt.outcome not in ("committed", "noop")
+        ):
+            raise CandidateTransitionDenied(
+                "no matching cognitive commit receipt"
+            )
+        cursor = self._require_connection().execute(
+            "UPDATE collab_artifacts SET status = 'committed', "
+            "decided_at = ?, decision_ref = ?, commit_authorization_ref = ? "
+            "WHERE namespace = ? AND artifact_id = ? AND artifact_version = 1 "
+            "AND status = 'pending'",
+            (utc_now_rfc3339(), decision, commit, ns, cid),
+        )
+        if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+            raise CandidateTransitionDenied(
+                "candidate changed before commit could be applied"
+            )
+        return self.load_artifact(
+            namespace=ns, artifact_id=cid, artifact_version=1
+        )
+
+    def _require_candidate_current_locked(
+        self, candidate: ArtifactRow, control: WorkControl
+    ) -> None:
+        """Shared check: pending, and the same generation as the control."""
+
+        if (
+            candidate.kind != "candidate"
+            or candidate.status != "pending"
+            or candidate.work_generation != control.generation
+        ):
+            raise CandidateTransitionDenied(
+                "candidate is not the current pending generation"
+            )
+
+    def _load_work_control_locked(
+        self, namespace: str, work_id: str
+    ) -> WorkControl | None:
+        row = self._require_connection().execute(
+            f"SELECT {_WORK_COLUMNS} FROM collab_work_control "
+            "WHERE namespace = ? AND work_id = ?",
+            (namespace, work_id),
+        ).fetchone()
+        return None if row is None else _work_control_from_row(row)
+
+    def _load_candidate_by_request_locked(
+        self, namespace: str, request_id: str
+    ) -> Any:
+        return self._require_connection().execute(
+            f"SELECT {_ARTIFACT_COLUMNS} FROM collab_artifacts "
+            "WHERE namespace = ? AND kind = 'candidate' AND request_id = ?",
+            (namespace, request_id),
+        ).fetchone()
+
+    def _artifact_source_keys_locked(
+        self, namespace: str, artifact_id: str, artifact_version: int
+    ) -> frozenset[tuple[str, str, int]]:
+        rows = self._require_connection().execute(
+            "SELECT source_kind, source_id, source_version "
+            "FROM collab_source_links WHERE namespace = ? "
+            "AND owner_kind = 'artifact' AND owner_id = ? AND owner_version = ?",
+            (namespace, artifact_id, artifact_version),
+        ).fetchall()
+        return frozenset(
+            (
+                row["source_kind"],
+                str(row["source_id"]),
+                int(row["source_version"]),
+            )
+            for row in rows
+        )
+
+    def _candidate_identity_matches_locked(
+        self,
+        existing: Any,
+        *,
+        namespace: str,
+        work_id: str,
+        work_generation: int,
+        context_id: str,
+        interaction_id: str,
+        proposal_version: str,
+        command_digest: str,
+        content_digest: str,
+        proposal_digest: str,
+        retention: str,
+        source_keys: frozenset[tuple[str, str, int]],
+        artifact_id: str | None,
+    ) -> bool:
+        """Compare the complete stable identity, not merely a digest.
+
+        Excluded on purpose: attempt provenance, creation time, status/decision,
+        and the two authorization references.  ``artifact_id`` is compared only
+        when the caller supplied one, so an auto-generated id is not required on
+        an idempotent retry.
+        """
+
+        if int(existing["artifact_version"]) != 1:
+            return False
+        if existing["namespace"] != namespace:
+            return False
+        if existing["work_id"] != work_id:
+            return False
+        if int(existing["work_generation"]) != work_generation:
+            return False
+        if existing["context_id"] != context_id:
+            return False
+        if existing["interaction_id"] != interaction_id:
+            return False
+        if existing["proposal_version"] != proposal_version:
+            return False
+        if existing["command_digest"] != command_digest:
+            return False
+        if existing["content_digest"] != content_digest:
+            return False
+        if existing["proposal_digest"] != proposal_digest:
+            return False
+        if existing["retention_policy"] != retention:
+            return False
+        if existing["origin_kind"] != "model_output":
+            return False
+        if artifact_id is not None and existing["artifact_id"] != artifact_id:
+            return False
+        return (
+            self._artifact_source_keys_locked(
+                namespace, existing["artifact_id"], 1
+            )
+            == source_keys
+        )
 
     def register_grant(self, grant: Mapping[str, Any]) -> GrantRow:
         """Insert one of the five mutually exclusive grant branches."""

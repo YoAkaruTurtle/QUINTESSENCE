@@ -76,7 +76,20 @@ class InvalidWorkCompletion(StorageError):
     code = "INVALID_TRANSITION"
 
 
+class CandidateTransitionDenied(StorageError):
+    """A candidate state transition is not allowed from its current state.
+
+    Covers reject, rerun authorization and the internal commit primitive: the
+    candidate is not current, the control has no matching registered rerun
+    grant, the decision reference differs, or the cognitive commit receipt does
+    not bind this exact candidate.  The error code vocabulary is unchanged.
+    """
+
+    code = "INVALID_TRANSITION"
+
+
 __all__ = [
+    "CandidateTransitionDenied",
     "ConsultContextNotCommittable",
     "ContextTooLarge",
     "InvalidWorkCompletion",
