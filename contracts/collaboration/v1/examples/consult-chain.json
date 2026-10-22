@@ -145,6 +145,7 @@
         "origin_kind": "model_output",
         "body": "A reply that cites the user's input without treating it as evidence.",
         "content_digest": "sha256:393723eca70407c237619aa48c0fc508a9f48933720ff744c38abab8ab172877",
+        "retention": "standard",
         "source_refs": [
           {
             "ref_type": "collab_input",

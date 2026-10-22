@@ -43,8 +43,9 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
   两个字段不混用：`request_hash`、`content_digest`、`proposal_digest`、
   `content_hash` 用前者；`candidate.command_digest` 用后者，因为它的值必须
   逐字等于 Tx B 已经存储的 `_request_digest`。
-- `retention` 是**命名保留策略**，不是时长。策略表由存储层维护；过期在每次
-  读取时重判，不缓存。
+- `retention` 是**有序闭集** `session < standard < durable`（最严格 → 最宽松）：
+  `session` 会话结束即不可读，`standard` 由存储层策略表解析时长，`durable`
+  长期保留直到显式删除。具体天数不写进契约；过期在每次读取时重判，不缓存。
 - `readability` 只出现在 `experience_view.json`。存储对象没有可读状态字段。
 
 ## 对象语义
@@ -77,6 +78,8 @@ candidate。`completed_at` 在打开时为 `null`。
 - `command_digest` 必须等于 Tx B 的
   `_request_digest(namespace, operation, context_id, request_payload)`。
 - `structural_validation` 恒为 `"passed"`。结构校验失败的输出不是 candidate。
+- `retention` 是创建时赋予的有序保留标签；artifact/candidate 的保留不得宽于
+  其协作来源（R15），没有协作来源时由宿主按策略默认值赋值。
 - **`rerun_authorization_ref`**：生成本候选所依据的 rerun grant；generation 0
   且从未被拒绝时为 `null`。
 - **`commit_authorization_ref`**：提交本候选所依据的 commit grant；人工批准
@@ -178,7 +181,7 @@ allowed = candidate.status == "pending"
 `run_step`（旧单步）、Review Facade、宿主 pending-work 扫描、候选决议四个
 入口一律调用，禁止内联复制。
 
-## 规则 R1–R14
+## 规则 R1–R15
 
 - **R1 协作引用不是证据**：协作引用不得出现在 `evidence_links`、
   `RecordVersion.source_refs`、`read_set`。
@@ -214,11 +217,18 @@ allowed = candidate.status == "pending"
   不可继续发送或提交；历史回执仍可查。
 - **R11 保留期限**：retention 生效；删除/过期后 ref 解释为
   `redacted`/`unavailable`；`body` 非 `null` 当且仅当
-  `readability = "available"`。
+  `readability = "available"`。`experience_view.retention` 必须等于其所
+  引用对象的 retention（视图不重新解释策略）。
 - **R12 读取边界**：consult 的 binding 不能被 pcs.v2 读取器解析；review 的
   binding 必须与 envelope 一致。
 - **R13 权限不互相推导**：见上一节。
 - **R14 单一检查点**：见上一节。
+- **R15 派生保留不得宽于上游来源**：对每个 artifact/candidate，其 retention
+  的顺序必须**不宽于**它全部 collaboration source 的 retention（多来源取
+  最严格者）；没有 collaboration source 时（例如 review 无新增输入）不施加
+  上游约束，由宿主按策略默认值赋值。该规则只约束协作来源；pcs.v2 的
+  event/record 没有保留标签，它们始终由 R7 的删除屏障覆盖。retention 永远
+  不能覆盖删除：删除优先，删除后按 R7 清理。
 
 ## 删除闭包
 
@@ -253,18 +263,18 @@ read_experience(access, *, ref, purpose) -> experience_view
 
 只用 `ContractChecker`。`examples/invalid.json` 的 `layer = "schema"` 样例声明
 `schema`、`instance`、`expect_path`、`expect_keyword`，测试断言该
-`(path, keyword)` 确实出现在失败集合中——不是“有错即可”。当前 14 条。
+`(path, keyword)` 确实出现在失败集合中——不是“有错即可”。当前 16 条。
 
 ### 层 D（语义）
 
 `check_semantics(objects)` 是测试内的纯函数，`objects` 是
 `[{"type": ..., "value": ...}]` 列表，返回 `Violation(rule, path, message)`。
-它不读文件、不连数据库。当前 17 条，覆盖：
+它不读文件、不连数据库。当前 19 条，覆盖：
 
 - 自引用 / 成环 / artifact 链深度 > 8（R7）
 - consult trigger 必须 null、review trigger 必须非 null（R12）
 - review 的 trigger/work 字段完整性（R12）
-- `readability` 与 `body` 的耦合、删除后仍可读（R11）
+- `readability` 与 `body` 的耦合、删除后仍可读、视图 retention 与对象一致（R11）
 - `read_set` 只含 `RecordRef`（R1）
 - binding 与 `context_snapshots` 一致（R12）
 - `source_refs` 与持久 links 一致、artifact owner_version 一致（R2）
@@ -272,6 +282,7 @@ read_experience(access, *, ref, purpose) -> experience_view
 - 外部 EventRef/RecordRef 未在 `synthetic_externals` 声明（R2）
 - generation 单调性与候选一致（R4）
 - attempt hash/context 与账本一致（R9）
+- 派生保留不得宽于协作来源（R15）
 - **rerun 冒充提交、commit 冒充重新执行、egress 冒充提交（R13）**
 - 提交 gate 与冻结判定不一致（R14）
 
@@ -324,8 +335,8 @@ collab.v1 读取入口；旧 `load_context` 对 consult 行拒绝；协作来源
 ## 本卡显式结构取舍（卡未逐字规定处）
 
 1. 所有 DTO 的 `schema_version` 取常量 `"collab.v1"`，作为目录级版本锚点。
-2. `retention` 是命名策略标签（1–64 字符），不编码时长；时长由存储层策略表
-   解析。
+2. `retention` 是有序闭集 `session < standard < durable`（最严格 → 最宽松）；
+   只冻结标签与顺序，时长由 C05b 策略表解析，契约不编码天数。
 3. `interaction.completed_at`、`candidate.decided_at`、`candidate.decision_ref`
    允许 `null`：打开/pending 状态不编造完成时间或决定引用。
 4. artifact/candidate 的 `body` 上限取 262144 字符，与 input 正文同一上界；

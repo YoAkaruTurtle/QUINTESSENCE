@@ -17,6 +17,7 @@
     "origin_kind",
     "body",
     "content_digest",
+    "retention",
     "source_refs",
     "created_at"
   ],
@@ -75,6 +76,9 @@
     },
     "content_digest": {
       "$ref": "_common.json#/$defs/sha256_digest"
+    },
+    "retention": {
+      "$ref": "_common.json#/$defs/retention"
     },
     "source_refs": {
       "type": "array",

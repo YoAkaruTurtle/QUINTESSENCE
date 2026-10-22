@@ -56,7 +56,7 @@ SCHEMA_FILES = {
     "experience_view.json",
 }
 
-RULES = {f"R{number}" for number in range(1, 15)}
+RULES = {f"R{number}" for number in range(1, 16)}
 
 #: Expected required field sets.  These are copied from the freeze, not
 #: derived from the schema files under test, so dropping a field fails.
@@ -106,6 +106,7 @@ REQUIRED_FIELDS = {
         "origin_kind",
         "body",
         "content_digest",
+        "retention",
         "source_refs",
         "created_at",
     },
@@ -121,6 +122,7 @@ REQUIRED_FIELDS = {
         "origin_kind",
         "body",
         "content_digest",
+        "retention",
         "source_refs",
         "created_at",
         "proposal",
@@ -384,6 +386,14 @@ def check_semantics(objects: Iterable[dict[str, Any]]) -> list[Violation]:
     artifacts_by_id: dict[str, dict[str, Any]] = {}
     for item in artifacts + candidates:
         artifacts_by_id[item["artifact_id"]] = item
+    inputs_by_version = {
+        (item["namespace"], item["input_id"], item["content_version"]): item
+        for item in inputs
+    }
+    artifacts_by_version = {
+        (item["namespace"], item["artifact_id"], item["artifact_version"]): item
+        for item in artifacts_by_id.values()
+    }
     # A chain records successive states of the same row; only the last state
     # of an interaction or a candidate is a live object for semantic checks.
     interactions = list(interactions_by_id.values())
@@ -592,6 +602,27 @@ def check_semantics(objects: Iterable[dict[str, Any]]) -> list[Violation]:
     for key, item in latest_views.items():
         if (item.get("readability") == "available") != (item.get("body") is not None):
             bad("R11", "experience_view", "body must be non-null iff readability is available")
+        reference = item["ref"]
+        target = None
+        if reference.get("ref_type") == "collab_input":
+            target = inputs_by_version.get(
+                (
+                    reference.get("namespace"),
+                    reference.get("input_id"),
+                    reference.get("content_version"),
+                )
+            )
+        elif reference.get("ref_type") == "collab_artifact":
+            target = artifacts_by_version.get(
+                (
+                    reference.get("namespace"),
+                    reference.get("artifact_id"),
+                    reference.get("artifact_version"),
+                )
+            )
+        if target is not None and target.get("retention") != item.get("retention"):
+            bad("R11", "experience_view",
+                "view retention must equal the referenced object's retention")
     for deletion in deletions:
         view = latest_views.get(ref_key(deletion["ref"]))
         if view is not None and view.get("readability") == "available":
@@ -652,6 +683,41 @@ def check_semantics(objects: Iterable[dict[str, Any]]) -> list[Violation]:
         if attempt.get("context_id") != item.get("context_id"):
             bad("R9", f"artifact/{item['artifact_id']}/attempt_ref",
                 "attempt context differs from the artifact context")
+
+    # ---- R15: derived retention must not outlive its sources ------------
+    retention_rank = {"session": 0, "standard": 1, "durable": 2}
+    for item in artifacts + candidates:
+        own = retention_rank.get(item.get("retention"))
+        if own is None:
+            continue
+        strictest = None
+        for ref in item.get("source_refs", ()):
+            source = None
+            if ref.get("ref_type") == "collab_input":
+                source = inputs_by_version.get(
+                    (
+                        ref.get("namespace"),
+                        ref.get("input_id"),
+                        ref.get("content_version"),
+                    )
+                )
+            elif ref.get("ref_type") == "collab_artifact":
+                source = artifacts_by_version.get(
+                    (
+                        ref.get("namespace"),
+                        ref.get("artifact_id"),
+                        ref.get("artifact_version"),
+                    )
+                )
+            if source is None:
+                continue
+            source_rank = retention_rank.get(source.get("retention"))
+            if source_rank is None:
+                continue
+            strictest = source_rank if strictest is None else min(strictest, source_rank)
+        if strictest is not None and own > strictest:
+            bad("R15", f"artifact/{item['artifact_id']}/retention",
+                "derived retention is wider than a collaboration source")
 
     # ---- R13/R14: the two gates, recomputed -----------------------------
     for decision in decisions_start:
@@ -944,7 +1010,10 @@ class CollaborationContractTests(unittest.TestCase):
         self.assertEqual(
             ["available", "redacted", "unavailable"], defs["readability"]["enum"]
         )
-        self.assertTrue(defs["retention"]["pattern"].startswith("^[a-z]"))
+        self.assertEqual(
+            ["session", "standard", "durable"], defs["retention"]["enum"]
+        )
+        self.assertNotIn("pattern", defs["retention"])
         self.assertTrue(defs["proposal_version"]["pattern"].startswith("^[a-z0-9]"))
 
         for name in ("event_ref", "record_ref", "attempt_ref", "collab_input_ref",

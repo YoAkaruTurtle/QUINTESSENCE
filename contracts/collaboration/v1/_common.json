@@ -54,10 +54,12 @@
     },
     "retention": {
       "type": "string",
-      "description": "Named retention policy. Durations live in the store policy registry, not in this contract; expiry is evaluated when a reference is read, never cached.",
-      "minLength": 1,
-      "maxLength": 64,
-      "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+      "description": "Ordered retention policy: session < standard < durable, most-to-least restrictive. Durations are resolved by the store policy registry (C05b), never encoded here.",
+      "enum": [
+        "session",
+        "standard",
+        "durable"
+      ]
     },
     "readability": {
       "type": "string",
