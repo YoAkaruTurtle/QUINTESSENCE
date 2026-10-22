@@ -1,4 +1,4 @@
-"""C06a: the single trusted execution point for committing one candidate.
+"""C06a/C06b: the trusted candidate commit and review-resolution service.
 
 One call to :meth:`CollaborationService.commit_candidate` performs the whole
 decision as **one** Tx B write transaction:
@@ -21,9 +21,29 @@ committed replays the stored receipt and writes nothing; a concurrent
 same-digest early return from Tx B is accepted only if the candidate is
 observably ``committed`` afterwards.
 
-Trust boundary: this module is *not* an authentication layer.  Only trusted
-host/Facade code can construct a :class:`CommitAuthority` and call the service;
-model output, proposals and request JSON never are authority.
+C06b adds the three review checkpoints and one resolution entry point:
+
+* :meth:`CollaborationService.review_start` is the read-only gate in front of
+  any model attempt.  It delegates to ``review_start_decision`` unchanged: a
+  blocked work with a registered, active rerun grant may *generate* a
+  candidate, and that decision never authorizes the legacy direct-commit path;
+* :meth:`CollaborationService.register_review_candidate` lands one generated
+  candidate only when the review is still allowed at the expected generation;
+* :meth:`CollaborationService.resolve_candidate` is the one approve/reject
+  entry point.  ``approve`` reuses :meth:`commit_candidate`; ``reject`` reuses
+  the C05d state transition.  A rejected candidate can never be revived.
+
+Trust boundary (C06a + C06b): this Service is a **trusted internal API**.  It
+is not exposed to model output, candidate bodies, request JSON or any untrusted
+transport.  A reject ``decision_ref`` is an audit label, not an authorization
+token; rejection authority comes from the architectural fact that only a
+trusted host decides to call this method.  When C07 opens reject to a wider
+caller, the trusted host must check the operator's permission before calling.
+An ``already_committed`` historical receipt must have current access and
+deletion-barrier checks re-applied before a public Facade returns it: a
+successful historical commit does not prove current access authorization.
+This card adds no ACL, token or identity system, and it does not change
+:class:`CommitAuthority` or the C06a commit semantics.
 """
 
 from __future__ import annotations
@@ -46,12 +66,22 @@ from ..foundation.errors import (
 from ..foundation.jsonutil import canonical_json_text
 from ..foundation.timeutil import utc_now_rfc3339
 from ..runtime.proposal_generation import validate_proposal
-from ..store.collaboration import Approval, ArtifactRow, GrantRow
+from ..store.collaboration import (
+    Approval,
+    ArtifactRow,
+    Decision,
+    GrantRow,
+    WorkControl,
+)
 from ..store.errors import CandidateTransitionDenied
 from ..store.tx_b import CommitBasis, CommitReceipt
 from .policy import PROPOSAL_OPERATIONS, CommitAuthority
 
 _MAX_DECISION_REF = 256
+
+DECISION_APPROVE = "approve"
+DECISION_REJECT = "reject"
+RESOLVE_DECISIONS = (DECISION_APPROVE, DECISION_REJECT)
 
 
 @dataclass(frozen=True)
@@ -64,8 +94,24 @@ class CandidateCommitOutcome:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """The outcome of one approve/reject decision on a candidate.
+
+    ``status`` is the candidate's resulting state (or ``already_committed``
+    when an earlier successful commit is reported back).  ``receipt`` is set
+    for ``committed``/``already_committed``; ``control`` is set only by a
+    rejection, which is the transition that moves the work control.
+    """
+
+    candidate: ArtifactRow
+    status: str
+    receipt: CommitReceipt | None
+    control: WorkControl | None
+
+
 class CollaborationService:
-    """The C06a trusted commit entry point for one cognition store."""
+    """The trusted C06a commit and C06b review-resolution entry point."""
 
     def __init__(
         self,
@@ -185,7 +231,195 @@ class CollaborationService:
             replayed=not guard.entered,
         )
 
+    def review_start(self, *, namespace: str, work_id: str) -> Decision:
+        """Gate before any model attempt; read-only, writes nothing.
+
+        Semantics are exactly ``store.review_start_decision``: a blocked work
+        with a registered, active rerun grant is allowed to *generate a
+        candidate*.  It does not authorize the legacy direct commit path.
+
+        This is the first of C06b's three checkpoints; the generated result
+        landing and the C06a commit guard are the other two.  All three read
+        the same persistent ``WorkControl``; none can be bypassed by an
+        interaction id, a session, a request id or a restart.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        return self._store.review_start_decision(
+            namespace=ns, work_id=work_id
+        )
+
+    def register_review_candidate(
+        self,
+        *,
+        namespace: str,
+        work_id: str,
+        work_generation: int,
+        **candidate_fields: Any,
+    ) -> ArtifactRow:
+        """Land one generated candidate only if the review is still allowed.
+
+        The store's ``register_candidate`` already re-checks the generation and
+        the registered rerun authorization.  This earlier, explicit refusal is
+        the "generated result landing" checkpoint: a result produced before a
+        concurrent rejection never becomes a row.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        decision = self._store.review_start_decision(
+            namespace=ns, work_id=work_id
+        )
+        if not decision.allowed:
+            raise CandidateTransitionDenied(
+                f"review start is blocked: {decision.reason}"
+            )
+        if work_generation != decision.generation:
+            raise CandidateTransitionDenied(
+                f"work generation moved from {work_generation} "
+                f"to {decision.generation}"
+            )
+        return self._store.register_candidate(
+            namespace=ns,
+            work_id=work_id,
+            work_generation=work_generation,
+            **candidate_fields,
+        )
+
+    def resolve_candidate(
+        self,
+        *,
+        namespace: str,
+        candidate_id: str,
+        decision: str,
+        decision_ref: str,
+        authority: CommitAuthority | None = None,
+    ) -> Resolution:
+        """Approve or reject one candidate; the one resolution entry point.
+
+        ``approve`` reuses :meth:`commit_candidate` and therefore the whole
+        C06a transaction.  ``reject`` reuses ``store.reject_candidate`` and
+        therefore the C05d transition (candidate rejected, control blocked,
+        generation +1, control_version +1, rerun reference cleared).
+
+        Both orders are safe and neither ever undoes a commit:
+
+        * a candidate already ``committed`` is reported as
+          ``already_committed`` with its stored receipt; the control is not
+          touched and the generation does not advance;
+        * an ``approve`` after a rejection returns ``rejected`` and writes
+          nothing; a ``reject`` after a commit returns ``already_committed``.
+
+        ``decision_ref`` is an audit label, not a token.  The authority to
+        reject comes from the trusted host calling this internal method; C07
+        must check the operator's permission before exposing it.  An
+        ``already_committed`` receipt is a historical fact: a public Facade
+        must re-apply current access and deletion-barrier checks before
+        returning it.  This method adds no ACL and does not change
+        :class:`CommitAuthority` or the C06a guard.
+        """
+
+        if decision not in RESOLVE_DECISIONS:
+            raise InvalidInput(
+                "decision must be one of " + ", ".join(RESOLVE_DECISIONS)
+            )
+        ns = identifiers.require_namespace(namespace)
+
+        if decision == DECISION_APPROVE:
+            if not isinstance(authority, CommitAuthority):
+                raise InvalidInput("approve requires a CommitAuthority")
+            candidate = self._load_candidate(ns, candidate_id)
+            if candidate.status == "committed":
+                return self._committed_resolution(ns, candidate)
+            if candidate.status != "pending":
+                # A rejected candidate can never be revived, and stale/failed
+                # candidates are terminal too.  Report the state, write nothing.
+                return Resolution(
+                    candidate=candidate,
+                    status=candidate.status,
+                    receipt=None,
+                    control=None,
+                )
+            try:
+                outcome = self.commit_candidate(
+                    namespace=ns,
+                    candidate_id=candidate_id,
+                    authority=authority,
+                    decision_ref=decision_ref,
+                )
+            except CandidateTransitionDenied:
+                # A concurrent rejection may have won between our read and the
+                # commit transaction.  Re-read once and report its state.
+                current = self._load_candidate(ns, candidate_id)
+                if current.status == "committed":
+                    return self._committed_resolution(ns, current)
+                if current.status != "pending":
+                    return Resolution(
+                        candidate=current,
+                        status=current.status,
+                        receipt=None,
+                        control=None,
+                    )
+                raise
+            return Resolution(
+                candidate=outcome.candidate,
+                status=(
+                    "already_committed"
+                    if outcome.replayed
+                    else "committed"
+                ),
+                receipt=outcome.receipt,
+                control=None,
+            )
+
+        # decision == DECISION_REJECT
+        if authority is not None:
+            raise InvalidInput("reject does not accept a commit authority")
+        candidate = self._load_candidate(ns, candidate_id)
+        if candidate.status == "committed":
+            return self._committed_resolution(ns, candidate)
+        if candidate.status in ("stale", "failed"):
+            raise CandidateTransitionDenied(
+                f"candidate {candidate.artifact_id} is {candidate.status!r}; "
+                "a terminal candidate cannot be rejected"
+            )
+        try:
+            rejected, control = self._store.reject_candidate(
+                namespace=ns,
+                candidate_id=candidate_id,
+                decision_ref=decision_ref,
+            )
+        except CandidateTransitionDenied:
+            # A concurrent commit may have won.  Only "now committed" turns
+            # into a resolution here; every other refusal is re-raised.
+            current = self._load_candidate(ns, candidate_id)
+            if current.status == "committed":
+                return self._committed_resolution(ns, current)
+            raise
+        return Resolution(
+            candidate=rejected,
+            status="rejected",
+            receipt=None,
+            control=control,
+        )
+
     # ------------------------------------------------------------- internals
+
+    def _committed_resolution(
+        self, namespace: str, candidate: ArtifactRow
+    ) -> Resolution:
+        receipt = self._store.lookup_command_receipt(
+            namespace=namespace, request_id=candidate.request_id
+        )
+        if receipt is None:
+            raise CorruptStore(
+                "a committed candidate has no command receipt"
+            )
+        return Resolution(
+            candidate=candidate,
+            status="already_committed",
+            receipt=receipt,
+            control=None,
+        )
 
     def _load_candidate(self, namespace: str, candidate_id: str) -> ArtifactRow:
         try:
@@ -425,4 +659,11 @@ def _validate_candidate_proposal(
         ) from exc
 
 
-__all__ = ["CandidateCommitOutcome", "CollaborationService"]
+__all__ = [
+    "CandidateCommitOutcome",
+    "CollaborationService",
+    "DECISION_APPROVE",
+    "DECISION_REJECT",
+    "RESOLVE_DECISIONS",
+    "Resolution",
+]

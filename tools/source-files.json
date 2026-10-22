@@ -102,6 +102,7 @@
   "tests/__init__.py",
   "tests/collaboration/__init__.py",
   "tests/collaboration/test_candidate_commit.py",
+  "tests/collaboration/test_review_control.py",
   "tests/contract/__init__.py",
   "tests/contract/contract_checker.py",
   "tests/contract/contract_errors.py",

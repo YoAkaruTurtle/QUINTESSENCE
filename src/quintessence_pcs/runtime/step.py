@@ -25,6 +25,20 @@ Controlled storage failures are reported with their contract ``code``;
 network exchange failed instead of returning usable content).  A proposal that
 is not valid JSON after the bounded repair remains ``INVALID_SCHEMA``, as in
 PCS2-008; no public error-code enum is extended.
+
+C06b isolates collaboration-managed work from this legacy path.  A work item
+that has any ``collab_work_control`` row is never generated or committed here,
+whether or not it is blocked and whether or not a rerun grant exists:
+
+* a pre-check right after work selection returns ``blocked``/``managed`` with
+  zero Contexts, zero model calls and zero ``model_attempts``;
+* both commit paths (Belief and WAIT) carry a ``_NoManagedWorkGuard`` that
+  re-checks the control **inside** the Tx B write transaction, so a control
+  that appears while the model runs still aborts the whole cognitive commit.
+  The WAIT completion rolls back with it.
+
+``blocked`` and ``managed`` are runtime result labels, not ``pcs.v2`` error
+codes; ``StepResult.ok`` stays false for both.
 """
 
 from __future__ import annotations
@@ -51,7 +65,8 @@ from ..store.cognition import (
     WORK_OUTCOME_CHECKED_NO_BELIEF,
     WORK_OUTCOME_COMMITTED,
 )
-from ..store.tx_b import CommitReceipt
+from ..store.collaboration import WorkControl
+from ..store.tx_b import CommitBasis, CommitReceipt
 from .candidate import MAX_MODEL_CALLS, GenerationBudget, generate_candidate
 from .context import ContextEnvelope, ContextService
 from .fake_model import FakeModel
@@ -65,14 +80,63 @@ OUTCOME_COMMITTED = "committed"
 OUTCOME_CHECKED_NO_BELIEF = "checked_no_belief"
 OUTCOME_NO_PENDING_WORK = "no_pending_work"
 OUTCOME_FAILED = "failed"
+#: The work has a collaboration control that is blocked after a rejection.
+OUTCOME_BLOCKED = "blocked"
+#: The work has a collaboration control but is not currently blocked; the
+#: legacy direct-commit path is still disabled.
+OUTCOME_MANAGED = "managed"
 STEP_OUTCOMES = (
     OUTCOME_COMMITTED,
     OUTCOME_CHECKED_NO_BELIEF,
     OUTCOME_NO_PENDING_WORK,
     OUTCOME_FAILED,
+    OUTCOME_BLOCKED,
+    OUTCOME_MANAGED,
 )
 
 MODEL_FAILURE_CODE = "MODEL_FAILURE"
+
+
+class ManagedWorkConflict(StorageError):
+    """A collaboration WorkControl appeared while the legacy step ran.
+
+    Raised by :class:`_NoManagedWorkGuard` inside the Tx B write transaction.
+    It reuses the frozen ``INVALID_TRANSITION`` code; it is an internal runtime
+    signal, not a new public error code.
+    """
+
+    code = "INVALID_TRANSITION"
+
+
+class _NoManagedWorkGuard:
+    """Tx B guard: the legacy path must refuse newly managed work.
+
+    It deliberately does **not** call ``review_start_decision``: that gate may
+    return ``allowed=True`` for a blocked work with a valid rerun grant, which
+    is exactly the bypass C06b must close.  A control row of any kind means
+    "this work belongs to the collaboration plane".
+    """
+
+    def __init__(self, store: Any, *, namespace: str, work_id: str) -> None:
+        self._store = store
+        self._namespace = namespace
+        self._work_id = work_id
+
+    def before_apply(self, basis: CommitBasis) -> None:
+        if (
+            self._store.work_control(
+                namespace=self._namespace, work_id=self._work_id
+            )
+            is not None
+        ):
+            raise ManagedWorkConflict(
+                "a collaboration work control now manages this work"
+            )
+
+    def after_receipt(
+        self, basis: CommitBasis, receipt: CommitReceipt
+    ) -> None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -205,6 +269,19 @@ class CognitionRuntime:
             )
         work = works[0]
 
+        # C06b pre-check: a collaboration WorkControl removes this work from
+        # the legacy path before a Context or a model call can exist.  The
+        # decision is a plain "control row exists" test; review_start_decision
+        # is intentionally not consulted (it may allow generation).
+        control = self._store.work_control(namespace=ns, work_id=work.work_id)
+        if control is not None:
+            return self._managed_result(
+                ns, trigger, work.work_id, control, revision
+            )
+        guard = _NoManagedWorkGuard(
+            self._store, namespace=ns, work_id=work.work_id
+        )
+
         generation_budget = GenerationBudget()
         candidate = generate_candidate(
             namespace=ns,
@@ -227,7 +304,11 @@ class CognitionRuntime:
             try:
                 if proposal["operation"] == "wait":
                     receipt = self._commit_wait(
-                        ns=ns, context=context, work=work, reason=proposal["reason"]
+                        ns=ns,
+                        context=context,
+                        work=work,
+                        reason=proposal["reason"],
+                        guard=guard,
                     )
                     progress = self._store.work_progress(work.work_id)
                     if progress is None:
@@ -253,6 +334,7 @@ class CognitionRuntime:
                     request_id=request_id,
                     proposal=proposal,
                     work_id=work.work_id,
+                    guard=guard,
                 )
                 progress = self._store.work_progress(work.work_id)
                 if progress is None:
@@ -290,6 +372,16 @@ class CognitionRuntime:
                     model_calls=generation_budget.calls,
                     repairs=generation_budget.repairs,
                     validation_retries=tuple(validation_retries),
+                )
+            except ManagedWorkConflict:
+                # A control row appeared after the pre-check (for example while
+                # the model was running).  The Tx B transaction already rolled
+                # back; report the managed state without retrying the model.
+                current = self._store.work_control(
+                    namespace=ns, work_id=work.work_id
+                )
+                return self._managed_result(
+                    ns, trigger, work.work_id, current, revision
                 )
             except StorageError as exc:
                 if isinstance(exc, (CorruptStore, DbBusy)):
@@ -368,6 +460,30 @@ class CognitionRuntime:
 
     # ------------------------------------------------------------- internals
 
+    def _managed_result(
+        self,
+        ns: str,
+        trigger: EventRef,
+        work_id: str,
+        control: WorkControl | None,
+        revision: int,
+    ) -> StepResult:
+        """Report a collaboration-managed work item without touching it."""
+
+        blocked = control is not None and control.blocked_after_rejection
+        return StepResult(
+            outcome=OUTCOME_BLOCKED if blocked else OUTCOME_MANAGED,
+            namespace=ns,
+            trigger_ref=trigger,
+            work_id=work_id,
+            state_revision=revision,
+            note=(
+                "work is collaboration-managed; the legacy direct-commit "
+                "path is disabled (blocked_after_rejection="
+                f"{blocked})"
+            ),
+        )
+
     def _commit_wait(
         self,
         *,
@@ -375,6 +491,7 @@ class CognitionRuntime:
         context: ContextEnvelope,
         work: Any,
         reason: str,
+        guard: Any | None = None,
     ) -> CommitReceipt:
         def apply(tx: Any) -> None:
             # Same re-validation as a belief commit: a WAIT may not be recorded
@@ -395,6 +512,7 @@ class CognitionRuntime:
             request_payload={"reason": reason, "work_id": work.work_id},
             apply=apply,
             namespace=ns,
+            guard=guard,
         )
 
     def _failure(
@@ -525,9 +643,12 @@ __all__ = [
     "CognitionRuntime",
     "MAX_MODEL_CALLS",
     "MODEL_FAILURE_CODE",
+    "ManagedWorkConflict",
+    "OUTCOME_BLOCKED",
     "OUTCOME_CHECKED_NO_BELIEF",
     "OUTCOME_COMMITTED",
     "OUTCOME_FAILED",
+    "OUTCOME_MANAGED",
     "OUTCOME_NO_PENDING_WORK",
     "STEP_OUTCOMES",
     "StepResult",
