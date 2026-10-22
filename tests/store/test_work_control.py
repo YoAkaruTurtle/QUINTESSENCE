@@ -13,6 +13,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -110,7 +111,7 @@ class WorkControlTests(CollaborationTestCase):
             decision_ref=decision_ref,
         )
 
-    def txb_receipt(self, candidate, *, append: bool = False):
+    def txb_receipt(self, candidate, *, append: bool = False, payload=None):
         def apply(scope) -> None:
             if append:
                 scope.append_record_version(
@@ -120,11 +121,16 @@ class WorkControlTests(CollaborationTestCase):
                     body={"text": "synthetic committed record"},
                 )
 
+        request_payload = (
+            {"operation": "belief.propose", "reason": "synthetic"}
+            if payload is None
+            else payload
+        )
         return self.store.commit_command(
             context_id=candidate.context_id,
             request_id=candidate.request_id,
             operation="belief.propose",
-            request_payload={"operation": "belief.propose"},
+            request_payload=request_payload,
             apply=apply,
             namespace=NS,
         )
@@ -490,6 +496,12 @@ class WorkControlTests(CollaborationTestCase):
         self.assertEqual("belief.propose", receipt.operation)
         self.assertEqual(candidate.context_id, receipt.context_id)
         self.assertEqual("committed", receipt.outcome)
+        self.assertEqual(
+            candidate.command_digest,
+            self.store.lookup_command_request_digest(
+                namespace=NS, request_id=candidate.request_id
+            ),
+        )
         committed = self.mark_committed(
             candidate, decision_ref="decision:commit:1", commit_ref=GRANT_A
         )
@@ -696,6 +708,112 @@ class WorkControlTests(CollaborationTestCase):
         self.assertEqual(control.control_version, current.control_version)
         self.assertEqual(candidate.artifact_id, current.last_candidate_ref)
         self.assertEqual(1, self.candidate_count())
+
+    def test_commit_primitive_rejects_a_different_command_digest(self) -> None:
+        candidate = self.candidate()
+        receipt = self.txb_receipt(
+            candidate, payload={"operation": "belief.propose"}
+        )
+        self.assertEqual("noop", receipt.outcome)
+        self.assertNotEqual(
+            candidate.command_digest,
+            self.store.lookup_command_request_digest(
+                namespace=NS, request_id=candidate.request_id
+            ),
+        )
+        control_before = self.get_control()
+        commands_before = self.table_count("processed_commands")
+        with self.assertRaises(CandidateTransitionDenied):
+            with self.store.transaction():
+                self.store._mark_candidate_committed_locked(
+                    namespace=NS,
+                    candidate_id=candidate.artifact_id,
+                    decision_ref="decision:commit:digest",
+                )
+        loaded = self.reload(candidate)
+        self.assertEqual("pending", loaded.status)
+        self.assertIsNone(loaded.decided_at)
+        self.assertIsNone(loaded.decision_ref)
+        control_after = self.get_control()
+        self.assertEqual(control_before.generation, control_after.generation)
+        self.assertEqual(
+            control_before.control_version, control_after.control_version
+        )
+        self.assertEqual(
+            commands_before, self.table_count("processed_commands")
+        )
+
+    def test_savepoint_conflict_leaves_no_control_payload_or_link(self) -> None:
+        source = self.new_input()
+        context = self.make_context()
+        interaction = self.make_review_interaction(context_id=context)
+        first = self.store.register_artifact(
+            namespace=NS,
+            kind="candidate",
+            interaction_id=interaction,
+            context_id=context,
+            origin_kind="model_output",
+            body="synthetic candidate body",
+            retention="standard",
+            sources=[self.input_ref(source)],
+            artifact_id=CAND_1,
+            artifact_version=1,
+            created_at=TS,
+            proposal={"operation": "belief.propose", "reason": "synthetic"},
+            proposal_version="v1",
+            work_id=WORK_ID,
+            work_generation=0,
+            request_id=REQ_1,
+            status="pending",
+        )
+        self.assertEqual(0, self.table_count("collab_work_control"))
+        payloads = self.table_count("private_payloads")
+        links = self.table_count("collab_source_links")
+        real = self.store._load_candidate_by_request_locked
+        calls = {"n": 0}
+
+        def miss_once(namespace, request_id):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else real(namespace, request_id)
+
+        with mock.patch.object(
+            self.store,
+            "_load_candidate_by_request_locked",
+            side_effect=miss_once,
+        ):
+            again = self.candidate(
+                request_id=REQ_1,
+                context_id=context,
+                interaction_id=interaction,
+                sources=[self.input_ref(source)],
+            )
+
+        self.assertEqual(first.artifact_id, again.artifact_id)
+        self.assertEqual(1, self.candidate_count())
+        self.assertEqual(0, self.table_count("collab_work_control"))
+        self.assertEqual(payloads, self.table_count("private_payloads"))
+        self.assertEqual(links, self.table_count("collab_source_links"))
+
+        calls["n"] = 0
+        payloads = self.table_count("private_payloads")
+        links = self.table_count("collab_source_links")
+        with mock.patch.object(
+            self.store,
+            "_load_candidate_by_request_locked",
+            side_effect=miss_once,
+        ):
+            with self.assertRaises(CommandConflict):
+                self.candidate(
+                    request_id=REQ_1,
+                    context_id=context,
+                    interaction_id=interaction,
+                    sources=[self.input_ref(source)],
+                    body="a different synthetic candidate body",
+                )
+        self.assertEqual(1, self.candidate_count())
+        self.assertEqual(0, self.table_count("collab_work_control"))
+        self.assertEqual(payloads, self.table_count("private_payloads"))
+        self.assertEqual(links, self.table_count("collab_source_links"))
 
 
 if __name__ == "__main__":

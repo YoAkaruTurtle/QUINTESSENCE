@@ -1871,21 +1871,21 @@ class CollaborationMixin:
 
             control = self._load_work_control_locked(ns, work)
             if control is None:
-                control = self.register_work_control(
-                    namespace=ns,
-                    work_id=work,
-                    generation=0,
-                    blocked_after_rejection=False,
-                    control_version=1,
-                )
-            if generation != control.generation:
+                if generation != 0:
+                    raise InvalidInput(
+                        f"work_generation {generation} is not the current generation 0"
+                    )
+            elif generation != control.generation:
                 raise InvalidInput(
                     f"work_generation {generation} is not the current "
                     f"generation {control.generation}"
                 )
 
-            registered_rerun = control.rerun_authorization_ref
-            if not control.blocked_after_rejection:
+            registered_rerun = (
+                None if control is None else control.rerun_authorization_ref
+            )
+            blocked = False if control is None else control.blocked_after_rejection
+            if not blocked:
                 if rerun_ref is not None:
                     raise InvalidInput(
                         "an unblocked work cannot cite a rerun authorization"
@@ -1916,6 +1916,14 @@ class CollaborationMixin:
             connection = self._require_connection()
             connection.execute("SAVEPOINT candidate_insert")
             try:
+                if control is None:
+                    control = self.register_work_control(
+                        namespace=ns,
+                        work_id=work,
+                        generation=0,
+                        blocked_after_rejection=False,
+                        control_version=1,
+                    )
                 candidate = self.register_artifact(
                     namespace=ns,
                     kind="candidate",
@@ -2195,6 +2203,9 @@ class CollaborationMixin:
         receipt = self.lookup_command_receipt(
             namespace=ns, request_id=candidate.request_id
         )
+        digest = self.lookup_command_request_digest(
+            namespace=ns, request_id=candidate.request_id
+        )
         if (
             receipt is None
             or receipt.namespace != ns
@@ -2202,9 +2213,12 @@ class CollaborationMixin:
             or receipt.context_id != candidate.context_id
             or receipt.operation not in ("belief.propose", "belief.revise")
             or receipt.outcome not in ("committed", "noop")
+            or digest is None
+            or digest != candidate.command_digest
         ):
             raise CandidateTransitionDenied(
-                "no matching cognitive commit receipt"
+                "no matching cognitive commit receipt for this candidate's "
+                "command digest"
             )
         cursor = self._require_connection().execute(
             "UPDATE collab_artifacts SET status = 'committed', "

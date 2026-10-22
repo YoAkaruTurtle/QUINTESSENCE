@@ -535,6 +535,22 @@ class TxBMixin:
             )
         return receipt
 
+    def lookup_command_request_digest(
+        self, *, namespace: str, request_id: str
+    ) -> str | None:
+        """Return the stored request digest for one committed command, or ``None``.
+
+        Same trust boundary as :meth:`lookup_command_receipt`: a single SELECT,
+        no transaction and no write.  The digest is the exact
+        ``(namespace, operation, context_id, canonical payload)`` basis that
+        ``commit_command`` computed when the command committed.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        rid = identifiers.require_request_id(request_id)
+        row = self._load_command_locked(ns, rid)
+        return None if row is None else str(row["request_digest"])
+
     def _watermarks_locked(self, namespace: str) -> dict[str, int]:
         row = self._require_connection().execute(
             "SELECT state_revision, last_event_seq, privacy_epoch "
