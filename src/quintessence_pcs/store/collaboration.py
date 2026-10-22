@@ -1431,6 +1431,82 @@ class CollaborationMixin:
                 ) from exc
         return len(normalized)
 
+    def context_collab_sources(
+        self, *, namespace: str, context_id: str
+    ) -> tuple[dict[str, Any], ...]:
+        """The exact refs a Context rendered, in stable order.
+
+        This is the read side of :meth:`register_context_sources`.  It returns
+        the contract shape for every stored link kind (``event``, ``record``,
+        ``collab_input``, ``collab_artifact``); the Context's profile/self-view
+        records normally stay in ``context_sources`` (R1).  The caller normally
+        holds a read snapshot; this method only reads.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        context = _require_uuid(context_id, "context_id")
+        row = self._require_connection().execute(
+            "SELECT namespace FROM context_snapshots WHERE context_id = ?",
+            (context,),
+        ).fetchone()
+        if row is None:
+            raise SnapshotNotFound(f"no persisted context {context!r}")
+        if row["namespace"] != ns:
+            raise ScopeViolation(
+                f"context {context} belongs to namespace {row['namespace']!r}, not {ns!r}"
+            )
+        rows = self._require_connection().execute(
+            "SELECT source_kind, source_id, source_version "
+            "FROM collab_source_links "
+            "WHERE namespace = ? AND owner_kind = 'context' AND owner_id = ? "
+            "AND owner_version = 0 "
+            "ORDER BY source_kind, source_id, source_version",
+            (ns, context),
+        ).fetchall()
+        refs: list[dict[str, Any]] = []
+        for link in rows:
+            kind = link["source_kind"]
+            if kind == "event":
+                refs.append(
+                    {
+                        "ref_type": "event",
+                        "namespace": ns,
+                        "event_id": link["source_id"],
+                    }
+                )
+            elif kind == "record":
+                refs.append(
+                    {
+                        "ref_type": "record",
+                        "namespace": ns,
+                        "record_id": link["source_id"],
+                        "record_version": int(link["source_version"]),
+                    }
+                )
+            elif kind == COLLAB_INPUT:
+                refs.append(
+                    {
+                        "ref_type": COLLAB_INPUT,
+                        "namespace": ns,
+                        "input_id": link["source_id"],
+                        "content_version": int(link["source_version"]),
+                    }
+                )
+            elif kind == COLLAB_ARTIFACT:
+                refs.append(
+                    {
+                        "ref_type": COLLAB_ARTIFACT,
+                        "namespace": ns,
+                        "artifact_id": link["source_id"],
+                        "artifact_version": int(link["source_version"]),
+                    }
+                )
+            else:  # pragma: no cover - CHECK constraint
+                raise CorruptStore(
+                    f"stored context source link has unknown kind {kind!r}"
+                )
+        return tuple(refs)
+
     # -------------------------------------------------------------- sources
 
     def _validate_sources_locked(

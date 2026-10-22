@@ -125,6 +125,7 @@
   "tests/domain/test_beliefs.py",
   "tests/domain/test_bounded_omissions.py",
   "tests/domain/test_candidate_generation.py",
+  "tests/domain/test_consult_context.py",
   "tests/domain/test_context_step.py",
   "tests/domain/test_correction_flow.py",
   "tests/domain/test_crash_windows.py",

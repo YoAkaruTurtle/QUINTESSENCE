@@ -77,6 +77,11 @@ from ..domains.cognition.beliefs import (
     is_question_event_type,
     parse_belief_body,
 )
+from ..domains.cognition.context_guard import (
+    _require_live_consult_locked,
+    require_current_consult_context as _require_current_consult_context,
+    require_live_consult_context as _require_live_consult_context,
+)
 from ..domains.cognition.views import (
     SELF_VIEW_FRESH,
     SELF_VIEW_KIND,
@@ -99,9 +104,11 @@ from ..domains.refs import EventRef, RecordRef
 from ..domains.scope import SCOPE_FIELDS, SCOPE_ID_MAX_LENGTH
 from ..foundation import identifiers
 from ..foundation.errors import (
+    ContextStale,
     CorruptStore,
     EventNotFound,
     InvalidInput,
+    RecordNotFound,
     Redacted,
     ScopeViolation,
 )
@@ -119,10 +126,23 @@ from ..store.cognition import (
 from ..store.domain import EventHeader
 from ..store.errors import ContextTooLarge, NeedsContext
 from ..store.events import PendingWork
+from ..store.experience import (
+    READABILITY_AVAILABLE,
+    ExperienceAccess,
+    ExperienceUnavailable,
+)
 
 CONTEXT_SCHEMA = "pcs2-008.context.v1"
 CONTEXT_RENDERER = "pcs2-008.renderer.v1"
 DEFAULT_PERMISSION_VIEW_REF = "permission-view:pcs2-008.minimal.v1"
+
+#: C08 consult Context.  It is a collab.v1 Context, not a pcs.v2 review
+#: envelope: no trigger, no work, no proposal contract and no cognition write.
+CONSULT_PURPOSE = "consult"
+#: The C05a ``context_binding`` consult policy reference.  It is the frozen
+#: collab.v1 binding value, stored in the existing ``permission_view_ref``
+#: column; the public ConsultContextEnvelope intentionally does not expose it.
+DEFAULT_CONSULT_POLICY_REF = "collab.v1"
 
 #: Optional episode summaries included before budget trimming.
 MAX_EPISODES = 5
@@ -394,6 +414,54 @@ class ContextEnvelope:
 
 
 @dataclass(frozen=True)
+class ConsultContextEnvelope:
+    """A persisted C08 consultation Context, without a review trigger.
+
+    ``collab_source_refs`` are the exact collaboration refs that were actually
+    rendered and linked; unauthorized/unavailable inputs are reported only in
+    ``omissions`` and never appear here.  The body is a trusted internal read:
+    callers must re-apply the then-current Read/Use/Disclose boundary before
+    showing it outside C09-C11.
+    """
+
+    context_id: str
+    namespace: str
+    run_id: str
+    state_revision: int
+    context_event_seq: int
+    privacy_epoch: int
+    profile_ref: RecordRef
+    read_set: tuple[ReadSetEntry, ...]
+    collab_source_refs: tuple[dict[str, Any], ...]
+    sources: tuple[ContextSource, ...]
+    rendered_input: str
+    content_hash: str
+    omissions: tuple[dict[str, Any], ...]
+    model_input_complete: bool
+    adapter_kind: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class _ConsultRender:
+    """Internal render result; not a public DTO.
+
+    The two-phase build trades the review flow's single-transaction render for
+    an outside-transaction render plus an inside-transaction recheck.  This
+    object carries exactly the credentials that recheck needs: the pinned
+    Profile, the SelfView source (``None`` when the document only carries a
+    stale/unavailable verdict), and the inputs that will be linked.
+    """
+
+    document: str
+    profile_ref: RecordRef
+    self_view_ref: RecordRef | None
+    self_view_verdict: str
+    rendered_inputs: tuple[dict[str, Any], ...]
+    omissions: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class _EpisodeMaterial:
     version: Any
     shape: EpisodeShape
@@ -546,14 +614,398 @@ class ContextService:
             )
         return envelope
 
+    # ----------------------------------------------------------- consult build
+
+    def build_consult_context(
+        self,
+        *,
+        namespace: str,
+        access: ExperienceAccess,
+        input_refs: Sequence[Mapping[str, Any]],
+        adapter_kind: str | None = None,
+    ) -> ConsultContextEnvelope:
+        """Assemble one consult Context without any cognition write.
+
+        C08 is deliberately two-phase:
+
+        * outside any transaction, read the active Profile, the SelfView and
+          the authorized collaboration inputs, then render the complete
+          document;
+        * inside one ``BEGIN IMMEDIATE`` transaction, re-prove the exact
+          Profile/SelfView versions still match what was rendered, capture the
+          three watermarks with the insert and write the collaboration source
+          links.
+
+        A source deleted between the two phases is caught by
+        ``register_context_sources`` and rolls the whole transaction back: no
+        "new watermark + old body" row can survive.  The method never calls a
+        model, never ingests an event, never creates work, never writes a
+        Belief and never refreshes the SelfView.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        if not isinstance(access, ExperienceAccess):
+            raise InvalidInput("access must be an ExperienceAccess")
+        if access.namespace != ns:
+            raise ScopeViolation(
+                f"namespace {ns!r} is outside the access namespace "
+                f"{access.namespace!r}"
+            )
+        if adapter_kind is not None:
+            raise InvalidInput(
+                "C08 assembles consult material without a model; adapter_kind "
+                "must be None"
+            )
+        self._store.require_standalone("build_consult_context")
+        refs = _normalise_consult_input_refs(ns, input_refs)
+
+        run_id = str(uuid.uuid4())
+        render = self._render_consult(
+            namespace=ns,
+            input_refs=refs,
+            access=access,
+            run_id=run_id,
+        )
+        read_set, source_records = self._consult_accounting(render)
+        budget_view = {
+            "limit_bytes": MAX_CONTEXT_BYTES,
+            "used_bytes": len(render.document.encode("utf-8")),
+        }
+
+        with self._store.transaction():
+            self._recheck_consult_render_locked(ns, render)
+            watermarks = self._store.context_watermarks(ns)
+            snapshot = self._store.insert_context_snapshot_locked(
+                ContextInsert(
+                    namespace=ns,
+                    run_id=run_id,
+                    trigger_ref=None,
+                    state_revision=watermarks["state_revision"],
+                    context_event_seq=watermarks["last_event_seq"],
+                    privacy_epoch=watermarks["privacy_epoch"],
+                    profile_ref=render.profile_ref.to_dict(),
+                    read_set=[entry.to_dict() for entry in read_set],
+                    memory_hits=[],
+                    belief_refs=[],
+                    question_refs=[],
+                    focus_refs=[],
+                    unknown_execution_ids=[],
+                    permission_view_ref=DEFAULT_CONSULT_POLICY_REF,
+                    budget_view=budget_view,
+                    pending_source_event_refs=[],
+                    omissions=list(render.omissions),
+                    index_generation=0,
+                    index_coverage={
+                        "status": "not_applicable",
+                        "policy": "collab.v1.consult",
+                    },
+                    content_hash=context_content_hash(render.document),
+                    model_input_complete=False,
+                    adapter_kind=None,
+                    rendered_input=render.document,
+                    sources=source_records,
+                ),
+                context_kind="consult",
+            )
+            self._store.register_context_sources(
+                namespace=ns,
+                context_id=snapshot.context_id,
+                sources=list(render.rendered_inputs),
+            )
+        return self._consult_envelope_from_snapshot(
+            snapshot, render.rendered_inputs
+        )
+
+    def _render_consult(
+        self,
+        *,
+        namespace: str,
+        input_refs: Sequence[Mapping[str, Any]],
+        access: ExperienceAccess,
+        run_id: str,
+    ) -> _ConsultRender:
+        """Render the consult document outside any write transaction."""
+
+        active = self._profiles.get_active_profile(namespace)
+        if active.ref is None:
+            raise NeedsContext(
+                "no active persona profile; a consult Context cannot be "
+                "assembled without a pinned profile"
+            )
+        profile_ref = active.ref
+        profile_version = self._store.get_version(
+            namespace, profile_ref.record_id, profile_ref.record_version
+        )
+        if profile_version.kind != "persona_profile":
+            raise CorruptStore(
+                f"active profile pointer names kind {profile_version.kind!r}"
+            )
+        profile_body = dict(profile_version.body)
+
+        try:
+            state = self._self_view.get_self_view(namespace)
+        except Redacted:
+            state = SelfViewState(namespace, None, SELF_VIEW_UNAVAILABLE)
+        self_view_ref: RecordRef | None = None
+        self_view_body: dict[str, Any] | None = None
+        self_view_verdict = state.freshness
+        if state.freshness == SELF_VIEW_FRESH and state.ref is not None:
+            self_view_version = self._store.get_version(
+                namespace,
+                state.ref.record_id,
+                state.ref.record_version,
+            )
+            if self_view_version.kind != SELF_VIEW_KIND:
+                raise CorruptStore("fresh SelfView pointer names a non-self_view record")
+            self_view_body = parse_self_view_body(self_view_version)
+            self_view_ref = state.ref
+            self_view_verdict = ""
+
+        inputs: list[dict[str, Any]] = []
+        rendered_inputs: list[dict[str, Any]] = []
+        omissions: list[dict[str, Any]] = []
+        for raw in input_refs:
+            view = self._store.read_experience(
+                access, ref=raw, purpose=CONSULT_PURPOSE
+            )
+            if isinstance(view, ExperienceUnavailable):
+                omissions.append(
+                    {"ref": dict(raw), "reason": "source_unavailable"}
+                )
+                continue
+            if view.readability != READABILITY_AVAILABLE or view.body is None:
+                omissions.append(
+                    {"ref": dict(view.ref), "reason": "source_unavailable"}
+                )
+                continue
+            rendered_inputs.append(dict(view.ref))
+            inputs.append(
+                {
+                    "ref": dict(view.ref),
+                    "untrusted": True,
+                    "content": view.body,
+                }
+            )
+
+        document = self._render_consult_document(
+            namespace=namespace,
+            run_id=run_id,
+            profile_ref=profile_ref,
+            profile_body=profile_body,
+            self_view_ref=self_view_ref,
+            self_view_freshness=(
+                SELF_VIEW_FRESH if self_view_body is not None else self_view_verdict
+            ),
+            self_view_body=self_view_body,
+            inputs=tuple(inputs),
+            omissions=_unique_omissions(omissions),
+        )
+        return _ConsultRender(
+            document=canonical_json_text(document),
+            profile_ref=profile_ref,
+            self_view_ref=self_view_ref,
+            self_view_verdict=self_view_verdict,
+            rendered_inputs=tuple(rendered_inputs),
+            omissions=tuple(_unique_omissions(omissions)),
+        )
+
+    def _render_consult_document(
+        self,
+        *,
+        namespace: str,
+        run_id: str,
+        profile_ref: RecordRef,
+        profile_body: Mapping[str, Any],
+        self_view_ref: RecordRef | None,
+        self_view_freshness: str,
+        self_view_body: Mapping[str, Any] | None,
+        inputs: Sequence[Mapping[str, Any]],
+        omissions: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        if self_view_body is not None and self_view_ref is not None:
+            self_view_section: dict[str, Any] = {
+                "ref": self_view_ref.to_dict(),
+                "freshness": self_view_freshness,
+                "belief_refs": [
+                    ref.to_dict() for ref in self_view_body["belief_refs"]
+                ],
+            }
+        else:
+            self_view_section = {
+                "ref": None,
+                "freshness": self_view_freshness,
+                "warning": (
+                    "不可作为当前自我看法使用"
+                    if self_view_freshness != SELF_VIEW_FRESH
+                    else None
+                ),
+            }
+        return {
+            "context_kind": "consult",
+            "run_id": run_id,
+            "namespace": namespace,
+            "profile": {
+                "ref": profile_ref.to_dict(),
+                "profile_id": profile_body.get("profile_id"),
+                "profile_version": profile_body.get("profile_version"),
+                "identity_summary": profile_body.get("identity_summary"),
+                "principles": profile_body.get("principles", []),
+                "style": profile_body.get("style", {}),
+                "attention_preferences": profile_body.get(
+                    "attention_preferences", []
+                ),
+            },
+            "self_view": self_view_section,
+            "inputs": [dict(item) for item in inputs],
+            "omissions": [dict(item) for item in omissions],
+        }
+
+    def _consult_accounting(
+        self, render: _ConsultRender
+    ) -> tuple[tuple[ReadSetEntry, ...], tuple[ContextSourceInput, ...]]:
+        profile_ref = render.profile_ref
+        read_set = [ReadSetEntry(profile_ref, "pinned_asset")]
+        sources = [
+            ContextSourceInput(
+                "record", profile_ref.record_id, profile_ref.record_version
+            )
+        ]
+        if render.self_view_ref is not None:
+            read_set.append(ReadSetEntry(render.self_view_ref, "current"))
+            sources.append(
+                ContextSourceInput(
+                    "record",
+                    render.self_view_ref.record_id,
+                    render.self_view_ref.record_version,
+                )
+            )
+        return tuple(read_set), tuple(sources)
+
+    def _recheck_consult_render_locked(
+        self, namespace: str, render: _ConsultRender
+    ) -> None:
+        """Re-prove the exact rendered material inside the save transaction."""
+
+        try:
+            active = self._profiles.get_active_profile(namespace)
+        except Redacted as exc:
+            raise ContextStale(
+                "the active profile was deleted during consult assembly"
+            ) from exc
+        if active.ref != render.profile_ref:
+            raise ContextStale(
+                "the active profile moved during consult assembly"
+            )
+        try:
+            profile_version = self._store.get_version(
+                namespace,
+                render.profile_ref.record_id,
+                render.profile_ref.record_version,
+            )
+        except Redacted as exc:
+            raise ContextStale(
+                "the active profile was deleted during consult assembly"
+            ) from exc
+        except RecordNotFound as exc:
+            raise CorruptStore(
+                "the consult profile points at a missing record version"
+            ) from exc
+        if profile_version.kind != "persona_profile":
+            raise CorruptStore("active profile pointer names a non-profile")
+
+        try:
+            state = self._self_view.get_self_view(namespace)
+        except Redacted:
+            # The render already recorded the explicit unavailable verdict when
+            # the projection record itself was deleted.  That is not a move to
+            # a different material set; a fresh projection appearing would be.
+            state = SelfViewState(namespace, None, SELF_VIEW_UNAVAILABLE)
+        if render.self_view_ref is not None:
+            if (
+                state.freshness != SELF_VIEW_FRESH
+                or state.ref != render.self_view_ref
+            ):
+                raise ContextStale(
+                    "the self view moved during consult assembly"
+                )
+            try:
+                self_view_version = self._store.get_version(
+                    namespace,
+                    render.self_view_ref.record_id,
+                    render.self_view_ref.record_version,
+                )
+            except Redacted as exc:
+                raise ContextStale(
+                    "the self view was deleted during consult assembly"
+                ) from exc
+            except RecordNotFound as exc:
+                raise CorruptStore(
+                    "the consult self view points at a missing record version"
+                ) from exc
+            if self_view_version.kind != SELF_VIEW_KIND:
+                raise CorruptStore(
+                    "the consult self view pointer names a non-self_view record"
+                )
+        elif state.freshness == SELF_VIEW_FRESH:
+            # The rendered document carries a stale/unavailable verdict; a
+            # newly fresh projection is a different material set.
+            raise ContextStale(
+                "the self view became fresh during consult assembly"
+            )
+
     # ------------------------------------------------------------------ read
 
     def load_context(self, context_id: str) -> ContextEnvelope:
-        """Read one persisted Context back and re-verify its rendered input."""
+        """Read one persisted review Context back and re-verify its input."""
 
-        self._store.require_context_deliverable(context_id)
         snapshot = self._store.load_context_snapshot(context_id)
+        if snapshot.context_kind != "review":
+            raise InvalidInput(
+                f"context {context_id} is a consult Context; it has no pcs.v2 "
+                "review envelope"
+            )
+        self._store.require_context_deliverable(context_id)
         return self._envelope_from_snapshot(snapshot)
+
+    def load_consult_context(self, context_id: str) -> ConsultContextEnvelope:
+        """Read one historical consult Context inside one read snapshot.
+
+        This is a trusted internal archive read: it returns the persisted body
+        after proving the live sources and deletion barriers, but it does not
+        promise the Context is current for a model call.  Use
+        :meth:`require_current_consult_context` for that.
+        """
+
+        cid = identifiers.require_context_id(context_id)
+        with self._store.read_snapshot():
+            snapshot = _require_live_consult_locked(self._store, cid)
+            collab_refs = self._store.context_collab_sources(
+                context_id=cid, namespace=snapshot.namespace
+            )
+            return self._consult_envelope_from_snapshot(snapshot, collab_refs)
+
+    def require_live_consult_context(
+        self, *, context_id: str, namespace: str
+    ) -> ContextSnapshot:
+        """Prove a consult Context and all its sources are still live."""
+
+        return _require_live_consult_context(
+            self._store, context_id=context_id, namespace=namespace
+        )
+
+    def require_current_consult_context(
+        self, *, context_id: str, namespace: str
+    ) -> ContextSnapshot:
+        """Prove a consult Context is still the current model basis.
+
+        The Context, its live sources and the three watermarks are read in one
+        read snapshot.  C09-C11 must call this immediately before a model
+        request; ``load_consult_context`` alone is only historical reading.
+        """
+
+        return _require_current_consult_context(
+            self._store, context_id=context_id, namespace=namespace
+        )
 
     # -------------------------------------------------------------- internals
 
@@ -1446,6 +1898,40 @@ class ContextService:
             created_at=snapshot.created_at,
         )
 
+    def _consult_envelope_from_snapshot(
+        self,
+        snapshot: ContextSnapshot,
+        collab_refs: Sequence[Mapping[str, Any]],
+    ) -> ConsultContextEnvelope:
+        if snapshot.context_kind != "consult":
+            raise InvalidInput(
+                f"context {snapshot.context_id} is not a consult Context"
+            )
+        return ConsultContextEnvelope(
+            context_id=snapshot.context_id,
+            namespace=snapshot.namespace,
+            run_id=snapshot.run_id,
+            state_revision=snapshot.state_revision,
+            context_event_seq=snapshot.context_event_seq,
+            privacy_epoch=snapshot.privacy_epoch,
+            profile_ref=RecordRef.from_value(snapshot.profile_ref, field="profile_ref"),
+            read_set=tuple(
+                ReadSetEntry(
+                    ref=RecordRef.from_value(item["ref"], field="read_set[].ref"),
+                    usage=item["usage"],
+                )
+                for item in snapshot.read_set
+            ),
+            collab_source_refs=tuple(dict(item) for item in collab_refs),
+            sources=snapshot.sources,
+            rendered_input=snapshot.rendered_input,
+            content_hash=snapshot.content_hash,
+            omissions=snapshot.omissions,
+            model_input_complete=snapshot.model_input_complete,
+            adapter_kind=snapshot.adapter_kind,
+            created_at=snapshot.created_at,
+        )
+
 
 def _record_ref(version: Any) -> RecordRef:
     return RecordRef(
@@ -1522,13 +2008,96 @@ def _decode_available(snapshot: ContextSnapshot) -> list[dict[str, Any]]:
     return available
 
 
+def _normalise_consult_input_refs(
+    namespace: str, input_refs: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """Validate the *structure* of exact consult input refs.
+
+    The contract shape is ``{ref_type, namespace, input_id, content_version}``.
+    A missing field (including a missing ``content_version``), a foreign
+    namespace, a wrong ref_type or a duplicate is a caller error and fails
+    before any read.  Whether a structurally valid version actually exists,
+    is readable or is authorized is decided by ``read_experience`` later; that
+    answer is deliberately uniform so it cannot become an existence oracle.
+    """
+
+    if isinstance(input_refs, (str, bytes)) or not isinstance(
+        input_refs, Sequence
+    ):
+        raise InvalidInput(
+            "input_refs must be a sequence of collaboration reference objects"
+        )
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for index, value in enumerate(input_refs):
+        if not isinstance(value, Mapping):
+            raise InvalidInput(
+                f"input_refs[{index}] must be a collaboration reference object"
+            )
+        if set(value) != {
+            "ref_type",
+            "namespace",
+            "input_id",
+            "content_version",
+        }:
+            raise InvalidInput(
+                f"input_refs[{index}] must have exactly ref_type, namespace, "
+                "input_id, content_version"
+            )
+        if value["ref_type"] != "collab_input":
+            raise InvalidInput(
+                f"input_refs[{index}].ref_type must be 'collab_input'"
+            )
+        ref_namespace = identifiers.require_namespace(value["namespace"])
+        if ref_namespace != namespace:
+            raise InvalidInput(
+                f"input_refs[{index}] is in namespace {ref_namespace!r}, "
+                f"not {namespace!r}"
+            )
+        input_id = value["input_id"]
+        if (
+            not isinstance(input_id, str)
+            or identifiers.UUID_PATTERN.fullmatch(input_id) is None
+        ):
+            raise InvalidInput(
+                f"input_refs[{index}].input_id must be a canonical UUID"
+            )
+        version = value["content_version"]
+        if (
+            type(version) is not int
+            or version < 1
+            or version > identifiers.MAX_SAFE_INTEGER
+        ):
+            raise InvalidInput(
+                f"input_refs[{index}].content_version must be a positive integer"
+            )
+        key = (input_id, version)
+        if key in seen:
+            raise InvalidInput(
+                f"input_refs[{index}] is a duplicate collaboration reference"
+            )
+        seen.add(key)
+        refs.append(
+            {
+                "ref_type": "collab_input",
+                "namespace": namespace,
+                "input_id": input_id,
+                "content_version": version,
+            }
+        )
+    return tuple(refs)
+
+
 __all__ = [
+    "CONSULT_PURPOSE",
     "CONTEXT_RENDERER",
     "CONTEXT_SCHEMA",
+    "ConsultContextEnvelope",
     "ContextEnvelope",
     "ContextService",
     "DATA_BOUNDARY_NOTICE",
     "DATA_BOUNDARY_SECTIONS",
+    "DEFAULT_CONSULT_POLICY_REF",
     "DEFAULT_PERMISSION_VIEW_REF",
     "FACTS_TOTAL_MAX_BYTES",
     "FACT_EVENT_MAX_BYTES",

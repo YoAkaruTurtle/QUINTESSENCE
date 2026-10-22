@@ -22,9 +22,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...foundation import identifiers
 from ...foundation.errors import (
     ContextStale,
     CorruptStore,
+    InvalidInput,
     RecordNotFound,
     Redacted,
     ScopeViolation,
@@ -35,6 +37,11 @@ from ...store.errors import NeedsContext
 from ..refs import EventRef, RecordRef
 
 READ_USAGES = ("current", "historical", "pinned_asset")
+
+#: A consult Context pins the Profile, and (when fresh) the SelfView, as
+#: material.  The rendered collaboration inputs live in ``collab_source_links``
+#: and are checked by ``context_barred``; they are never read_set entries (R1).
+_CONSULT_CONTEXT_KIND = "consult"
 
 
 def require_live_context(
@@ -147,4 +154,129 @@ def _require_live_event(
         raise CorruptStore(f"{what} is missing from the event journal")
 
 
-__all__ = ["READ_USAGES", "require_live_context"]
+# --------------------------------------------------------------------------
+# consult Contexts (collab.v1)
+# --------------------------------------------------------------------------
+
+
+def _require_live_consult_locked(
+    store: CognitionStore,
+    context_id: str,
+    *,
+    namespace: str | None = None,
+) -> ContextSnapshot:
+    """The live-guard body for a consult Context; caller owns the snapshot.
+
+    This is deliberately narrower than :func:`require_live_context`: a consult
+    Context has no trigger, no work and no review command basis.  It checks the
+    persisted body, the pinned Profile, every read_set entry and the persistent
+    deletion barriers.  It never checks a trigger event and never re-applies
+    the caller's ``ExperienceAccess`` privacy filter (that filter belongs to
+    ``read_experience`` / assembly, not to this archival read).
+    """
+
+    try:
+        snapshot = store.load_context_snapshot(context_id)
+    except Redacted as exc:
+        raise ContextStale(
+            f"context {context_id} rendered input has been cleared by a deletion"
+        ) from exc
+    except (SnapshotNotFound, NeedsContext):
+        raise
+
+    if snapshot.context_kind != _CONSULT_CONTEXT_KIND:
+        raise InvalidInput(
+            f"context {context_id} is not a consult Context; use the review "
+            "read path"
+        )
+    if snapshot.trigger_ref:
+        raise CorruptStore(f"consult context {context_id} names a trigger")
+    if namespace is not None and snapshot.namespace != namespace:
+        raise ScopeViolation(
+            f"context {context_id} belongs to namespace {snapshot.namespace!r}, "
+            f"not {namespace!r}"
+        )
+
+    ns = snapshot.namespace
+    if not snapshot.profile_ref:
+        raise CorruptStore(f"consult context {context_id} has no pinned profile")
+    profile = RecordRef.from_value(snapshot.profile_ref, field="profile_ref")
+    if profile.namespace != ns:
+        raise ScopeViolation("the consult profile belongs to another namespace")
+    if store.record_is_deleted(ns, profile.record_id):
+        raise ContextStale("the profile this consult context used has been deleted")
+    try:
+        profile_version = store.get_version(
+            ns, profile.record_id, profile.record_version
+        )
+    except Redacted as exc:
+        raise ContextStale(
+            "the profile this consult context used has been deleted"
+        ) from exc
+    except RecordNotFound as exc:
+        raise CorruptStore(
+            "the consult profile points at a missing record version"
+        ) from exc
+    if profile_version.kind != "persona_profile":
+        raise CorruptStore("the consult profile pointer names a non-profile")
+
+    for entry in snapshot.read_set:
+        _check_read_set_entry(store, ns, entry)
+
+    if store.context_barred(namespace=ns, context_id=context_id):
+        raise ContextStale(
+            "a source this consult context used has been deleted"
+        )
+    return snapshot
+
+
+def require_live_consult_context(
+    store: CognitionStore, *, context_id: str, namespace: str
+) -> ContextSnapshot:
+    """Load one consult Context inside a single consistent read snapshot.
+
+    The historical body may be returned even when the watermarks have moved.
+    Deletion of the rendered body, the Profile, a read_set record or any
+    collaboration source is ``CONTEXT_STALE``: the body is never returned.
+    """
+
+    ns = identifiers.require_namespace(namespace)
+    cid = identifiers.require_context_id(context_id)
+    with store.read_snapshot():
+        return _require_live_consult_locked(store, cid, namespace=ns)
+
+
+def require_current_consult_context(
+    store: CognitionStore, *, context_id: str, namespace: str
+) -> ContextSnapshot:
+    """Prove a consult Context is the current one, in one read snapshot.
+
+    The three watermarks are read in the *same* snapshot as the Context row and
+    its live sources.  Any movement means the rendered text is historical and
+    must not be sent to a model as current material.  C09-C11 call this
+    immediately before a model request; :func:`require_live_consult_context`
+    alone only proves that the archived body is still readable.
+    """
+
+    ns = identifiers.require_namespace(namespace)
+    cid = identifiers.require_context_id(context_id)
+    with store.read_snapshot():
+        snapshot = _require_live_consult_locked(store, cid, namespace=ns)
+        current = store.context_watermarks(ns)
+        if (
+            snapshot.state_revision != current["state_revision"]
+            or snapshot.context_event_seq != current["last_event_seq"]
+            or snapshot.privacy_epoch != current["privacy_epoch"]
+        ):
+            raise ContextStale(
+                "the consult Context watermarks moved; it is historical"
+            )
+        return snapshot
+
+
+__all__ = [
+    "READ_USAGES",
+    "require_current_consult_context",
+    "require_live_consult_context",
+    "require_live_context",
+]
