@@ -34,9 +34,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..foundation.errors import InvalidInput
 from ..foundation.jsonutil import strict_json_loads
-from ..domains.cognition.errors import UnsupportedOperation
+from .proposal_generation import parse_proposal
 
 FAKE_MODEL_ADAPTER_KIND = "fake-model"
 FAKE_MODEL_POLICY_VERSION = "pcs2-008.fake-model.v1"
@@ -44,12 +43,6 @@ FAKE_MODEL_REF = "fake-model:pcs2-008.rule.v1"
 
 CAPABILITY_PREFIXES = ("CapabilityObserved", "CapabilityFailed")
 _CAPABILITY_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_MAX_WAIT_REASON = 512
-
-_PROPOSE_KEYS = frozenset({"operation", "body", "scope"})
-_REVISE_KEYS = frozenset({"operation", "target", "body", "scope"})
-_RETRACT_KEYS = frozenset({"operation", "target", "evidence_links", "reason"})
-_WAIT_KEYS = frozenset({"operation", "reason"})
 
 _DEFAULT_REVIEW_CONDITION = (
     "review when independent capability evidence contradicts this claim"
@@ -165,117 +158,6 @@ class FakeModel:
                 "scope": _scope_for(name),
             }
         )
-
-
-def parse_proposal(text: Any) -> dict[str, Any]:
-    """Parse one model output strictly.
-
-    Only three shapes are accepted; every other key is a structural error.  A
-    model that tries to supply ``state_revision`` / ``request_id`` /
-    ``read_set`` / ``context_id`` therefore fails instead of being believed.
-    """
-
-    if not isinstance(text, str):
-        raise InvalidInput("model output must be JSON text")
-    try:
-        value = strict_json_loads(text)
-    except ValueError as exc:
-        raise InvalidInput(f"model output is not strict JSON: {exc}") from exc
-    if not isinstance(value, dict):
-        raise InvalidInput("model output must be one JSON object")
-    operation = value.get("operation")
-    if operation == "wait":
-        if set(value) != _WAIT_KEYS:
-            raise InvalidInput(
-                "a wait object must have exactly operation and reason; "
-                "model-supplied state_revision/request_id/read_set are not accepted"
-            )
-        reason = value["reason"]
-        if (
-            not isinstance(reason, str)
-            or not reason.strip()
-            or len(reason) > _MAX_WAIT_REASON
-        ):
-            raise InvalidInput(
-                f"wait.reason must be a non-empty string of at most {_MAX_WAIT_REASON} "
-                "characters"
-            )
-        return {"operation": "wait", "reason": reason}
-    if operation == "propose_belief":
-        if set(value) != _PROPOSE_KEYS:
-            raise InvalidInput(
-                "propose_belief must have exactly operation, body and scope; "
-                "model-supplied state_revision/request_id/read_set are not accepted"
-            )
-        body = value["body"]
-        scope = value["scope"]
-        if not isinstance(body, Mapping) or not isinstance(scope, Mapping):
-            raise InvalidInput("propose_belief body and scope must be JSON objects")
-        return {
-            "operation": "propose_belief",
-            "body": dict(body),
-            "scope": dict(scope),
-        }
-    if operation == "revise_belief":
-        if set(value) != _REVISE_KEYS:
-            raise InvalidInput(
-                "revise_belief must have exactly operation, target, body and scope; "
-                "model-supplied state_revision/request_id/read_set are not accepted"
-            )
-        target = value["target"]
-        body = value["body"]
-        scope = value["scope"]
-        if (
-            not isinstance(target, Mapping)
-            or not isinstance(body, Mapping)
-            or not isinstance(scope, Mapping)
-        ):
-            raise InvalidInput(
-                "revise_belief target, body and scope must be JSON objects"
-            )
-        return {
-            "operation": "revise_belief",
-            "target": dict(target),
-            "body": dict(body),
-            "scope": dict(scope),
-        }
-    if operation == "retract_belief":
-        if set(value) != _RETRACT_KEYS:
-            raise InvalidInput(
-                "retract_belief must have exactly operation, target, "
-                "evidence_links and reason; model-supplied "
-                "state_revision/request_id/read_set are not accepted"
-            )
-        target = value["target"]
-        evidence_links = value["evidence_links"]
-        reason = value["reason"]
-        if not isinstance(target, Mapping) or not isinstance(reason, str):
-            raise InvalidInput(
-                "retract_belief target must be a JSON object and reason a string"
-            )
-        if (
-            not isinstance(evidence_links, list)
-            or not evidence_links
-            or not all(isinstance(item, Mapping) for item in evidence_links)
-        ):
-            raise InvalidInput(
-                "retract_belief evidence_links must be a non-empty array of objects"
-            )
-        if not reason.strip() or len(reason) > 2048:
-            raise InvalidInput(
-                "retract_belief reason must be a non-empty string of at most 2048 "
-                "characters"
-            )
-        return {
-            "operation": "retract_belief",
-            "target": dict(target),
-            "evidence_links": [dict(item) for item in evidence_links],
-            "reason": reason,
-        }
-    raise UnsupportedOperation(
-        f"model output operation {operation!r} is not allowed; "
-        "PCS2-008 accepts propose_belief, revise_belief, retract_belief and wait"
-    )
 
 
 def _capability(event_type: Any) -> tuple[str, str] | None:

@@ -23,7 +23,6 @@ from .fake_model import (
     FAKE_MODEL_POLICY_VERSION,
     FAKE_MODEL_REF,
     FakeModel,
-    parse_proposal,
 )
 from .http_model import (
     DIRECT_HTTP_ADAPTER_KIND,
@@ -46,6 +45,7 @@ from .model_port import (
     ModelTransportError,
     RunBoundModelPort,
 )
+from .proposal_generation import parse_proposal
 from .step import (
     MODEL_FAILURE_CODE,
     OUTCOME_CHECKED_NO_BELIEF,
