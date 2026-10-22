@@ -55,6 +55,7 @@ SCHEMA_FILES = {
     "grant.json",
     "experience_view.json",
     "experience_unavailable.json",
+    "model_output.json",
 }
 
 RULES = {f"R{number}" for number in range(1, 16)}
@@ -199,6 +200,15 @@ REQUIRED_FIELDS = {
         "ref",
         "readability",
     },
+    "model_output.json": {
+        "action",
+    },
+}
+
+#: DTOs whose optional properties are part of the closed field set.  Every
+#: other object schema declares only required properties.
+OPTIONAL_FIELDS = {
+    "model_output.json": {"reply", "references", "brief_reason"},
 }
 
 NAMESPACE_PATTERN = "^[a-z][a-z0-9._-]{0,127}$"
@@ -1084,7 +1094,10 @@ class CollaborationContractTests(unittest.TestCase):
                 doc = load(CONTRACT_DIR / name)
                 self.assertIs(False, doc["additionalProperties"])
                 self.assertEqual(required, set(doc["required"]))
-                self.assertEqual(required, set(doc["properties"]))
+                self.assertEqual(
+                    required | OPTIONAL_FIELDS.get(name, set()),
+                    set(doc["properties"]),
+                )
 
         interaction = load(CONTRACT_DIR / "interaction.json")["properties"]
         self.assertEqual({"consult", "review"}, set(interaction["mode"]["enum"]))

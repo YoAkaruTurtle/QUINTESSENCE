@@ -8,12 +8,28 @@ scheduler.
 
 from __future__ import annotations
 
+from .collab_protocol import (
+    COLLAB_ACTIONS,
+    COLLAB_MODEL_POLICY_VERSION,
+    COLLAB_PROTOCOL_VERSION,
+    COLLAB_RENDERER_VERSION,
+    MAX_BRIEF_REASON_CHARS,
+    MAX_REFERENCES,
+    MAX_REPLY_CHARS,
+    CollabOutput,
+    ConsultSendPolicy,
+    build_collab_request_body,
+    parse_collab_output,
+    render_collab_messages,
+    repair_feedback,
+)
 from .context import (
     CONTEXT_RENDERER,
     CONTEXT_SCHEMA,
     DEFAULT_PERMISSION_VIEW_REF,
     MAX_EPISODES,
     PROPOSAL_CONTRACT,
+    ConsultContextEnvelope,
     ContextEnvelope,
     ContextService,
     ReadSetEntry,
@@ -58,11 +74,21 @@ from .step import (
 )
 
 __all__ = [
+    "COLLAB_ACTIONS",
+    "COLLAB_MODEL_POLICY_VERSION",
+    "COLLAB_PROTOCOL_VERSION",
+    "COLLAB_RENDERER_VERSION",
     "CONTEXT_RENDERER",
     "CONTEXT_SCHEMA",
     "CognitionRuntime",
+    "CollabOutput",
+    "ConsultContextEnvelope",
+    "ConsultSendPolicy",
     "ContextEnvelope",
     "ContextService",
+    "MAX_BRIEF_REASON_CHARS",
+    "MAX_REFERENCES",
+    "MAX_REPLY_CHARS",
     "DEFAULT_PERMISSION_VIEW_REF",
     "DIRECT_HTTP_ADAPTER_KIND",
     "DIRECT_HTTP_POLICY_VERSION",
@@ -92,6 +118,10 @@ __all__ = [
     "RunBoundModelPort",
     "STEP_OUTCOMES",
     "StepResult",
+    "build_collab_request_body",
     "build_request_body",
+    "parse_collab_output",
     "parse_proposal",
+    "render_collab_messages",
+    "repair_feedback",
 ]

@@ -29,6 +29,23 @@ Safety properties that are structural rather than comments:
   must be a non-empty string, and any ``tool_calls`` / ``function_call`` key is
   a violation.  ``reasoning_content`` is stored as received but never parsed as
   a proposal.
+
+C09 adds one explicit protocol choice.  The default stays ``"pcs2-008"`` and
+keeps the legacy one-user-message request byte-for-byte; ``"collab.v1"`` sends
+the versioned system declaration plus the exact consult Context and requires a
+trusted-host :class:`ConsultSendPolicy`.  Both protocols share the same
+``_send``, reservation, settlement, retry and error mapping -- there is no
+second HTTP client.
+
+The collab send gate runs before *every* HTTP try and re-proves the current
+consult Context, the exact Profile/SelfView record versions, and the Read/Use/
+Disclose basis for every rendered collaboration input.  A refusal is zero HTTP
+bytes, zero reservations and zero attempt rows.
+
+Local deletion boundary: the deletion barrier and ``cleanup_deletions`` protect
+only the PCS locally persisted copies (Context text and attempt request/response
+payloads).  Bytes already sent to an external provider cannot be withdrawn by
+this adapter, and nothing here claims otherwise.
 """
 
 from __future__ import annotations
@@ -44,10 +61,15 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..domains.cognition.context_guard import require_live_context
-from ..foundation.errors import StorageError
-from ..foundation.jsonutil import strict_json_loads
+from ..domains.cognition.context_guard import (
+    require_current_consult_context,
+    require_live_context,
+)
+from ..domains.refs import RecordRef
+from ..foundation.errors import RecordNotFound, StorageError
+from ..foundation.jsonutil import canonical_json_text, strict_json_loads
 from ..store.cognition import CognitionStore
+from ..store.experience import READABILITY_AVAILABLE, ExperienceView
 from ..store.model import (
     MODEL_ATTEMPT_FAILED,
     MODEL_ATTEMPT_MALFORMED,
@@ -61,6 +83,13 @@ from ..store.model import (
     ModelLedgerError,
     ModelNotAuthorized,
 )
+from .collab_protocol import (
+    COLLAB_MODEL_POLICY_VERSION,
+    ConsultSendPolicy,
+    build_collab_request_body,
+    render_collab_messages,
+)
+from .context import ConsultContextEnvelope
 from .manifest import ModelManifest, build_request_body
 from .model_port import (
     ModelAdapterError,
@@ -73,6 +102,12 @@ from .model_port import (
 
 DIRECT_HTTP_ADAPTER_KIND = "direct-http"
 DIRECT_HTTP_POLICY_VERSION = "pcs2-009.direct-http.v1"
+DIRECT_HTTP_LEGACY_PROTOCOL = "pcs2-008"
+DIRECT_HTTP_COLLAB_PROTOCOL = "collab.v1"
+DIRECT_HTTP_PROTOCOLS = (
+    DIRECT_HTTP_LEGACY_PROTOCOL,
+    DIRECT_HTTP_COLLAB_PROTOCOL,
+)
 
 #: One retry for 429/5xx/timeout only.  4xx (except 429) is not retried.
 MAX_RETRIES = 1
@@ -162,22 +197,41 @@ class DirectHttpModel:
         store: CognitionStore,
         manifest: ModelManifest,
         *,
+        protocol: str = DIRECT_HTTP_LEGACY_PROTOCOL,
+        consult_policy: ConsultSendPolicy | None = None,
         opener: Any | None = None,
         send_scope: Callable[[ModelAttempt, str], Any] | None = None,
     ) -> None:
         if not isinstance(manifest, ModelManifest):
             raise ModelConfigurationError("manifest must be a ModelManifest")
+        if protocol not in DIRECT_HTTP_PROTOCOLS:
+            raise ModelConfigurationError(
+                "protocol must be one of: " + ", ".join(DIRECT_HTTP_PROTOCOLS)
+            )
+        if protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+            if not isinstance(consult_policy, ConsultSendPolicy):
+                raise ModelConfigurationError(
+                    "the collab.v1 protocol requires a ConsultSendPolicy"
+                )
         self._store = store
         self._manifest = manifest
+        self.protocol = protocol
+        self.policy_version = (
+            COLLAB_MODEL_POLICY_VERSION
+            if protocol == DIRECT_HTTP_COLLAB_PROTOCOL
+            else DIRECT_HTTP_POLICY_VERSION
+        )
+        self._consult_policy = consult_policy
         self.model_ref = (
             f"{DIRECT_HTTP_ADAPTER_KIND}:{manifest.provider}:{manifest.model}"
         )
         self._opener = opener if opener is not None else _build_opener()
         self._send_scope = send_scope
         self._active: tuple[str, Any] | None = None
-        #: Last successful assistant text, used only to make a format-repair
-        #: request explicit (assistant turn + feedback).  Keyed by run_id.
-        self._last_content: dict[str, str] = {}
+        #: Last successful assistant text plus its exact Context, used only to
+        #: make a format-repair request explicit (assistant turn + feedback).
+        #: Keyed by run_id; a repair must reuse the same run *and* Context.
+        self._last_content: dict[str, tuple[str, str]] = {}
 
     # ------------------------------------------------------------- preflight
 
@@ -218,7 +272,20 @@ class DirectHttpModel:
             raise ModelConfigurationError("a model run is already bound")
         if getattr(context, "namespace", None) != namespace:
             raise ModelConfigurationError("the bound Context belongs to another namespace")
-        if getattr(context, "adapter_kind", None) != self.adapter_kind:
+        if self.protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+            if not isinstance(context, ConsultContextEnvelope):
+                raise ModelConfigurationError(
+                    "the collab.v1 protocol requires a ConsultContextEnvelope"
+                )
+            if (
+                context.adapter_kind != self.adapter_kind
+                or context.model_input_complete is not True
+            ):
+                raise ModelConfigurationError(
+                    "the bound consult Context was not built for the "
+                    "direct-http adapter"
+                )
+        elif getattr(context, "adapter_kind", None) != self.adapter_kind:
             raise ModelConfigurationError(
                 "the bound Context was not built for the direct-http adapter"
             )
@@ -257,18 +324,31 @@ class DirectHttpModel:
         )
         previous_output = None
         if feedback is not None:
-            previous_output = self._last_content.get(context.run_id)
-            if previous_output is None:
+            recorded = self._last_content.get(context.run_id)
+            if recorded is None or recorded[0] != context.context_id:
                 raise ModelConfigurationError(
-                    "a format repair requires the previous assistant output"
+                    "a format repair requires the previous assistant output "
+                    "from the same run and Context"
                 )
-        body_text = build_request_body(
-            self._manifest,
-            rendered_input=rendered_input,
-            max_tokens=max_tokens,
-            previous_output=previous_output,
-            feedback=feedback,
-        )
+            previous_output = recorded[1]
+
+        if self.protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+            messages = render_collab_messages(
+                context,
+                previous_output=previous_output,
+                feedback=feedback,
+            )
+            body_text = build_collab_request_body(
+                self._manifest, messages=messages, max_tokens=max_tokens
+            )
+        else:
+            body_text = build_request_body(
+                self._manifest,
+                rendered_input=rendered_input,
+                max_tokens=max_tokens,
+                previous_output=previous_output,
+                feedback=feedback,
+            )
 
         last_failure: _HttpFailure | None = None
         for retry_index in range(MAX_RETRIES + 1):
@@ -375,7 +455,10 @@ class DirectHttpModel:
             # Keep only a small repair memory; a Context/run is short-lived.
             if len(self._last_content) >= 8:
                 self._last_content.clear()
-            self._last_content[context.run_id] = validated.content
+            self._last_content[context.run_id] = (
+                context.context_id,
+                validated.content,
+            )
             return validated.content
 
         # Defensive: the loop either returns or raises.
@@ -387,18 +470,24 @@ class DirectHttpModel:
     def _require_send_basis(self, namespace: str, context: Any) -> None:
         """Refuse the next HTTP try unless the persisted basis is still live.
 
-        The bound Context is re-read from the store (never trusted from memory)
-        and its exact source accounting is re-verified by
-        :func:`require_live_context`.  The Context's captured ``privacy_epoch``
-        must also equal the current namespace epoch: any deletion after the
-        Context was built invalidates the send, even when it removed an
-        unrelated target, because the Tx B commit would reject that basis
-        anyway.
+        The dispatch is explicit: the legacy protocol keeps the PCS2-010-P0
+        review check unchanged, while collab.v1 re-proves the current consult
+        Context, its exact Profile/SelfView record versions and every rendered
+        collaboration source.  Both run before the reservation on the first
+        request, on every transport retry and on every format-repair request.
 
         The check and the socket write are not atomic.  This method is the
         promise boundary: deleted-before-check never leaves the process;
         deleted-after-check may.
         """
+
+        if self.protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+            self._require_collab_send_basis(namespace, context)
+            return
+        self._require_legacy_send_basis(namespace, context)
+
+    def _require_legacy_send_basis(self, namespace: str, context: Any) -> None:
+        """The unchanged PCS2-010-P0 review send gate."""
 
         try:
             snapshot = require_live_context(
@@ -425,6 +514,288 @@ class DirectHttpModel:
                 "pre-send check refused: privacy_epoch moved from "
                 f"{context.privacy_epoch} to {current['privacy_epoch']}"
             )
+
+    def _require_collab_send_basis(self, namespace: str, context: Any) -> None:
+        """C09: current consult Context + exact Read/Use/Disclose basis.
+
+        Every body source of the final ``rendered_input`` is covered:
+
+        * the pinned Profile and (when fresh) SelfView are read through the
+          *exact frozen record versions* in ``read_set``/``sources`` -- never
+          through ``get_active_profile`` or ``get_self_view`` current pointers;
+        * every rendered collaboration input is re-read through
+          ``read_experience(..., purpose="consult")`` with the trusted-host
+          policy, and must still be ``available``.
+
+        A profile/self-view reference missing from ``read_set``/``sources``, a
+        duplicate, or any extra record/event source is refused as an unknown
+        source.  A failure here happens before ``reserve_model_attempt``, so it
+        is zero HTTP, zero attempts and zero charged budget.
+        """
+
+        policy = self._consult_policy
+        if not isinstance(policy, ConsultSendPolicy):
+            raise ModelConfigurationError(
+                "the collab.v1 protocol requires a ConsultSendPolicy"
+            )
+        if not isinstance(context, ConsultContextEnvelope):
+            raise ModelConfigurationError(
+                "the collab.v1 protocol requires a ConsultContextEnvelope"
+            )
+        if context.namespace != namespace or context.adapter_kind != self.adapter_kind:
+            raise ModelAdapterError(
+                "pre-send check refused: the bound consult Context does not "
+                "belong to this adapter/namespace"
+            )
+        if policy.namespace != namespace:
+            raise ModelNotAuthorizedError(
+                "pre-send check refused: the send policy namespace does not "
+                "match the consult Context"
+            )
+        if "consult" not in policy.purposes:
+            raise ModelNotAuthorizedError(
+                "pre-send check refused: the send policy does not allow the "
+                "consult purpose"
+            )
+        if policy.disclose is not True:
+            raise ModelNotAuthorizedError(
+                "pre-send check refused: disclosure is disabled for this send "
+                "policy"
+            )
+
+        try:
+            snapshot = require_current_consult_context(
+                self._store, context_id=context.context_id, namespace=namespace
+            )
+        except StorageError as exc:
+            raise ModelAdapterError(
+                "pre-send check refused: the consult Context is no longer "
+                f"current ({type(exc).__name__})"
+            ) from exc
+        profile_value = (
+            context.profile_ref.to_dict()
+            if isinstance(context.profile_ref, RecordRef)
+            else context.profile_ref
+        )
+        if (
+            snapshot.context_kind != "consult"
+            or snapshot.namespace != context.namespace
+            or snapshot.run_id != context.run_id
+            or snapshot.content_hash != context.content_hash
+            or snapshot.state_revision != context.state_revision
+            or snapshot.context_event_seq != context.context_event_seq
+            or snapshot.privacy_epoch != context.privacy_epoch
+            or snapshot.profile_ref != profile_value
+            or snapshot.adapter_kind != self.adapter_kind
+            or snapshot.model_input_complete is not True
+            or canonical_json_text(
+                [dict(item) for item in snapshot.read_set]
+            )
+            != canonical_json_text(
+                [entry.to_dict() for entry in context.read_set]
+            )
+            or _sources_identity(snapshot.sources)
+            != _sources_identity(context.sources)
+        ):
+            raise ModelAdapterError(
+                "pre-send check refused: the stored consult Context does not "
+                "match the Context this call was bound to"
+            )
+        self._require_collab_source_accounting(namespace, context, policy)
+
+    def _require_collab_source_accounting(
+        self,
+        namespace: str,
+        context: ConsultContextEnvelope,
+        policy: ConsultSendPolicy,
+    ) -> None:
+        """Prove every rendered record/input against the exact Context refs."""
+
+        profile_ref = context.profile_ref
+        if not isinstance(profile_ref, RecordRef) or profile_ref.namespace != namespace:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context profile is not an exact "
+                "record in this namespace"
+            )
+
+        read_set = tuple(context.read_set)
+        profile_entries = [entry for entry in read_set if entry.ref == profile_ref]
+        if len(profile_entries) != 1:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context profile must appear "
+                "exactly once in read_set"
+            )
+        if profile_entries[0].usage != "pinned_asset":
+            raise ModelAdapterError(
+                "pre-send check refused: the Context profile read_set usage "
+                "is not pinned_asset"
+            )
+        current_entries = [entry for entry in read_set if entry.usage == "current"]
+        if len(current_entries) > 1:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context has more than one "
+                "current read_set record"
+            )
+        self_view_ref = current_entries[0].ref if current_entries else None
+        if self_view_ref is not None and self_view_ref.namespace != namespace:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context self view is not an "
+                "exact record in this namespace"
+            )
+
+        expected_entries = {
+            (profile_ref.record_id, profile_ref.record_version, "pinned_asset")
+        }
+        if self_view_ref is not None:
+            expected_entries.add(
+                (self_view_ref.record_id, self_view_ref.record_version, "current")
+            )
+        if len(read_set) != len(expected_entries):
+            raise ModelAdapterError(
+                "pre-send check refused: read_set contains a record this "
+                "Context did not render"
+            )
+        for entry in read_set:
+            key = (entry.ref.record_id, entry.ref.record_version, entry.usage)
+            if key not in expected_entries:
+                raise ModelAdapterError(
+                    "pre-send check refused: read_set contains an unknown record"
+                )
+
+        if any(source.ref_kind != "record" for source in context.sources):
+            raise ModelAdapterError(
+                "pre-send check refused: the Context has a body source that "
+                "is not an exact record"
+            )
+        profile_key = (profile_ref.record_id, profile_ref.record_version)
+        source_keys = [
+            (source.ref_id, int(source.ref_version)) for source in context.sources
+        ]
+        if source_keys.count(profile_key) != 1:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context profile source must "
+                "appear exactly once"
+            )
+        expected_keys = {profile_key}
+        if self_view_ref is not None:
+            self_view_key = (self_view_ref.record_id, self_view_ref.record_version)
+            expected_keys.add(self_view_key)
+            if source_keys.count(self_view_key) != 1:
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context self-view source "
+                    "must appear exactly once"
+                )
+        if len(source_keys) != len(expected_keys):
+            raise ModelAdapterError(
+                "pre-send check refused: the Context sources contain a "
+                "duplicate or unknown record"
+            )
+        for key in source_keys:
+            if key not in expected_keys:
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context sources contain an "
+                    "unknown record"
+                )
+
+        profile_version = self._exact_record_version(
+            namespace,
+            profile_ref.record_id,
+            profile_ref.record_version,
+            what="profile",
+        )
+        if profile_version.kind != "persona_profile":
+            raise ModelAdapterError(
+                "pre-send check refused: the Context profile source is not a "
+                "persona_profile"
+            )
+        self_view_version = None
+        if self_view_ref is not None:
+            self_view_version = self._exact_record_version(
+                namespace,
+                self_view_ref.record_id,
+                self_view_ref.record_version,
+                what="self view",
+            )
+            if self_view_version.kind != "self_view":
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context current read_set "
+                    "record is not a self_view"
+                )
+        if profile_version.privacy_class not in policy.privacy_classes:
+            raise ModelNotAuthorizedError(
+                "pre-send check refused: the profile privacy class is not "
+                "allowed by the send policy"
+            )
+        if (
+            self_view_version is not None
+            and self_view_version.privacy_class not in policy.privacy_classes
+        ):
+            raise ModelNotAuthorizedError(
+                "pre-send check refused: the self-view privacy class is not "
+                "allowed by the send policy"
+            )
+
+        stored_refs = self._store.context_collab_sources(
+            namespace=namespace, context_id=context.context_id
+        )
+        if _reference_multiset(stored_refs) != _reference_multiset(
+            context.collab_source_refs
+        ):
+            raise ModelAdapterError(
+                "pre-send check refused: the bound Context collaboration "
+                "sources do not match the stored Context"
+            )
+        access = policy.to_experience_access()
+        for ref in context.collab_source_refs:
+            try:
+                view = self._store.read_experience(
+                    access, ref=ref, purpose="consult"
+                )
+            except StorageError as exc:
+                raise ModelAdapterError(
+                    "pre-send check refused: a collaboration source could not "
+                    f"be re-read ({type(exc).__name__})"
+                ) from exc
+            if (
+                not isinstance(view, ExperienceView)
+                or view.readability != READABILITY_AVAILABLE
+                or view.body is None
+            ):
+                raise ModelNotAuthorizedError(
+                    "pre-send check refused: a collaboration source is not "
+                    "readable under the current send policy"
+                )
+
+    def _exact_record_version(
+        self,
+        namespace: str,
+        record_id: str,
+        record_version: int,
+        *,
+        what: str,
+    ):
+        """Read exactly one frozen version; never follow a current pointer."""
+
+        try:
+            version = self._store.get_version(
+                namespace, record_id, record_version
+            )
+        except RecordNotFound as exc:
+            raise ModelAdapterError(
+                f"pre-send check refused: the {what} record version is missing"
+            ) from exc
+        # A deletion barrier keeps the row; the version is readable through the
+        # archival API but must never be sent.  Check it after the exact read so
+        # one call covers both "missing" and "deleted".
+        if self._store.record_is_deleted(namespace, record_id):
+            raise ModelAdapterError(
+                f"pre-send check refused: the {what} record has been deleted"
+            )
+        if version.namespace != namespace:
+            raise ModelAdapterError(
+                f"pre-send check refused: the {what} record is in another namespace"
+            )
+        return version
 
     def _authorization(self, namespace: str) -> ModelAuthorization:
         authorization = self._store.active_model_authorization(
@@ -568,6 +939,23 @@ class DirectHttpModel:
             ) from exc
 
 
+def _reference_multiset(refs: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Order-insensitive canonical identity for a Context's collaboration refs."""
+
+    return tuple(sorted(canonical_json_text(dict(ref)) for ref in refs))
+
+
+def _sources_identity(sources: Sequence[Any]) -> tuple[tuple[str, str, int], ...]:
+    """Exact (kind, id, version) identities for stored/bound Context sources."""
+
+    return tuple(
+        sorted(
+            (source.ref_kind, str(source.ref_id), int(source.ref_version))
+            for source in sources
+        )
+    )
+
+
 def _supplier_metadata(document: Mapping[str, Any]) -> dict[str, Any]:
     """Whatever verifiable supplier metadata an HTTP 200 envelope carries."""
 
@@ -700,7 +1088,10 @@ def _build_opener() -> urllib.request.OpenerDirector:
 
 __all__ = [
     "DIRECT_HTTP_ADAPTER_KIND",
+    "DIRECT_HTTP_COLLAB_PROTOCOL",
+    "DIRECT_HTTP_LEGACY_PROTOCOL",
     "DIRECT_HTTP_POLICY_VERSION",
+    "DIRECT_HTTP_PROTOCOLS",
     "MAX_RESPONSE_BYTES",
     "MAX_RETRIES",
     "MIN_SOCKET_TIMEOUT",

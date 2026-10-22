@@ -28,6 +28,7 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
 | `grant.json` | 五分支授权：access / egress / commit(policy) / commit(work_generation) / rerun |
 | `experience_view.json` | 唯一完整读取视图（readability 只存在于读取侧） |
 | `experience_unavailable.json` | 无存在性泄漏的不可用读取结果（只有调用方 ref 与固定状态） |
+| `model_output.json` | consult 模型的一次性版本化输出（`action` 必填，不含任何权威字段） |
 | `examples/consult-chain.json` | consult 静态链（含删除与空读集变体） |
 | `examples/review-chain.json` | review 静态链（拒绝、重跑、人工批准） |
 | `examples/invalid.json` | Schema 层与语义层无效样例 |
@@ -54,6 +55,21 @@ C05b（存储）与 C08（consult Context）必须按同一套语义实现，不
   `experience_unavailable.json`）。存储对象没有可读状态字段。
 
 ## 对象语义
+
+### model_output（C09）
+
+`model_output` 是 consult 模型的一次性输出，不是存储对象，也不是证据。唯一必填
+字段是 `action`（`none` / `query` / `propose` / `wait`）；`reply`、`references`、
+`brief_reason` 可选，但出现时必须满足长度与类型约束。`references` 只复用
+`source_ref` 的四个分支，每一项必须与 Context 实际提供的某个引用**规范 JSON
+精确相等**（namespace、id、version 全部一致）。
+
+- 不包含 `request_id`、`read_set`、`state_revision`、`authorization`、
+  `context_id`；出现即拒绝。
+- consult 模式拒绝 `propose`，即使形状完整也不转为 review。
+- `query` / `propose` 在 v1 中只是 action 枚举；查询参数与提交载荷留给
+  C10/C11，本 Schema 不私加字段。
+- 解析器不执行查询、不提交、不写存储；模型文本永远不是权威 ID 或授权。
 
 ### interaction
 

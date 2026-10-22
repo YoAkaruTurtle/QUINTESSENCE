@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model_output.json",
+  "title": "CollabModelOutput",
+  "description": "One versioned consult model output. It carries no authoritative request_id, read_set, state_revision or authorization. references only reuse the four source_ref branches; query parameters and propose payloads belong to later cards.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action"
+  ],
+  "properties": {
+    "reply": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "none",
+        "query",
+        "propose",
+        "wait"
+      ]
+    },
+    "references": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/source_ref"
+      }
+    },
+    "brief_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    }
+  }
+}

@@ -393,11 +393,23 @@ class ConsultContextTests(CognitionTestCase):
         with self.assertRaises(InvalidInput):
             self.build_consult([wrong_type])
 
+        # C09 lifts the C08 "no model, so adapter_kind must be None" stage
+        # limit.  A known adapter is allowed and makes model_input_complete
+        # true; an unknown adapter is still an argument error.
         with self.assertRaises(InvalidInput):
-            self.build_consult([ref], adapter_kind="fake-model")
+            self.build_consult([ref], adapter_kind="unknown-adapter")
 
         self.assertEqual(snapshots, self.count_rows("context_snapshots"))
         self.assertEqual(links, self.count_rows("collab_source_links"))
+
+        for adapter_kind in ("fake-model", "direct-http"):
+            with self.subTest(adapter_kind=adapter_kind):
+                envelope = self.build_consult([ref], adapter_kind=adapter_kind)
+                self.assertEqual(adapter_kind, envelope.adapter_kind)
+                self.assertTrue(envelope.model_input_complete)
+                stored = self.snapshot(envelope)
+                self.assertEqual(adapter_kind, stored.adapter_kind)
+                self.assertTrue(stored.model_input_complete)
 
         # A structurally valid ref whose exact version does not exist is not an
         # argument error: it goes through the same inaccessible-input path and
@@ -408,8 +420,28 @@ class ConsultContextTests(CognitionTestCase):
         self.assertEqual([], self.document(envelope)["inputs"])
         self.assertEqual(missing_version, envelope.omissions[0]["ref"])
         self.assertEqual("source_unavailable", envelope.omissions[0]["reason"])
-        self.assertEqual(snapshots + 1, self.count_rows("context_snapshots"))
-        self.assertEqual(links, self.count_rows("collab_source_links"))
+        self.assertEqual(snapshots + 3, self.count_rows("context_snapshots"))
+        self.assertEqual(links + 2, self.count_rows("collab_source_links"))
+
+    def test_consult_adapter_kind_records_model_input_completeness(self) -> None:
+        _row, ref = self.register_consult_input()
+
+        default = self.build_consult([ref])
+        self.assertIsNone(default.adapter_kind)
+        self.assertFalse(default.model_input_complete)
+
+        for adapter_kind in ("fake-model", "direct-http"):
+            with self.subTest(adapter_kind=adapter_kind):
+                envelope = self.build_consult([ref], adapter_kind=adapter_kind)
+                self.assertEqual(adapter_kind, envelope.adapter_kind)
+                self.assertTrue(envelope.model_input_complete)
+                self.assertEqual(
+                    adapter_kind,
+                    self.snapshot(envelope).adapter_kind,
+                )
+
+        with self.assertRaises(InvalidInput):
+            self.build_consult([ref], adapter_kind="unknown-adapter")
 
     def test_consult_context_watermarks_and_hash(self) -> None:
         _row, ref = self.register_consult_input()

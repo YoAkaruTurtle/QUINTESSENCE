@@ -638,9 +638,14 @@ class ContextService:
 
         A source deleted between the two phases is caught by
         ``register_context_sources`` and rolls the whole transaction back: no
-        "new watermark + old body" row can survive.  The method never calls a
-        model, never ingests an event, never creates work, never writes a
-        Belief and never refreshes the SelfView.
+        "new watermark + old body" row can survive.
+
+        ``adapter_kind`` only records the adapter that will eventually send
+        this Context; C09 no longer requires it to be ``None``.  Supplying a
+        known adapter makes ``model_input_complete`` true, exactly like the
+        review Context path.  The method itself still never calls a model,
+        never ingests an event, never creates work, never writes a Belief and
+        never refreshes the SelfView.
         """
 
         ns = identifiers.require_namespace(namespace)
@@ -651,10 +656,9 @@ class ContextService:
                 f"namespace {ns!r} is outside the access namespace "
                 f"{access.namespace!r}"
             )
-        if adapter_kind is not None:
+        if adapter_kind is not None and adapter_kind not in CONTEXT_ADAPTERS:
             raise InvalidInput(
-                "C08 assembles consult material without a model; adapter_kind "
-                "must be None"
+                "adapter_kind must be one of: " + ", ".join(CONTEXT_ADAPTERS)
             )
         self._store.require_standalone("build_consult_context")
         refs = _normalise_consult_input_refs(ns, input_refs)
@@ -700,8 +704,8 @@ class ContextService:
                         "policy": "collab.v1.consult",
                     },
                     content_hash=context_content_hash(render.document),
-                    model_input_complete=False,
-                    adapter_kind=None,
+                    model_input_complete=adapter_kind in CONTEXT_ADAPTERS,
+                    adapter_kind=adapter_kind,
                     rendered_input=render.document,
                     sources=source_records,
                 ),
