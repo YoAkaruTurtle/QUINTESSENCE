@@ -484,12 +484,18 @@ class ContextService:
         trigger_ref: Mapping[str, Any],
         adapter_kind: str | None = None,
         proposal_note_addendum: str | None = None,
+        refresh_self_view: bool = True,
     ) -> ContextEnvelope:
         """Assemble and persist one Context; never advances ``state_revision``.
 
         ``adapter_kind`` must name an adapter that persists the exact request
         bytes it sends (``fake-model`` or ``direct-http``); that is also the
         only way ``model_input_complete`` becomes true.
+
+        ``refresh_self_view=False`` skips the pre-capture projection refresh.
+        A stale or unavailable SelfView is then rendered with its own freshness
+        verdict instead of being rebuilt.  Nothing else changes: the trigger,
+        the pinned profile, the watermarks and the archival write are the same.
         """
 
         ns = identifiers.require_namespace(namespace)
@@ -502,6 +508,8 @@ class ContextService:
             raise InvalidInput(
                 "adapter_kind must be one of: " + ", ".join(CONTEXT_ADAPTERS)
             )
+        if not isinstance(refresh_self_view, bool):
+            raise InvalidInput("refresh_self_view must be a boolean")
         self._store.require_standalone("build_context")
         trigger_header = self._require_trusted_trigger(ns, trigger)
 
@@ -517,8 +525,11 @@ class ContextService:
 
         # B5: refresh the projection before capture, or report it stale.  A
         # refresh is a normal domain commit and therefore happens before the
-        # watermarks are captured, never inside the Context transaction.
-        self._refresh_self_view(ns)
+        # watermarks are captured, never inside the Context transaction.  A
+        # caller that must not write cognition state skips it and accepts the
+        # explicit freshness verdict instead.
+        if refresh_self_view:
+            self._refresh_self_view(ns)
 
         run_id = str(uuid.uuid4())
         with self._store.transaction():

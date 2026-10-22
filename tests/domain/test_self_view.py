@@ -30,9 +30,11 @@ from quintessence_pcs.domains.cognition.views import (  # noqa: E402
 )
 from quintessence_pcs.foundation.errors import (  # noqa: E402
     CorruptStore,
+    InvalidInput,
     Redacted,
     StandaloneTransactionRequired,
 )
+from quintessence_pcs.store.errors import NeedsContext  # noqa: E402
 
 
 class SelfViewTests(CognitionTestCase):
@@ -335,6 +337,75 @@ class SelfViewTests(CognitionTestCase):
             (entry.ref.record_id, entry.usage) for entry in context.read_set
         }
         self.assertIn((document["self_view"]["ref"]["record_id"], "current"), usage)
+
+    def test_context_can_skip_the_stale_projection_refresh(self) -> None:
+        self._supported()
+        old = self.self_view.build_self_view(namespace=NS)
+        self._supported(instance="second-test")
+        state = self.self_view.get_self_view(NS)
+        self.assertEqual(SELF_VIEW_STALE, state.freshness)
+        revision = self.revision()
+        event_id = self.ingest().event_id
+
+        context = self.contexts.build_context(
+            namespace=NS,
+            trigger_ref=self.event_ref(event_id),
+            adapter_kind="fake-model",
+            refresh_self_view=False,
+        )
+
+        document = json.loads(context.rendered_input)
+        self.assertEqual(SELF_VIEW_STALE, document["self_view"]["freshness"])
+        self.assertEqual(
+            old.record_version,
+            document["self_view"]["ref"]["record_version"],
+        )
+        # The projection was not rebuilt and cognition state did not move.
+        self.assertEqual(revision, self.revision())
+        unchanged = self.self_view.get_self_view(NS)
+        self.assertEqual(SELF_VIEW_STALE, unchanged.freshness)
+        self.assertEqual(old.record_version, unchanged.ref.record_version)
+        # The Context itself is still archived and readable.
+        loaded = self.contexts.load_context(context.context_id)
+        self.assertEqual(context.context_id, loaded.context_id)
+        self.assertEqual(context.rendered_input, loaded.rendered_input)
+        # A stale projection is not presented as a current read-set entry.
+        self.assertNotIn(
+            old.record_id,
+            {
+                entry.ref.record_id
+                for entry in context.read_set
+                if entry.usage == "current"
+            },
+        )
+
+    def test_refresh_self_view_must_be_a_boolean(self) -> None:
+        event_id = self.ingest().event_id
+        with self.assertRaises(InvalidInput):
+            self.contexts.build_context(
+                namespace=NS,
+                trigger_ref=self.event_ref(event_id),
+                refresh_self_view="no",
+            )
+
+    def test_skipping_the_refresh_keeps_the_failure_paths(self) -> None:
+        deleted = self.ingest()
+        self.delete_event(deleted.event_id)
+        with self.assertRaises(Redacted):
+            self.contexts.build_context(
+                namespace=NS,
+                trigger_ref=self.event_ref(deleted.event_id),
+                adapter_kind="fake-model",
+                refresh_self_view=False,
+            )
+        event = self.ingest(namespace=NS_B, event_type="CapabilityObserved:file-read")
+        with self.assertRaises(NeedsContext):
+            self.contexts.build_context(
+                namespace=NS_B,
+                trigger_ref=self.event_ref(event.event_id, namespace=NS_B),
+                adapter_kind="fake-model",
+                refresh_self_view=False,
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
