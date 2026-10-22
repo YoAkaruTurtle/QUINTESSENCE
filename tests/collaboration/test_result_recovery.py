@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import unittest
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -1108,6 +1109,143 @@ class ResultRecoveryTests(CognitionTestCase):
         label_d = self.interaction_of(interaction_d)
         self.assertEqual("committed", label_d.result)
         self.assertEqual(receipt_d.request_id, label_d.receipt_request_id)
+
+    # ------------------------------------ two-phase concurrency consistency
+
+    def test_get_result_derives_inside_one_read_snapshot(self) -> None:
+        candidate, _context, _event = self.make_candidate()
+        recorded: list[bool] = []
+        real = self.service._derive_result
+
+        def recording(*, namespace, interaction_id):
+            recorded.append(self.store.connection.in_transaction)
+            return real(namespace=namespace, interaction_id=interaction_id)
+
+        with mock.patch.object(
+            self.service, "_derive_result", side_effect=recording
+        ):
+            result = self.service.get_result(
+                namespace=NS, interaction_id=candidate.interaction_id
+            )
+
+        self.assertEqual(2, len(recorded))
+        self.assertEqual([True, True], recorded)
+        self.assertTrue(result.repaired)
+        self.assertEqual("candidate_pending", result.result)
+
+    def test_get_result_serialized_phase_absorbs_a_concurrent_commit(self) -> None:
+        candidate, _context, _event = self.make_candidate()
+        approval = self.approval_for(candidate)
+        second = self.open_second_store()
+        service2 = CollaborationService(second)
+        plans = []
+        real_derive = self.service._derive_result
+
+        def capture(*, namespace, interaction_id):
+            plan = real_derive(
+                namespace=namespace, interaction_id=interaction_id
+            )
+            plans.append(plan)
+            return plan
+
+        real_snapshot = self.store.read_snapshot
+
+        @contextmanager
+        def snap():
+            with real_snapshot():
+                yield
+            # The phase-1 snapshot is closed; a real C06a commit lands before
+            # phase 2 starts.  No sleep and no timing assumption.
+            service2.commit_candidate(
+                namespace=NS,
+                candidate_id=candidate.artifact_id,
+                authority=CommitAuthority(approval=approval),
+                decision_ref="decision:race",
+            )
+
+        with mock.patch.object(
+            self.service, "_derive_result", side_effect=capture
+        ):
+            with mock.patch.object(self.store, "read_snapshot", snap):
+                result = self.service.get_result(
+                    namespace=NS, interaction_id=candidate.interaction_id
+                )
+
+        self.assertEqual(2, len(plans))
+        self.assertTrue(plans[0].need_label)
+        self.assertEqual("candidate_pending", plans[0].result)
+        self.assertIsNone(plans[0].receipt)
+        self.assertTrue(plans[1].need_label)
+        self.assertEqual("committed", plans[1].result)
+        self.assertIsNotNone(plans[1].receipt)
+
+        self.assertEqual("committed", result.result)
+        self.assertIsNotNone(result.receipt)
+        self.assertEqual("committed", result.candidate_status)
+        self.assertTrue(result.repaired)
+        self.assertIsNotNone(result.completed_at)
+        label = self.interaction_of(candidate.interaction_id)
+        self.assertEqual("committed", label.result)
+        self.assertEqual(result.receipt.request_id, label.receipt_request_id)
+        self.assertEqual(result.completed_at, label.completed_at)
+
+    def test_get_result_serialized_phase_uses_the_actual_written_row(self) -> None:
+        candidate, _context, _event = self.make_candidate()
+        approval = self.approval_for(candidate)
+        second = self.open_second_store()
+        service2 = CollaborationService(second)
+        plans = []
+        written: dict = {}
+        real_derive = self.service._derive_result
+
+        def capture(*, namespace, interaction_id):
+            plan = real_derive(
+                namespace=namespace, interaction_id=interaction_id
+            )
+            plans.append(plan)
+            return plan
+
+        real_snapshot = self.store.read_snapshot
+
+        @contextmanager
+        def snap():
+            with real_snapshot():
+                yield
+            # Commit and resolve, including the interaction label, before
+            # phase 2 re-derives.
+            written["resolution"] = service2.resolve_candidate(
+                namespace=NS,
+                candidate_id=candidate.artifact_id,
+                decision=DECISION_APPROVE,
+                decision_ref="decision:race",
+                authority=CommitAuthority(approval=approval),
+            )
+            written["label"] = second.interaction(
+                namespace=NS, interaction_id=candidate.interaction_id
+            )
+
+        with mock.patch.object(
+            self.service, "_derive_result", side_effect=capture
+        ):
+            with mock.patch.object(self.store, "read_snapshot", snap):
+                result = self.service.get_result(
+                    namespace=NS, interaction_id=candidate.interaction_id
+                )
+
+        self.assertEqual(2, len(plans))
+        self.assertTrue(plans[0].need_label)
+        self.assertIsNone(plans[0].completed_at)
+        self.assertFalse(plans[1].need_label)
+        self.assertEqual("committed", plans[1].result)
+
+        self.assertEqual("committed", result.result)
+        self.assertFalse(result.repaired)
+        self.assertEqual(written["resolution"].receipt, result.receipt)
+        self.assertIsNotNone(result.completed_at)
+        self.assertEqual(written["label"].completed_at, result.completed_at)
+        self.assertEqual(written["label"].result, "committed")
+        label = self.interaction_of(candidate.interaction_id)
+        self.assertEqual(written["label"], label)
 
 
 if __name__ == "__main__":  # pragma: no cover

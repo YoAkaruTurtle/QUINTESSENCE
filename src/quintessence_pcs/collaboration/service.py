@@ -121,6 +121,19 @@ class Resolution:
 
 
 @dataclass(frozen=True)
+class _ResultPlan:
+    """A read-only derivation of one interaction result (no side effects)."""
+
+    interaction: InteractionRow
+    candidate: CandidateState | None
+    receipt: CommitReceipt | None
+    result: str
+    need_label: bool
+    receipt_request_id: str | None
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
 class InteractionResult:
     """The recovered lifecycle conclusion for one interaction.
 
@@ -498,18 +511,130 @@ class CollaborationService:
         never fabricates one, never marks a pending candidate committed, and
         never writes a Belief, command, candidate or model-attempt row.
 
-        Recovery is idempotent: the second call returns the same result with
-        ``repaired=False`` and performs no UPDATE.  Historical commits keep
-        their receipts even after a grant is revoked or expired; current body
-        reads remain a separate ``read_experience`` decision.  This is a
-        trusted internal API and returns no body text: C07 must re-check current
-        access and the deletion barrier before showing a receipt externally.
+        Recovery is two-phase so normal concurrency is not mistaken for
+        corruption:
+
+        * phase 1 derives the result inside one consistent read snapshot;
+        * if a label repair is needed, phase 2 re-derives and writes inside one
+          ``BEGIN IMMEDIATE`` transaction, so a concurrent commit can neither
+          produce a false W3 nor be overwritten by a stale label.  A genuine
+          contradiction in that serialized view is still ``CORRUPT_STORE``.
+
+        Historical commits keep their receipts even after a grant is revoked or
+        expired; current body reads remain a separate ``read_experience``
+        decision.  This is a trusted internal API and returns no body text:
+        C07 must re-check current access and the deletion barrier before showing
+        a receipt externally.
 
         ``result`` is the interaction lifecycle conclusion; ``candidate_status``
         is the raw storage fact.  They can differ (for example ``stale`` versus
         ``pending``) and the former never rewrites the latter.
         """
 
+        ns = identifiers.require_namespace(namespace)
+
+        # Phase 1: one consistent, read-only view.
+        with self._store.read_snapshot():
+            plan = self._derive_result(
+                namespace=ns, interaction_id=interaction_id
+            )
+        if not plan.need_label:
+            return self._plan_result(plan, repaired=False)
+
+        # Phase 2: serialize the re-derivation and the label write with any
+        # concurrent commit.  complete_interaction joins this transaction.
+        with self._store.transaction():
+            plan = self._derive_result(
+                namespace=ns, interaction_id=interaction_id
+            )
+            if not plan.need_label:
+                return self._plan_result(plan, repaired=False)
+            updated = self._store.complete_interaction(
+                namespace=ns,
+                interaction_id=interaction_id,
+                result=plan.result,
+                receipt_request_id=plan.receipt_request_id,
+                completed_at=plan.completed_at,
+            )
+            repaired = (
+                (
+                    updated.result,
+                    updated.receipt_request_id,
+                    updated.completed_at,
+                )
+                != (
+                    plan.interaction.result,
+                    plan.interaction.receipt_request_id,
+                    plan.interaction.completed_at,
+                )
+            )
+            return self._plan_result_from_row(
+                plan, updated, repaired=repaired
+            )
+
+    def _plan_result(
+        self, plan: _ResultPlan, *, repaired: bool
+    ) -> InteractionResult:
+        """Project an unwritten plan; uses the row's current completion time."""
+
+        return InteractionResult(
+            interaction_id=plan.interaction.interaction_id,
+            namespace=plan.interaction.namespace,
+            mode=plan.interaction.mode,
+            result=plan.result,
+            receipt=plan.receipt,
+            candidate_id=(
+                None
+                if plan.candidate is None
+                else plan.candidate.artifact_id
+            ),
+            candidate_status=(
+                None
+                if plan.candidate is None
+                else plan.candidate.status
+            ),
+            repaired=repaired,
+            completed_at=plan.interaction.completed_at,
+        )
+
+    def _plan_result_from_row(
+        self,
+        plan: _ResultPlan,
+        row: InteractionRow,
+        *,
+        repaired: bool,
+    ) -> InteractionResult:
+        """Project a plan together with the row actually written in phase 2."""
+
+        return InteractionResult(
+            interaction_id=row.interaction_id,
+            namespace=row.namespace,
+            mode=row.mode,
+            result=row.result,
+            receipt=plan.receipt,
+            candidate_id=(
+                None
+                if plan.candidate is None
+                else plan.candidate.artifact_id
+            ),
+            candidate_status=(
+                None
+                if plan.candidate is None
+                else plan.candidate.status
+            ),
+            repaired=repaired,
+            completed_at=row.completed_at,
+        )
+
+    def _derive_result(
+        self, *, namespace: str, interaction_id: str
+    ) -> _ResultPlan:
+        """Read-only derivation; must run inside read_snapshot() or transaction()."""
+
+        if not self._store.connection.in_transaction:
+            raise RuntimeError(
+                "_derive_result must run inside a read snapshot or transaction"
+            )
         ns = identifiers.require_namespace(namespace)
         interaction = self._store.interaction(
             namespace=ns, interaction_id=interaction_id
@@ -621,7 +746,7 @@ class CollaborationService:
             else:
                 result = candidate.status
 
-        # ---- label repair (independent transaction, after any commit)
+        # ---- read-only plan; the caller owns the transaction and the write
         if (
             result in NON_TERMINAL_INTERACTION_RESULTS
             and interaction.completed_at is not None
@@ -645,34 +770,15 @@ class CollaborationService:
                 and interaction.completed_at is None
             )
         )
-        if need_label:
-            updated = self._store.complete_interaction(
-                namespace=ns,
-                interaction_id=interaction_id,
-                result=result,
-                receipt_request_id=(
-                    None if receipt is None else receipt.request_id
-                ),
-                completed_at=completed,
-            )
-            completed = updated.completed_at
-            repaired = True
-        else:
-            repaired = False
-
-        return InteractionResult(
-            interaction_id=interaction.interaction_id,
-            namespace=ns,
-            mode=interaction.mode,
-            result=result,
+        return _ResultPlan(
+            interaction=interaction,
+            candidate=candidate,
             receipt=receipt,
-            candidate_id=(
-                None if candidate is None else candidate.artifact_id
+            result=result,
+            need_label=need_label,
+            receipt_request_id=(
+                None if receipt is None else receipt.request_id
             ),
-            candidate_status=(
-                None if candidate is None else candidate.status
-            ),
-            repaired=repaired,
             completed_at=completed,
         )
 
