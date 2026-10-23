@@ -42,6 +42,7 @@
   "contracts/v2/scope.json",
   "docs/collaboration/FACADE.md",
   "docs/design/C12a-INTERACTION.md",
+  "docs/design/C12b-TECH-SPIKE.md",
   "docs/development/MIGRATION-BOUNDARY.md",
   "docs/development/STATUS.md",
   "pyproject.toml",
