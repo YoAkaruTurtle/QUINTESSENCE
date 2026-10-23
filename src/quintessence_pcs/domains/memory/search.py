@@ -13,6 +13,10 @@ The retrieval policy is deliberately narrow and honest:
   cached.  Consequence: a word that only appears inside an event body cannot be
   found by this search (documented blind spot, see the design document);
 * scope filtering follows J.2's minimal rule exactly (``scope_matches``);
+* an optional, caller-supplied ``privacy_classes`` set narrows the candidate
+  set to Episodes whose record ``privacy_class`` is inside it.  ``None`` (the
+  default) leaves the original behaviour untouched, including the exact
+  omission tuple.  The filter never reads an event body;
 * deletion owns the result set: a deleted Episode never appears, an Episode
   whose every source event is deleted never appears, and a hit contains no
   deleted body text (it contains no event body text at all).
@@ -72,6 +76,7 @@ _OMISSION_REASONS = (
     "scope_mismatch",
     "status_not_active",
     "unsupported_schema_version",
+    "not_authorized",
 )
 
 
@@ -136,6 +141,7 @@ def search_episodes(
     state_revision: int | None = None,
     limit: int = DEFAULT_LIMIT,
     purpose: str = "reasoning",
+    privacy_classes: frozenset[str] | None = None,
 ) -> SearchResult:
     """Retrieve current Episodes visible to ``scope`` and matching ``query``."""
 
@@ -145,6 +151,7 @@ def search_episodes(
     limit = _require_limit(limit)
     purpose = _require_purpose(purpose)
     expected_revision = _require_state_revision(state_revision)
+    privacy = _require_privacy_classes(privacy_classes)
 
     with store.read_snapshot():
         current_revision = store.current_state_revision(ns)
@@ -158,6 +165,11 @@ def search_episodes(
         omissions: Counter[str] = Counter()
 
         for version in store.current_versions_of_kind(ns, EPISODE_KIND):
+            if privacy is not None and version.privacy_class not in privacy:
+                # C10 disclosure filter: the Episode exists but this caller may
+                # not see it.  The reason stays an aggregate, content-free count.
+                omissions["not_authorized"] += 1
+                continue
             if version.schema_version != EPISODE_SCHEMA_VERSION:
                 omissions["unsupported_schema_version"] += 1
                 continue
@@ -322,6 +334,18 @@ def _require_limit(value: Any) -> int:
 def _require_purpose(value: Any) -> str:
     if value not in PURPOSES:
         raise InvalidInput(f"purpose must be one of {', '.join(PURPOSES)}")
+    return value
+
+
+def _require_privacy_classes(value: Any) -> frozenset[str] | None:
+    """Validate the optional C10 privacy filter; ``None`` means no filter."""
+
+    if value is None:
+        return None
+    if not isinstance(value, frozenset):
+        raise InvalidInput("privacy_classes must be a frozenset or null")
+    for item in value:
+        identifiers.require_privacy_class(item)
     return value
 
 

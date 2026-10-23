@@ -6,6 +6,7 @@ Layout follows the cognition guide's recommendation ``domains/cognition/``:
   independence, transitions and the two Tx B entry points;
 * ``views`` — the minimal SelfView projection and its freshness verdict;
 * ``context_guard`` — re-validation of a stored Context inside Tx B;
+* ``query`` — C10 deterministic, read-only Belief/Episode queries;
 * ``errors`` — the domain error classes for codes already in the contract.
 
 Question/Focus, cross-episode consolidation, automatic review and reopen are
@@ -28,6 +29,20 @@ from .beliefs import (
 )
 from .context_guard import READ_USAGES, require_live_context
 from .errors import EvidenceMissing, InvalidTransition, UnsupportedOperation
+from .query import (
+    ALL_PRIVACY,
+    BeliefCurrentQuery,
+    BeliefExactQuery,
+    BeliefItem,
+    CognitionQueryService,
+    EpisodeItem,
+    EpisodeQuery,
+    QueryAccess,
+    QueryOmission,
+    QueryResult,
+    QUERY_POLICY_VERSION,
+    QUERY_PURPOSES,
+)
 from .views import (
     SELF_VIEW_FRESH,
     SELF_VIEW_KIND,
@@ -40,13 +55,25 @@ from .views import (
 )
 
 __all__ = [
+    "ALL_PRIVACY",
     "BELIEF_KIND",
     "BELIEF_SCHEMA_VERSION",
+    "BeliefCurrentQuery",
+    "BeliefExactQuery",
+    "BeliefItem",
     "BeliefService",
     "BeliefSubmission",
     "CLAIM_TYPES",
+    "CognitionQueryService",
+    "EpisodeItem",
+    "EpisodeQuery",
     "EvidenceMissing",
     "InvalidTransition",
+    "QUERY_POLICY_VERSION",
+    "QUERY_PURPOSES",
+    "QueryAccess",
+    "QueryOmission",
+    "QueryResult",
     "READ_USAGES",
     "RELATIONS",
     "SELF_VIEW_FRESH",
