@@ -29,8 +29,14 @@ Three properties drive the implementation:
 Model-visible text is limited to :meth:`QueryResult.to_body`.  That projection
 drops every sensitive omission reason (``not_authorized``,
 ``source_ref_not_authorized``, ``source_ref_redacted``, ``redacted``,
-``unavailable``) and contains no event body, evidence text, ``access_ref`` or
-request ID.  Missing, deleted, unauthorized and non-Belief exact refs all
+``unavailable``), contains no event body, evidence text, ``access_ref`` or
+request ID, and never contains the global ``state_revision``.  The revision is
+internal snapshot metadata: exposing it would let a naturally advancing store
+signal the existence or number of hidden records through an otherwise clean
+body.  :meth:`QueryResult.to_artifact_body` is the separate internal form
+(model-visible fields plus ``state_revision``) for C11's artifact persistence
+and audit; it must never be sent to a model or copied into a model-visible
+Context.  Missing, deleted, unauthorized and non-Belief exact refs all
 produce the same ``unavailable`` result, so the result cannot distinguish
 "does not exist" from "exists but is not visible".
 
@@ -235,9 +241,18 @@ class QueryOmission:
 class QueryResult:
     """One deterministic query answer.
 
-    ``material_status`` reflects the access policy only; ``omissions`` is the
-    internal exact accounting.  Use :meth:`to_body` for anything a model may
-    see: it filters the sensitive omission reasons.
+    ``material_status`` reflects the access policy only, ``omissions`` is the
+    internal exact accounting and ``state_revision`` is internal snapshot
+    metadata; none of them is serialized without an explicit projection.
+
+    There are exactly two serializations:
+
+    * :meth:`to_body` -- model-visible canonical JSON.  It never contains the
+      global ``state_revision``.
+    * :meth:`to_artifact_body` -- trusted internal artifact body (the same
+      fields plus ``state_revision``) for C11 ``register_artifact``
+      persistence and audit.  It must never be placed in a Prompt, a Context
+      ``rendered_input``, an ExperienceView body or any model-visible field.
     """
 
     query_kind: str
@@ -250,10 +265,10 @@ class QueryResult:
     query_policy_version: str
     source_refs: tuple[RecordRef | EventRef, ...]
 
-    def to_body(self) -> str:
-        """Canonical JSON of the model-visible projection only."""
+    def _projection(self, *, include_revision: bool) -> dict[str, Any]:
+        """The one field set both serializations share."""
 
-        body = {
+        body: dict[str, Any] = {
             "query_kind": self.query_kind,
             "status": self.status,
             "material_status": self.material_status,
@@ -264,11 +279,31 @@ class QueryResult:
                 if omission.reason in PUBLIC_OMISSION_REASONS
             ],
             "truncated": self.truncated,
-            "state_revision": self.state_revision,
             "query_policy_version": self.query_policy_version,
             "source_refs": [ref.to_dict() for ref in self.source_refs],
         }
-        return canonical_json_text(body)
+        if include_revision:
+            body["state_revision"] = self.state_revision
+        return body
+
+    def to_body(self) -> str:
+        """Model-visible canonical projection; never contains state_revision.
+
+        C11 may put this string into a prompt or a query projection; it must
+        not add internal fields (the revision or the internal omissions).
+        """
+
+        return canonical_json_text(self._projection(include_revision=False))
+
+    def to_artifact_body(self) -> str:
+        """Trusted internal artifact body: model fields plus state_revision.
+
+        Only C11's ``register_artifact`` persistence and audit may use this
+        string.  It must never be sent to a model or copied into a
+        model-visible Context or Experience field.
+        """
+
+        return canonical_json_text(self._projection(include_revision=True))
 
 
 # --------------------------------------------------------------------------

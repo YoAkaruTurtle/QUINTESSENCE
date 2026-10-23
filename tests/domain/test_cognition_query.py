@@ -69,9 +69,6 @@ VISIBLE_BELIEF_ID = str(uuid.uuid5(_FIXED, "c10-visible"))
 HIDDEN_BELIEF_IDS = tuple(
     str(uuid.uuid5(_FIXED, f"c10-hidden-{index}")) for index in range(MAX_HIDDEN)
 )
-FILLER_BELIEF_IDS = tuple(
-    str(uuid.uuid5(_FIXED, f"c10-filler-{index}")) for index in range(MAX_HIDDEN)
-)
 
 
 # --------------------------------------------------------------------------
@@ -822,6 +819,9 @@ class DisclosureBoundaryTests(QueryTestCase):
         directory.mkdir()
         store = CognitionStore.open(directory / "scenario.sqlite")
         self.addCleanup(store.close)
+        # No filler writes: the only difference between the three stores is the
+        # number of restricted Beliefs, so their state revisions differ
+        # naturally (1, 2 and 4).
         for index in range(hidden):
             _append_belief(
                 store,
@@ -830,15 +830,6 @@ class DisclosureBoundaryTests(QueryTestCase):
                 claim_type="capability",
                 status="supported",
                 privacy_class="restricted",
-            )
-        for index in range(MAX_HIDDEN - hidden):
-            _append_belief(
-                store,
-                record_id=FILLER_BELIEF_IDS[index],
-                claim=f"visible-filler-{index}",
-                claim_type="general_hypothesis",
-                status="proposed",
-                privacy_class="private",
             )
         _append_belief(
             store,
@@ -858,32 +849,68 @@ class DisclosureBoundaryTests(QueryTestCase):
         )
         return store, result
 
-    def test_restricted_0_1_n_records_do_not_change_the_body(self) -> None:
+    def test_restricted_0_1_n_records_do_not_change_the_model_body(self) -> None:
         bodies: list[str] = []
+        artifact_bodies: list[str] = []
         revisions: list[int] = []
         internal: list[dict[str, int]] = []
+        parsed_bodies: list[dict[str, Any]] = []
         for hidden in (0, 1, MAX_HIDDEN):
             _store, result = self._scenario(hidden)
             self.assertEqual("ok", result.status)
             self.assertEqual(1, len(result.items))
             self.assertEqual("capability:visible", result.items[0].claim)
             self.assertEqual("partial", result.material_status)
-            self.assertEqual(1 + MAX_HIDDEN, result.state_revision)
-            bodies.append(result.to_body())
+            self.assertEqual(1 + hidden, result.state_revision)
+            body = result.to_body()
+            artifact = result.to_artifact_body()
+            bodies.append(body)
+            artifact_bodies.append(artifact)
             revisions.append(result.state_revision)
             internal.append(self.internal_omissions(result))
-            self.assert_no_content(
-                result.to_body(), "not_authorized", "restricted-hidden"
+            parsed = json.loads(body)
+            parsed_bodies.append(parsed)
+            self.assertNotIn("state_revision", parsed)
+            self.assertEqual(
+                result.state_revision, json.loads(artifact)["state_revision"]
             )
+            self.assertEqual(set(json.loads(artifact)), set(parsed) | {"state_revision"})
+            self.assert_no_content(body, "not_authorized", "restricted-hidden")
             for index in range(MAX_HIDDEN):
-                self.assertNotIn(HIDDEN_BELIEF_IDS[index], result.to_body())
+                self.assertNotIn(HIDDEN_BELIEF_IDS[index], body)
 
+        # The revisions are naturally different: no filler write aligned them.
+        self.assertEqual([1, 2, 4], revisions)
+        self.assertEqual(3, len(set(revisions)))
+        # The model-visible body is byte-identical; the internal artifact body
+        # differs only because it keeps the (different) revision.
         self.assertEqual(1, len(set(bodies)))
-        self.assertEqual(1, len(set(revisions)))
+        self.assertEqual(3, len(set(artifact_bodies)))
+        self.assertNotIn("state_revision", bodies[0])
         self.assertEqual(
-            [0, 1, MAX_HIDDEN], [counts.get("not_authorized", 0) for counts in internal]
+            [0, 1, MAX_HIDDEN],
+            [counts.get("not_authorized", 0) for counts in internal],
         )
-        self.assertEqual([], json.loads(bodies[0])["omissions"])
+        self.assertEqual([], parsed_bodies[0]["omissions"])
+        # Same visible items, public omissions, material status and refs.
+        for parsed in parsed_bodies:
+            self.assertEqual([], parsed["omissions"])
+            self.assertEqual("partial", parsed["material_status"])
+            self.assertEqual(1, len(parsed["items"]))
+            self.assertEqual(1, len(parsed["source_refs"]))
+        self.assertEqual(
+            1,
+            len({json.dumps(parsed["items"], sort_keys=True) for parsed in parsed_bodies}),
+        )
+        self.assertEqual(
+            1,
+            len(
+                {
+                    json.dumps(parsed["source_refs"], sort_keys=True)
+                    for parsed in parsed_bodies
+                }
+            ),
+        )
 
     def test_restricted_source_event_ref_never_reaches_the_projection(self) -> None:
         receipt, episode = self.build_episode(privacy_class="restricted")
@@ -1199,7 +1226,6 @@ class QueryReadOnlyAndProjectionTests(QueryTestCase):
                 "items",
                 "omissions",
                 "truncated",
-                "state_revision",
                 "query_policy_version",
                 "source_refs",
             },
@@ -1213,6 +1239,38 @@ class QueryReadOnlyAndProjectionTests(QueryTestCase):
             [item.ref.to_dict() for item in result.items],
             [item["ref"] for item in body["items"]],
         )
+
+    def test_model_body_excludes_revision_and_artifact_body_keeps_it(self) -> None:
+        version = self.propose_supported()
+        result = self.current(
+            query=BeliefCurrentQuery(scope={"scene": "test.scene"}, limit=20)
+        )
+        self.assertEqual([self.ref_for(version)], [item.ref for item in result.items])
+
+        body_text = result.to_body()
+        artifact_text = result.to_artifact_body()
+        body = json.loads(body_text)
+        artifact = json.loads(artifact_text)
+
+        # The model-visible projection never carries the global revision.
+        self.assertNotIn("state_revision", body)
+        self.assertNotIn("state_revision", body_text)
+        # The internal artifact projection carries it for C11 persistence.
+        self.assertEqual(result.state_revision, artifact["state_revision"])
+        self.assertEqual(set(artifact), set(body) | {"state_revision"})
+        for key in (
+            "query_kind",
+            "status",
+            "material_status",
+            "items",
+            "omissions",
+            "truncated",
+            "query_policy_version",
+            "source_refs",
+        ):
+            self.assertEqual(body[key], artifact[key])
+        self.assertEqual(canonical_json_text(body), body_text)
+        self.assertEqual(canonical_json_text(artifact), artifact_text)
 
     def test_query_access_is_validated_at_construction(self) -> None:
         with self.assertRaises(InvalidInput):
