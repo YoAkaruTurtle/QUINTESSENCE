@@ -9,6 +9,9 @@ candidate and every decision are created by the real C07 ``ReviewFacade``.
 from __future__ import annotations
 
 import json
+import threading
+from types import SimpleNamespace
+from unittest.mock import Mock
 import sqlite3
 import unittest
 import uuid
@@ -684,6 +687,83 @@ class ReviewBridgeTests(ReviewBridgeCase):
             ),
             1,
         )
+
+
+class ResponseCompletionTests(unittest.TestCase):
+    """Force the reader/worker interleaving at the response boundary."""
+
+    def test_admission_is_free_at_response_without_releasing_next_owner(self):
+        for method in ("consult", "review_generate", "review_resolve"):
+            for failure in (None, InvalidInput("bad"), RuntimeError("boom")):
+                with self.subTest(method=method, failure=type(failure).__name__):
+                    bridge = pcs_bridge.Bridge(None, None, None)
+                    entered = threading.Event()
+                    finish_runtime = threading.Event()
+                    responding = threading.Event()
+                    finish_response = threading.Event()
+                    errors = []
+
+                    def runtime(*args, **kwargs):
+                        entered.set()
+                        if not finish_runtime.wait(5):
+                            raise TimeoutError("test runtime barrier")
+                        if failure is not None:
+                            raise failure
+                        return {"state": "committed"}
+
+                    def respond(*args, **kwargs):
+                        responding.set()
+                        if not finish_response.wait(5):
+                            raise TimeoutError("test response barrier")
+
+                    bridge.runtime = SimpleNamespace(**{method: runtime})
+                    bridge._send_ok = Mock(side_effect=respond)
+                    bridge._send_error = Mock(side_effect=respond)
+                    bridge._model_lock.acquire()
+                    arguments = {
+                        "consult": ("id", "question"),
+                        "review_generate": ("id", "work", "event"),
+                        "review_resolve": ("id", "candidate", 1, "approve"),
+                    }[method]
+
+                    def run():
+                        try:
+                            getattr(bridge, "_run_" + method)(*arguments)
+                        except BaseException as exc:
+                            errors.append(exc)
+
+                    worker = threading.Thread(target=run)
+                    worker.start()
+                    acquired = False
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        self.assertFalse(bridge._model_lock.acquire(blocking=False))
+                        finish_runtime.set()
+                        self.assertTrue(responding.wait(5))
+                        acquired = bridge._model_lock.acquire(blocking=False)
+                        self.assertTrue(acquired, "response published while admission is BUSY")
+                    finally:
+                        finish_runtime.set()
+                        finish_response.set()
+                        worker.join(5)
+                        if acquired:
+                            self.assertTrue(bridge._model_lock.locked())
+                            bridge._model_lock.release()
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertEqual(bridge._send_ok.call_count, int(failure is None))
+                    self.assertEqual(bridge._send_error.call_count, int(failure is not None))
+
+    def test_transport_failure_does_not_send_a_second_outcome(self):
+        bridge = pcs_bridge.Bridge(None, None, None)
+        bridge.runtime = SimpleNamespace(review_resolve=lambda **kwargs: {"state": "committed"})
+        bridge._send_ok = Mock(side_effect=BrokenPipeError("closed"))
+        bridge._send_error = Mock()
+        bridge._model_lock.acquire()
+        with self.assertRaises(BrokenPipeError):
+            bridge._run_review_resolve("id", "candidate", 1, "approve")
+        self.assertFalse(bridge._model_lock.locked())
+        bridge._send_error.assert_not_called()
 
 
 class ReviewErrorMappingTests(unittest.TestCase):

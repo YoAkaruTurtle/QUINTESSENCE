@@ -15,9 +15,12 @@ if ([string]::IsNullOrWhiteSpace($LabRoot)) {
 $Build = Join-Path $LabRoot 'build\c12b'
 $Evidence = Join-Path $Build 'evidence'
 $Artifacts = Join-Path $Build 'artifacts'
-$ScenarioRoot = Join-Path $Build 'install-scenarios'
+$RunRoot = Join-Path $Build ('verify-' + [guid]::NewGuid().ToString('N'))
+$ScenarioRoot = Join-Path $RunRoot 'scenarios'
+$WebViewRoot = Join-Path $RunRoot 'webview'
+$script:OwnedApp = $null
 $Shots = Join-Path $Evidence 'installed'
-$DataDir = Join-Path $Build 'install-data'
+$DataDir = Join-Path $RunRoot 'data'
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = Join-Path $LabRoot 'install\c12b'
 }
@@ -32,24 +35,48 @@ if ([string]::IsNullOrWhiteSpace($Installer)) {
 }
 $Installer = (Resolve-Path $Installer).Path
 
-function Stop-App {
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    & taskkill.exe /IM quintessence-desktop.exe /F 2>&1 | Out-Null
-    & taskkill.exe /IM pcs-bridge.exe /F 2>&1 | Out-Null
-    # WebView2 children can outlive the app briefly and would make the next
-    # launch reuse an environment without the requested debugging port.
-    Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
-        Where-Object { $_.CommandLine -like '*com.quintessence.desktop*' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    $deadline = (Get-Date).AddSeconds(8)
-    while ((Get-Date) -lt $deadline) {
-        $remaining = @(Get-Process -Name 'quintessence-desktop', 'pcs-bridge' -ErrorAction SilentlyContinue)
-        if ($remaining.Count -eq 0) { break }
-        Start-Sleep -Milliseconds 250
+function Get-OwnedProcesses {
+    # Never select ownership by image name. PID alone is also insufficient:
+    # compare creation time, then follow only live descendants from that root.
+    $all = @(Get-CimInstance Win32_Process)
+    $owned = @()
+    if ($null -ne $script:OwnedApp) {
+        $owned = @($all | Where-Object {
+            $_.ProcessId -eq $script:OwnedApp.ProcessId -and
+            $_.CreationDate.ToUniversalTime().Ticks -eq $script:OwnedApp.CreationDate.ToUniversalTime().Ticks
+        })
     }
-    $ErrorActionPreference = $previous
-    Start-Sleep -Milliseconds 500
+    do {
+        $added = @($all | Where-Object {
+            $child = $_
+            $child.ProcessId -notin $owned.ProcessId -and @($owned | Where-Object {
+                $_.ProcessId -eq $child.ParentProcessId -and $_.CreationDate -le $child.CreationDate
+            }).Count -gt 0
+        })
+        $owned += $added
+    } while ($added.Count -gt 0)
+    # Unique per-run paths identify orphaned sidecars/WebViews after root exit.
+    $owned += @($all | Where-Object {
+        $_.ProcessId -notin $owned.ProcessId -and (
+            ($_.Name -eq 'pcs-bridge.exe' -and ([string]$_.CommandLine).Contains($ScenarioRoot)) -or
+            ($_.Name -eq 'msedgewebview2.exe' -and ([string]$_.CommandLine).Contains($WebViewRoot))
+        )
+    })
+    return $owned
+}
+
+function Stop-App {
+    foreach ($item in @(Get-OwnedProcesses | Sort-Object CreationDate -Descending)) {
+        $live = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $live -and
+            [math]::Floor($live.StartTime.ToUniversalTime().Ticks / 10000) -eq [math]::Floor($item.CreationDate.ToUniversalTime().Ticks / 10000)) {
+            # Use the validated Process object, never a global image-name kill.
+            $live.Kill()
+            if (-not $live.WaitForExit(8000)) { throw 'owned process did not exit' }
+        }
+    }
+    if (@(Get-OwnedProcesses).Count -ne 0) { throw 'owned child processes remain' }
+    $script:OwnedApp = $null
 }
 
 function Get-InstalledApp {
@@ -69,6 +96,8 @@ function Start-AppWithConfig([string]$ConfigPath, [string]$Tag, [switch]$HighDpi
     $previousPath = $env:PATH
     $previousConfig = $env:QUINTESSENCE_DESKTOP_CONFIG
     $previousArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+    $previousWebView = $env:WEBVIEW2_USER_DATA_FOLDER
+    $env:WEBVIEW2_USER_DATA_FOLDER = $WebViewRoot
     $previousHome = $env:PYTHONHOME
     $previousPythonPath = $env:PYTHONPATH
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
@@ -81,10 +110,13 @@ function Start-AppWithConfig([string]$ConfigPath, [string]$Tag, [switch]$HighDpi
     }
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $browserArguments
     try {
-        $process = Start-Process -FilePath $appExe.FullName -PassThru
+        $process = Start-Process -FilePath $appExe.FullName -WindowStyle Hidden -PassThru
+        $script:OwnedApp = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.Id)
     }
     finally {
         $env:PATH = $previousPath
+        if ($null -eq $previousWebView) { Remove-Item Env:\WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue }
+        else { $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebView }
         if ($null -eq $previousConfig) { Remove-Item Env:\QUINTESSENCE_DESKTOP_CONFIG -ErrorAction SilentlyContinue }
         else { $env:QUINTESSENCE_DESKTOP_CONFIG = $previousConfig }
         if ($null -eq $previousArgs) { Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue }
@@ -155,12 +187,25 @@ function Invoke-StoreCheck([string]$Tag, [string]$Expect) {
 }
 
 function Count-Process([string]$Name) {
-    return @(Get-Process -Name $Name -ErrorAction SilentlyContinue).Count
+    return @(Get-OwnedProcesses | Where-Object Name -eq ($Name + '.exe')).Count
 }
 
 function Install-Package {
-    if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
-    $install = Start-Process -FilePath $Installer -ArgumentList @('/S', "/D=$InstallDir") -Wait -PassThru
+    $installFull = [IO.Path]::GetFullPath($InstallDir)
+    $labFull = [IO.Path]::GetFullPath($LabRoot).TrimEnd('\') + '\'
+    if (-not $installFull.StartsWith($labFull, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'install directory must be a new directory inside the selected Lab'
+    }
+    if (Test-Path -LiteralPath $InstallDir) { throw 'refusing to replace an existing install directory' }
+    $ancestor = Split-Path -Parent $installFull
+    while ($ancestor) {
+        if ((Test-Path -LiteralPath $ancestor) -and
+            ((Get-Item -LiteralPath $ancestor).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'install path contains a reparse point'
+        }
+        $ancestor = Split-Path -Parent $ancestor
+    }
+    $install = Start-Process -FilePath $Installer -WindowStyle Hidden -ArgumentList @('/S', "/D=$InstallDir") -Wait -PassThru
     if ($install.ExitCode -ne 0) { throw "installer exit code $($install.ExitCode)" }
     Start-Sleep -Seconds 2
     if (-not (Test-Path $InstallDir)) { throw 'install directory was not created' }
@@ -214,8 +259,6 @@ Stop-App
 Install-Package
 # Verification must start from a clean synthetic data instance so the store
 # evidence describes exactly one run, not an accumulation of earlier runs.
-if (Test-Path $DataDir) { Remove-Item -Recurse -Force $DataDir }
-if (Test-Path $ScenarioRoot) { Remove-Item -Recurse -Force $ScenarioRoot }
 New-Item -ItemType Directory -Force -Path $DataDir, $ScenarioRoot | Out-Null
 $tree = Assert-InstallTree
 
@@ -240,7 +283,7 @@ try {
     $store = Get-Database 'answered'
     Invoke-StoreCheck 'answered' 'answered'
 
-    $sidecarProcess = Get-CimInstance Win32_Process -Filter "Name='pcs-bridge.exe'" | Select-Object -First 1
+    $sidecarProcess = Get-OwnedProcesses | Where-Object Name -eq 'pcs-bridge.exe' | Select-Object -First 1
     $sidecarPathOk = $false
     if ($null -ne $sidecarProcess -and $sidecarProcess.ExecutablePath) {
         $sidecarPathOk = $sidecarProcess.ExecutablePath.StartsWith(
@@ -259,7 +302,7 @@ try {
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     $env:QUINTESSENCE_DESKTOP_CONFIG = $config
     try {
-        $second = Start-Process -FilePath (Get-InstalledApp).FullName -PassThru
+        $second = Start-Process -FilePath (Get-InstalledApp).FullName -WindowStyle Hidden -PassThru
     }
     finally {
         $env:PATH = $previousPath
@@ -276,7 +319,7 @@ try {
         passed = ($second.HasExited -and (Count-Process 'quintessence-desktop') -eq 1 -and (Count-Process 'pcs-bridge') -eq 1)
     }
     if (-not $singleInstance.passed) {
-        if (-not $second.HasExited) { Stop-Process -Id $second.Id -Force }
+        if (-not $second.HasExited) { $second.Kill() }
     }
     $singleInstance | ConvertTo-Json | Set-Content -Path (Join-Path $Evidence 'single-instance.json') -Encoding utf8
 
@@ -394,7 +437,7 @@ if ($LASTEXITCODE -ne 0) { throw 'private-data scan failed' }
 $uninstaller = Get-ChildItem $InstallDir -Filter 'uninstall.exe' -File -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if ($null -eq $uninstaller) { throw 'uninstaller not found' }
-$uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList @('/S') -Wait -PassThru
+$uninstall = Start-Process -FilePath $uninstaller.FullName -WindowStyle Hidden -ArgumentList @('/S') -Wait -PassThru
 Start-Sleep -Seconds 2
 $installRemoved = -not (Test-Path $InstallDir)
 $databaseRetained = Test-Path (Get-Database 'answered')

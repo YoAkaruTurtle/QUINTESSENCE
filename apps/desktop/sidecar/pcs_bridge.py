@@ -797,39 +797,42 @@ class Bridge:
             raise
 
     def _run_consult(self, request_id: str, question: str) -> None:
-        started = time.monotonic()
-        LOGGER.info("consult start request_id=%s", request_id)
         assert self.runtime is not None
+        self._run_model_call(
+            request_id, "consult.interact", lambda: self.runtime.consult(question)
+        )
+
+    def _run_model_call(
+        self, request_id: str, method: str, call: Callable[[], dict[str, Any]]
+    ) -> None:
+        """Finish runtime work and release admission before publishing its outcome.
+
+        The single DB worker still serializes execution. Transport failures must
+        escape, not produce a second response after a possibly partial write.
+        """
+        error = None
+        result = None
         try:
-            result = self.runtime.consult(question)
-            self._send_ok(request_id, result)
-            LOGGER.info(
-                "consult done request_id=%s state=%s elapsed_ms=%.3f",
-                request_id,
-                result.get("state"),
-                (time.monotonic() - started) * 1000,
-            )
-        except InputRegistrationError as exc:
-            LOGGER.warning(
-                "consult input registration failed request_id=%s code=%s",
-                request_id,
-                exc.code,
-            )
-            self._send_error(request_id, exc.code, exc.message)
-        except BaseException as exc:  # noqa: BLE001 - never crash the reader
-            LOGGER.error(
-                "consult internal error request_id=%s class=%s",
-                request_id,
-                type(exc).__name__,
-            )
-            self._send_error(
-                request_id,
-                ERROR_INTERNAL,
-                f"consult failed inside the trusted host ({type(exc).__name__})",
-                result_unknown=True,
-            )
+            result = call()
+        except (InputRegistrationError, ReviewRequestError) as exc:
+            error = (exc.code, exc.message, False)
+        except BaseException as exc:  # noqa: BLE001 - contain runtime failures
+            if method == "consult.interact":
+                error = (
+                    ERROR_INTERNAL,
+                    f"consult failed inside the trusted host ({type(exc).__name__})",
+                    True,
+                )
+            else:
+                error = _map_review_error(exc, default_unknown=True)
         finally:
             self._model_lock.release()
+        # No runtime exception handler surrounds transport or post-response work.
+        if error is None:
+            self._send_ok(request_id, result)
+        else:
+            code, message, unknown = error
+            self._send_error(request_id, code, message, result_unknown=unknown)
 
     # ----------------------------------------------------------------- review
 
@@ -1135,33 +1138,12 @@ class Bridge:
     def _run_review_generate(
         self, request_id: str, work_id: str, event_id: str
     ) -> None:
-        started = time.monotonic()
-        LOGGER.info("review generate start request_id=%s", request_id)
         assert self.runtime is not None
-        try:
-            result = self.runtime.review_generate(
-                work_id=work_id, event_id=event_id
-            )
-            self._send_ok(request_id, result)
-            LOGGER.info(
-                "review generate done request_id=%s state=%s elapsed_ms=%.3f",
-                request_id,
-                result.get("state"),
-                (time.monotonic() - started) * 1000,
-            )
-        except ReviewRequestError as exc:
-            self._send_error(request_id, exc.code, exc.message)
-            LOGGER.info(
-                "review generate refused request_id=%s code=%s",
-                request_id,
-                exc.code,
-            )
-        except BaseException as exc:  # noqa: BLE001 - never crash the reader
-            self._review_failure(
-                request_id, "review.generate", exc, unknown=True
-            )
-        finally:
-            self._model_lock.release()
+        self._run_model_call(
+            request_id,
+            "review.generate",
+            lambda: self.runtime.review_generate(work_id=work_id, event_id=event_id),
+        )
 
     def _run_review_resolve(
         self,
@@ -1170,40 +1152,16 @@ class Bridge:
         artifact_version: int,
         decision: str,
     ) -> None:
-        started = time.monotonic()
-        LOGGER.info(
-            "review resolve start request_id=%s decision=%s",
-            request_id,
-            decision,
-        )
         assert self.runtime is not None
-        try:
-            result = self.runtime.review_resolve(
+        self._run_model_call(
+            request_id,
+            "review.resolve",
+            lambda: self.runtime.review_resolve(
                 candidate_id=candidate_id,
                 artifact_version=artifact_version,
                 decision=decision,
-            )
-            self._send_ok(request_id, result)
-            LOGGER.info(
-                "review resolve done request_id=%s decision=%s state=%s elapsed_ms=%.3f",
-                request_id,
-                decision,
-                result.get("state"),
-                (time.monotonic() - started) * 1000,
-            )
-        except ReviewRequestError as exc:
-            self._send_error(request_id, exc.code, exc.message)
-            LOGGER.info(
-                "review resolve refused request_id=%s code=%s",
-                request_id,
-                exc.code,
-            )
-        except BaseException as exc:  # noqa: BLE001 - never crash the reader
-            self._review_failure(
-                request_id, "review.resolve", exc, unknown=True
-            )
-        finally:
-            self._model_lock.release()
+            ),
+        )
 
     def _run_review_result(self, request_id: str, interaction_id: str) -> None:
         assert self.runtime is not None

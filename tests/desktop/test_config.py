@@ -5,12 +5,58 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.desktop import support
 from host_config import ConfigError, load_config
+
+
+@unittest.skipUnless(os.name == "nt", "Windows installer verification script")
+class InstallProcessOwnershipTests(unittest.TestCase):
+    def test_owned_tree_orphans_and_reused_pid(self):
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile(
+ (Join-Path (Get-Location) 'apps/desktop/scripts/verify_install.ps1'),[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'parse failure' }
+$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-OwnedProcesses'},$true)
+Invoke-Expression $fn.Extent.Text
+$ScenarioRoot='synthetic-unique-scenarios'
+$WebViewRoot='synthetic-unique-webview'
+$t=[datetime]'2026-01-01T00:00:00Z'
+function row($id,$parent,$seconds,$name,$command) {
+ [pscustomobject]@{ProcessId=$id;ParentProcessId=$parent;CreationDate=$t.AddSeconds($seconds);Name=$name;CommandLine=$command}
+}
+$script:OwnedApp=row 10 1 1 'quintessence-desktop.exe' ''
+$script:Rows=@(
+ $script:OwnedApp,
+ (row 11 10 2 'pcs-bridge.exe' ''),
+ (row 12 11 3 'msedgewebview2.exe' ''),
+ (row 20 1 1 'quintessence-desktop.exe' ''),
+ (row 21 20 2 'pcs-bridge.exe' ''),
+ (row 30 999 3 'msedgewebview2.exe' $WebViewRoot),
+ (row 31 999 3 'pcs-bridge.exe' $ScenarioRoot),
+ (row 32 999 3 'pcs-bridge.exe' $null),
+ (row 40 10 0 'unrelated.exe' '')
+)
+function Get-CimInstance { param($ClassName) $script:Rows }
+$ids=@(Get-OwnedProcesses | ForEach-Object ProcessId | Sort-Object)
+if (($ids -join ',') -ne '10,11,12,30,31') { throw "unexpected ownership: $ids" }
+$script:Rows=@((row 10 1 100 'quintessence-desktop.exe' ''),(row 11 10 101 'pcs-bridge.exe' ''))
+if (@(Get-OwnedProcesses).Count -ne 0) { throw 'PID reuse selected foreign process' }
+$script:OwnedApp=$null
+if (@(Get-OwnedProcesses).Count -ne 0) { throw 'initial cleanup selected foreign process' }
+"""
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class ConfigTests(unittest.TestCase):
