@@ -48,8 +48,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..domains.cognition.beliefs import parse_belief_body, validate_belief_body
 from ..domains.cognition.context_guard import require_live_context
-from ..domains.refs import EventRef
+from ..domains.cognition.errors import EvidenceMissing
+from ..domains.refs import EventRef, RecordRef
+from ..domains.scope import SCOPE_FIELDS, normalize_scope
 from ..foundation import identifiers
 from ..foundation.errors import (
     AuthorizationRequired,
@@ -58,6 +61,7 @@ from ..foundation.errors import (
     InvalidInput,
     RecordNotFound,
     Redacted,
+    ScopeViolation,
     SnapshotNotFound,
 )
 from ..foundation.jsonutil import canonical_json_text
@@ -66,20 +70,24 @@ from ..runtime.proposal_generation import parse_proposal, validate_proposal
 from ..store import CognitionStore, PendingWork
 from ..store.collaboration import (
     ACTIVATION_KINDS,
+    CANDIDATE_STATUSES,
     COLLAB_ARTIFACT,
     COLLAB_INPUT,
     Approval,
     ArtifactRow,
+    CandidateSummary,
     InteractionRow,
 )
 from ..store.errors import CandidateTransitionDenied
 from ..store.experience import (
+    READABILITY_AVAILABLE,
+    READABILITY_REDACTED,
     ExperienceAccess,
     ExperienceUnavailable,
     ExperienceView,
 )
 from ..store.tx_b import CommitBasis, CommitReceipt
-from .policy import CommitAuthority
+from .policy import PROPOSAL_OPERATIONS, CommitAuthority
 from .service import DECISION_APPROVE, DECISION_REJECT, CollaborationService
 
 #: The closed capability vocabulary of this card.  A HostAccess may hold any
@@ -226,6 +234,119 @@ class ReviewWorkItem:
     rerun_authorization_ref: str | None
 
 
+@dataclass(frozen=True)
+class ReviewCandidateRef:
+    """The exact stored identity of one candidate version (C12c-PRE)."""
+
+    candidate_id: str
+    artifact_version: int
+    work_id: str
+    work_generation: int
+
+
+@dataclass(frozen=True)
+class ReviewCandidateSummary:
+    """Read-only candidate metadata; never a body or proposal payload.
+
+    A candidate that is not visible under the caller's access does not appear
+    in :meth:`ReviewFacade.candidates`; there is no ``readable=false`` marker
+    that would leak its existence.
+    """
+
+    candidate: ReviewCandidateRef
+    interaction_id: str
+    context_id: str
+    status: str
+    created_at: str
+    decided_at: str | None
+    decision_ref: str | None
+    attempt_ref: dict | None
+
+
+@dataclass(frozen=True)
+class ReviewProposalView:
+    """The explicit, field-level projection of one stored candidate proposal."""
+
+    operation: str | None
+    target_ref: RecordRef | None
+    claim: str | None
+    claim_type: str | None
+    scope: dict[str, Any] | None
+    evidence_links: tuple[dict[str, Any], ...]
+    strength: str | None
+    strength_reason: str | None
+    valid_until: str | None
+
+
+@dataclass(frozen=True)
+class ReviewCurrentView:
+    """The exact target Belief version the candidate would change."""
+
+    ref: RecordRef
+    claim: str
+    claim_type: str
+    status: str
+    strength: str
+    scope: dict[str, Any]
+    valid_until: str | None
+    applicability: str
+
+
+@dataclass(frozen=True)
+class ReviewDiffField:
+    """One field-level difference between the current Belief and a candidate."""
+
+    field: str
+    before: Any
+    after: Any
+    changed: bool
+
+
+@dataclass(frozen=True)
+class ReviewSourceView:
+    """One exact source reference and its read availability.
+
+    ``body`` is populated only for an input/artifact source whose body the
+    C05c read surface may disclose.  Event and record sources never carry body
+    text here.
+    """
+
+    ref: dict[str, Any]
+    kind: str
+    availability: str
+    reason: str | None
+    body: str | None
+    ref_version: int | None
+
+
+@dataclass(frozen=True)
+class ReviewCandidateDetail:
+    """One candidate's explicit review projection (C12c-PRE)."""
+
+    candidate: ReviewCandidateSummary
+    proposal: ReviewProposalView | None
+    structural_validation: str | None
+    current: ReviewCurrentView | None
+    current_state: str
+    diff: tuple[ReviewDiffField, ...]
+    sources: tuple[ReviewSourceView, ...]
+    can_approve: bool
+    can_reject: bool
+    eligibility_reason: str | None
+    redacted: bool
+    detail: str | None
+
+
+@dataclass(frozen=True)
+class _CurrentRead:
+    """Internal join of the current view, its state and the full body."""
+
+    view: ReviewCurrentView | None
+    state: str
+    moved: bool
+    body: dict[str, Any] | None
+
+
 # --------------------------------------------------------------------------
 # Facade
 # --------------------------------------------------------------------------
@@ -324,6 +445,187 @@ class ReviewFacade:
                 )
             )
         return tuple(items)
+
+    # ----------------------------------------------------------- candidates
+
+    def candidates(
+        self,
+        access: HostAccess,
+        *,
+        work_id: str,
+        generation: int | None = None,
+    ) -> tuple[ReviewCandidateSummary, ...]:
+        """List the visible candidate metadata for one Work.
+
+        Only ``collab_artifacts`` metadata is read.  The body and proposal
+        payloads are never loaded.  A candidate outside the caller's privacy
+        classes or inside a deletion barrier is omitted entirely; the result
+        does not distinguish "no candidates" from "no visible candidates".
+
+        The Work must belong to ``access.namespace``; a Work in another
+        namespace simply has no rows here.  ``generation`` is an exact Work
+        generation filter when supplied.
+        """
+
+        self._require_entry(access)
+        self._require_permission(access, "work.scan")
+        self._require_permission(access, "experience.read")
+        ns = access.namespace
+        work = _require_uuid(work_id, "work_id")
+        if generation is not None and (
+            type(generation) is not int or generation < 0
+        ):
+            raise InvalidInput("generation must be a non-negative integer")
+        rows = self._store.candidate_summaries_for_work(
+            ns, work, generation
+        )
+        return tuple(
+            self._candidate_summary(row)
+            for row in rows
+            if self._candidate_metadata_visible(row, access)
+        )
+
+    def candidate_detail(
+        self,
+        access: HostAccess,
+        *,
+        candidate_id: str,
+        artifact_version: int,
+    ) -> ReviewCandidateDetail:
+        """Read one candidate at its exact artifact version.
+
+        Visibility is decided before any body or proposal payload is loaded:
+        the candidate is read through the C05c ``read_experience`` surface, so
+        deletion barriers, privacy classes and the ``review`` purpose apply.
+        A hidden candidate returns a redacted detail rather than a body, with
+        no proposal, diff, sources or actionable flags.
+
+        ``artifact_version`` is the exact stored version.  This method never
+        assumes version 1; the existing C07 ``resolve`` path, which the PRE
+        card does not modify, still operates on the supported single-version
+        candidate shape.
+        """
+
+        self._require_entry(access)
+        self._require_permission(access, "work.scan")
+        self._require_permission(access, "experience.read")
+        ns = access.namespace
+        identifier = _require_uuid(candidate_id, "candidate_id")
+        version = _require_artifact_version(artifact_version)
+        row = self._store.candidate_summary_for_ref(
+            namespace=ns,
+            artifact_id=identifier,
+            artifact_version=version,
+        )
+        if row is None:
+            raise RecordNotFound(
+                f"no candidate {identifier} version {version} in {ns!r}"
+            )
+
+        experience = self._store.read_experience(
+            self._experience_access(access),
+            ref=_artifact_ref(ns, identifier, version),
+            purpose=_EXPERIENCE_PURPOSE,
+        )
+        if (
+            isinstance(experience, ExperienceUnavailable)
+            or experience.readability != READABILITY_AVAILABLE
+        ):
+            return self._redacted_detail(self._candidate_summary(row))
+
+        try:
+            artifact = self._store.load_artifact(
+                namespace=ns,
+                artifact_id=identifier,
+                artifact_version=version,
+            )
+        except (Redacted, RecordNotFound):
+            return self._redacted_detail(self._candidate_summary(row))
+        if artifact.kind != "candidate":
+            raise CorruptStore(f"artifact {identifier} is not a candidate")
+        if artifact.artifact_version != version:
+            raise CorruptStore(
+                f"candidate {identifier} was read at the wrong artifact version"
+            )
+        if artifact.proposal is None:
+            return self._redacted_detail(self._summary_from_artifact(artifact))
+
+        summary = self._summary_from_artifact(artifact)
+        proposal = self._proposal_view(ns, artifact.proposal)
+        current = self._read_current(ns, proposal.target_ref, access)
+        diff = _diff_fields(proposal, current)
+        sources = self._source_views(access, artifact, proposal)
+
+        can_approve = True
+        can_reject = True
+        reason: str | None = None
+
+        if summary.candidate.artifact_version != 1:
+            # The supported single-version candidate shape is version 1.
+            # resolve() intentionally still binds version 1, so PRE must not
+            # advertise an approval/rejection it cannot deliver.
+            can_approve = False
+            can_reject = False
+            reason = "unsupported_version"
+        elif summary.status not in CANDIDATE_STATUSES:
+            raise CorruptStore(
+                f"candidate {identifier} has status {summary.status!r}"
+            )
+        elif summary.status != "pending":
+            can_approve = False
+            can_reject = False
+            reason = "terminal"
+        else:
+            control = self._store.work_control(
+                namespace=ns, work_id=summary.candidate.work_id
+            )
+            if (
+                control is None
+                or control.generation
+                != summary.candidate.work_generation
+            ):
+                can_approve = False
+                can_reject = False
+                reason = "stale_generation"
+            else:
+                if proposal.operation not in PROPOSAL_OPERATIONS:
+                    can_approve = False
+                    reason = "unsupported_operation"
+                if current.state == "redacted":
+                    can_approve = False
+                    reason = "current_redacted"
+                elif current.state == "missing":
+                    can_approve = False
+                    reason = "current_missing"
+                elif current.moved:
+                    can_approve = False
+                    reason = "target_moved"
+                elif (
+                    current.view is not None
+                    and current.view.status in ("retracted", "contradicted")
+                ):
+                    can_approve = False
+                    reason = "current_terminal"
+                source_reason = _source_block_reason(sources)
+                if source_reason is not None:
+                    can_approve = False
+                    if reason is None:
+                        reason = source_reason
+
+        return ReviewCandidateDetail(
+            candidate=summary,
+            proposal=proposal,
+            structural_validation=row.structural_validation,
+            current=current.view,
+            current_state=current.state,
+            diff=diff,
+            sources=sources,
+            can_approve=can_approve,
+            can_reject=can_reject,
+            eligibility_reason=reason,
+            redacted=False,
+            detail=None,
+        )
 
     # --------------------------------------------------------------- review
 
@@ -575,6 +877,426 @@ class ReviewFacade:
             raise InvalidInput("purpose must be a non-empty string")
         return self._store.read_experience(
             self._experience_access(access), ref=ref, purpose=purpose
+        )
+
+    # ------------------------------------------------- candidate read internals
+
+    def _candidate_summary(
+        self, row: CandidateSummary
+    ) -> ReviewCandidateSummary:
+        """Map one metadata-only store row to the public summary."""
+
+        return ReviewCandidateSummary(
+            candidate=ReviewCandidateRef(
+                candidate_id=row.artifact_id,
+                artifact_version=row.artifact_version,
+                work_id=row.work_id,
+                work_generation=row.work_generation,
+            ),
+            interaction_id=row.interaction_id,
+            context_id=row.context_id,
+            status=row.status,
+            created_at=row.created_at,
+            decided_at=row.decided_at,
+            decision_ref=row.decision_ref,
+            attempt_ref=row.attempt_ref,
+        )
+
+    def _summary_from_artifact(
+        self, artifact: ArtifactRow
+    ) -> ReviewCandidateSummary:
+        """Build the same summary from a loaded artifact row."""
+
+        if artifact.status not in CANDIDATE_STATUSES:
+            raise CorruptStore(
+                f"candidate {artifact.artifact_id} has status "
+                f"{artifact.status!r}"
+            )
+        if artifact.work_id is None or artifact.work_generation is None:
+            raise CorruptStore(
+                f"candidate {artifact.artifact_id} is missing its Work binding"
+            )
+        attempt_ref = artifact.attempt_ref
+        if attempt_ref is not None and not isinstance(attempt_ref, dict):
+            raise CorruptStore(
+                f"candidate {artifact.artifact_id} has a non-object attempt_ref"
+            )
+        return ReviewCandidateSummary(
+            candidate=ReviewCandidateRef(
+                candidate_id=artifact.artifact_id,
+                artifact_version=artifact.artifact_version,
+                work_id=artifact.work_id,
+                work_generation=artifact.work_generation,
+            ),
+            interaction_id=artifact.interaction_id,
+            context_id=artifact.context_id,
+            status=artifact.status,
+            created_at=artifact.created_at,
+            decided_at=artifact.decided_at,
+            decision_ref=artifact.decision_ref,
+            attempt_ref=attempt_ref,
+        )
+
+    def _candidate_metadata_visible(
+        self, row: CandidateSummary, access: HostAccess
+    ) -> bool:
+        """Apply the C05c visibility rule using metadata only.
+
+        This calls the same read-only privacy-closure helper
+        ``read_experience`` uses, so the list cannot become more permissive
+        than the detail read.  A deletion barrier always hides the candidate.
+        No payload is loaded and no experience read audit row is written.
+        """
+
+        if _EXPERIENCE_PURPOSE not in access.purposes:
+            return False
+        if self._store.artifact_barred(
+            namespace=row.namespace,
+            artifact_id=row.artifact_id,
+            artifact_version=row.artifact_version,
+        ):
+            return False
+        privacy = self._store._artifact_privacy_classes(
+            namespace=row.namespace,
+            artifact_id=row.artifact_id,
+            artifact_version=row.artifact_version,
+            depth=0,
+            seen=set(),
+        )
+        return privacy is not None and privacy.issubset(access.privacy_classes)
+
+    def _redacted_detail(
+        self, summary: ReviewCandidateSummary
+    ) -> ReviewCandidateDetail:
+        """The one fail-closed detail for a candidate that cannot be read."""
+
+        return ReviewCandidateDetail(
+            candidate=summary,
+            proposal=None,
+            structural_validation=None,
+            current=None,
+            current_state="not_applicable",
+            diff=(),
+            sources=(),
+            can_approve=False,
+            can_reject=False,
+            eligibility_reason="candidate_redacted",
+            redacted=True,
+            detail="candidate_redacted",
+        )
+
+    def _proposal_view(
+        self, namespace: str, proposal: dict[str, Any]
+    ) -> ReviewProposalView:
+        """Project a stored proposal into explicit C12c fields.
+
+        The raw proposal object is never returned.  A candidate proposal that
+        no longer satisfies the frozen shape is storage corruption, not a view.
+        """
+
+        operation = proposal.get("operation")
+        if not isinstance(operation, str) or not operation:
+            raise CorruptStore("a stored candidate proposal has no operation")
+
+        target_ref: RecordRef | None = None
+        raw_target = proposal.get("target")
+        if raw_target is not None:
+            try:
+                target_ref = RecordRef.from_value(raw_target, field="target")
+            except (InvalidInput, ScopeViolation) as exc:
+                raise CorruptStore(
+                    "a stored candidate proposal has an invalid target"
+                ) from exc
+            if target_ref.namespace != namespace:
+                raise CorruptStore(
+                    "a stored candidate proposal targets another namespace"
+                )
+
+        claim = claim_type = strength = strength_reason = valid_until = None
+        scope: dict[str, Any] | None = None
+        evidence: tuple[dict[str, Any], ...] = ()
+
+        if operation in ("propose_belief", "revise_belief"):
+            raw_body = proposal.get("body")
+            raw_scope = proposal.get("scope")
+            try:
+                scope = normalize_scope(raw_scope)
+                body = validate_belief_body(
+                    raw_body, scope=scope, enforce_support_rules=False
+                )
+            except (InvalidInput, ScopeViolation, EvidenceMissing) as exc:
+                raise CorruptStore(
+                    "a stored candidate proposal has an invalid body"
+                ) from exc
+            claim = body["claim"]
+            claim_type = body["claim_type"]
+            strength = body["strength"]
+            strength_reason = body["strength_reason"]
+            valid_until = body["valid_until"]
+            evidence = tuple(dict(link) for link in body["evidence_links"])
+        elif operation == "retract_belief":
+            raw_links = proposal.get("evidence_links")
+            if (
+                not isinstance(raw_links, (list, tuple))
+                or not raw_links
+                or any(not isinstance(item, dict) for item in raw_links)
+            ):
+                raise CorruptStore(
+                    "a stored retraction proposal has invalid evidence_links"
+                )
+            evidence = tuple(dict(item) for item in raw_links)
+            reason = proposal.get("reason")
+            # The DTO has no separate retraction-reason field.  The model's
+            # bounded reason is surfaced in strength_reason, which is the one
+            # explicit free-text reason field the UI already renders.
+            strength_reason = reason if isinstance(reason, str) else None
+
+        return ReviewProposalView(
+            operation=operation,
+            target_ref=target_ref,
+            claim=claim,
+            claim_type=claim_type,
+            scope=scope,
+            evidence_links=evidence,
+            strength=strength,
+            strength_reason=strength_reason,
+            valid_until=valid_until,
+        )
+
+    def _read_current(
+        self,
+        namespace: str,
+        target_ref: RecordRef | None,
+        access: HostAccess,
+    ) -> _CurrentRead:
+        """Read the candidate's exact target version and the current pointer."""
+
+        if target_ref is None:
+            return _CurrentRead(None, "not_applicable", False, None)
+        if target_ref.namespace != namespace:
+            raise CorruptStore("a candidate target belongs to another namespace")
+        try:
+            version = self._store.get_version(
+                namespace, target_ref.record_id, target_ref.record_version
+            )
+        except Redacted:
+            return _CurrentRead(None, "redacted", False, None)
+        except RecordNotFound:
+            return _CurrentRead(None, "missing", False, None)
+        if version.kind != "belief":
+            return _CurrentRead(None, "missing", False, None)
+        if version.privacy_class not in access.privacy_classes:
+            return _CurrentRead(None, "redacted", False, None)
+        body = parse_belief_body(version)
+        scope = dict(version.scope or {})
+        view = ReviewCurrentView(
+            ref=target_ref,
+            claim=body["claim"],
+            claim_type=body["claim_type"],
+            status=version.status,
+            strength=body["strength"],
+            scope=scope,
+            valid_until=body["valid_until"],
+            applicability=_applicability(scope),
+        )
+        try:
+            current = self._store.get_current(namespace, target_ref.record_id)
+        except Redacted:
+            return _CurrentRead(None, "redacted", False, None)
+        except RecordNotFound:
+            return _CurrentRead(None, "missing", False, None)
+        if current.kind != "belief":
+            return _CurrentRead(None, "missing", False, None)
+        return _CurrentRead(
+            view,
+            "available",
+            current.record_version != version.record_version,
+            body,
+        )
+
+    def _source_views(
+        self,
+        access: HostAccess,
+        artifact: ArtifactRow,
+        proposal: ReviewProposalView,
+    ) -> tuple[ReviewSourceView, ...]:
+        """Build exact source refs, with no event body read.
+
+        The candidate's own Context/source links come first, then every
+        evidence link the readable proposal cites.  A source appears once.
+        """
+
+        seen: set[str] = set()
+        views: list[ReviewSourceView] = []
+        for ref in artifact.source_refs:
+            normalized = _normalize_detail_ref(ref, access.namespace)
+            if normalized is None:
+                raise CorruptStore(
+                    "a stored candidate source is not an exact reference"
+                )
+            key = canonical_json_text(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            views.append(self._source_view(access, normalized))
+        for link in proposal.evidence_links:
+            normalized = _normalize_detail_ref(
+                link.get("ref") if isinstance(link, dict) else None,
+                access.namespace,
+            )
+            if normalized is None:
+                # A retract proposal's evidence link is only structurally
+                # checked at commit time.  An unrepresentable ref cannot be
+                # given an availability, so it contributes no source view.
+                continue
+            key = canonical_json_text(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            views.append(self._source_view(access, normalized))
+        return tuple(views)
+
+    def _source_view(
+        self, access: HostAccess, ref: dict[str, Any]
+    ) -> ReviewSourceView:
+        """Return one source availability, reading bodies only when allowed."""
+
+        kind = ref["ref_type"]
+        namespace = access.namespace
+        if kind == "event":
+            event_id = ref["event_id"]
+            if self._store.event_is_deleted(namespace, event_id):
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="redacted",
+                    reason="deleted",
+                    body=None,
+                    ref_version=None,
+                )
+            header = self._store.event_header(namespace, event_id)
+            if header is None:
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="unavailable",
+                    reason="not_found",
+                    body=None,
+                    ref_version=None,
+                )
+            if header.privacy_class not in access.privacy_classes:
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="redacted",
+                    reason="privacy",
+                    body=None,
+                    ref_version=None,
+                )
+            return ReviewSourceView(
+                ref=ref,
+                kind=kind,
+                availability="available",
+                reason=None,
+                body=None,
+                ref_version=None,
+            )
+        if kind == "record":
+            record_id = ref["record_id"]
+            record_version = ref["record_version"]
+            if self._store.record_is_deleted(namespace, record_id):
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="redacted",
+                    reason="deleted",
+                    body=None,
+                    ref_version=record_version,
+                )
+            try:
+                version = self._store.get_version(
+                    namespace, record_id, record_version
+                )
+            except Redacted:
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="redacted",
+                    reason="deleted",
+                    body=None,
+                    ref_version=record_version,
+                )
+            except RecordNotFound:
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="unavailable",
+                    reason="not_found",
+                    body=None,
+                    ref_version=record_version,
+                )
+            if version.privacy_class not in access.privacy_classes:
+                return ReviewSourceView(
+                    ref=ref,
+                    kind=kind,
+                    availability="redacted",
+                    reason="privacy",
+                    body=None,
+                    ref_version=record_version,
+                )
+            return ReviewSourceView(
+                ref=ref,
+                kind=kind,
+                availability="available",
+                reason=None,
+                body=None,
+                ref_version=record_version,
+            )
+
+        experience = self._store.read_experience(
+            self._experience_access(access),
+            ref=ref,
+            purpose=_EXPERIENCE_PURPOSE,
+        )
+        ref_version = (
+            ref["content_version"]
+            if kind == COLLAB_INPUT
+            else ref["artifact_version"]
+        )
+        if isinstance(experience, ExperienceUnavailable):
+            return ReviewSourceView(
+                ref=ref,
+                kind=kind,
+                availability="unavailable",
+                reason="unavailable",
+                body=None,
+                ref_version=ref_version,
+            )
+        if experience.readability == READABILITY_AVAILABLE:
+            return ReviewSourceView(
+                ref=ref,
+                kind=kind,
+                availability="available",
+                reason=None,
+                body=experience.body,
+                ref_version=ref_version,
+            )
+        if experience.readability == READABILITY_REDACTED:
+            return ReviewSourceView(
+                ref=ref,
+                kind=kind,
+                availability="redacted",
+                reason="redacted",
+                body=None,
+                ref_version=ref_version,
+            )
+        return ReviewSourceView(
+            ref=ref,
+            kind=kind,
+            availability="unavailable",
+            reason="unavailable",
+            body=None,
+            ref_version=ref_version,
         )
 
     # ------------------------------------------------------ review internals
@@ -1114,6 +1836,199 @@ def open_store(path: str | Path) -> CognitionStore:
 
 
 # --------------------------------------------------------------------------
+# candidate projection helpers
+# --------------------------------------------------------------------------
+
+
+def _diff_fields(
+    proposal: ReviewProposalView, current: _CurrentRead
+) -> tuple[ReviewDiffField, ...]:
+    """Compare only fields both sides actually describe.
+
+    A propose proposal has no target, so "before" is genuinely absent.  A
+    redacted or missing current Belief is *not* an empty Belief: its diff is
+    empty rather than a fabricated all-changed comparison.
+    """
+
+    if current.state == "not_applicable":
+        if proposal.operation != "propose_belief":
+            return ()
+        return tuple(
+            ReviewDiffField(field=name, before=None, after=value, changed=True)
+            for name, value in _proposal_fields(proposal)
+        )
+    if current.state != "available" or current.body is None:
+        return ()
+    if proposal.operation == "revise_belief":
+        before = {
+            "claim": current.body["claim"],
+            "claim_type": current.body["claim_type"],
+            "scope": dict(current.view.scope) if current.view is not None else {},
+            "evidence_links": list(current.body["evidence_links"]),
+            "strength": current.body["strength"],
+            "valid_until": current.body["valid_until"],
+        }
+        return tuple(
+            ReviewDiffField(
+                field=name,
+                before=before[name],
+                after=value,
+                changed=canonical_json_text(before[name])
+                != canonical_json_text(value),
+            )
+            for name, value in _proposal_fields(proposal)
+        )
+    if proposal.operation == "retract_belief":
+        before_links = list(current.body["evidence_links"])
+        after_links = list(proposal.evidence_links)
+        return (
+            ReviewDiffField(
+                field="evidence_links",
+                before=before_links,
+                after=after_links,
+                changed=canonical_json_text(before_links)
+                != canonical_json_text(after_links),
+            ),
+        )
+    return ()
+
+
+def _proposal_fields(
+    proposal: ReviewProposalView,
+) -> tuple[tuple[str, Any], ...]:
+    """The explicit fields a Belief proposal can change."""
+
+    return (
+        ("claim", proposal.claim),
+        ("claim_type", proposal.claim_type),
+        ("scope", proposal.scope or {}),
+        ("evidence_links", list(proposal.evidence_links)),
+        ("strength", proposal.strength),
+        ("valid_until", proposal.valid_until),
+    )
+
+
+def _source_block_reason(
+    sources: tuple[ReviewSourceView, ...]
+) -> str | None:
+    """One public reason label for the strongest source gap, if any."""
+
+    if any(source.availability == "redacted" for source in sources):
+        return "source_redacted"
+    if any(source.availability == "unavailable" for source in sources):
+        return "source_unavailable"
+    return None
+
+
+def _applicability(scope: dict[str, Any]) -> str:
+    """Render the stored record scope as a UI-ready applicability label."""
+
+    if not scope:
+        return "general"
+    parts: list[str] = []
+    for field in SCOPE_FIELDS:
+        if field not in scope:
+            continue
+        value = scope[field]
+        if isinstance(value, list):
+            rendered = ", ".join(str(item) for item in value)
+        else:
+            rendered = str(value)
+        parts.append(f"{field}={rendered}")
+    return "; ".join(parts)
+
+
+def _normalize_detail_ref(
+    value: Any, namespace: str
+) -> dict[str, Any] | None:
+    """Normalize one exact source ref, or return ``None`` when not exact."""
+
+    if not isinstance(value, Mapping):
+        return None
+    ref_type = value.get("ref_type")
+    try:
+        if ref_type == "event":
+            if set(value) != {"ref_type", "namespace", "event_id"}:
+                return None
+            if value["namespace"] != namespace:
+                return None
+            return {
+                "ref_type": "event",
+                "namespace": identifiers.require_namespace(value["namespace"]),
+                "event_id": identifiers.require_event_id(value["event_id"]),
+            }
+        if ref_type == "record":
+            if set(value) != {
+                "ref_type",
+                "namespace",
+                "record_id",
+                "record_version",
+            }:
+                return None
+            if value["namespace"] != namespace:
+                return None
+            return {
+                "ref_type": "record",
+                "namespace": identifiers.require_namespace(value["namespace"]),
+                "record_id": identifiers.require_record_id(value["record_id"]),
+                "record_version": identifiers.require_record_version(
+                    value["record_version"]
+                ),
+            }
+        if ref_type == COLLAB_INPUT:
+            if set(value) != {
+                "ref_type",
+                "namespace",
+                "input_id",
+                "content_version",
+            }:
+                return None
+            if value["namespace"] != namespace:
+                return None
+            return {
+                "ref_type": COLLAB_INPUT,
+                "namespace": identifiers.require_namespace(value["namespace"]),
+                "input_id": _require_uuid(value["input_id"], "input_id"),
+                "content_version": _require_artifact_version(
+                    value["content_version"]
+                ),
+            }
+        if ref_type == COLLAB_ARTIFACT:
+            if set(value) != {
+                "ref_type",
+                "namespace",
+                "artifact_id",
+                "artifact_version",
+            }:
+                return None
+            if value["namespace"] != namespace:
+                return None
+            return {
+                "ref_type": COLLAB_ARTIFACT,
+                "namespace": identifiers.require_namespace(value["namespace"]),
+                "artifact_id": _require_uuid(value["artifact_id"], "artifact_id"),
+                "artifact_version": _require_artifact_version(
+                    value["artifact_version"]
+                ),
+            }
+    except InvalidInput:
+        return None
+    return None
+
+
+def _require_artifact_version(value: Any) -> int:
+    if (
+        type(value) is not int
+        or value < 1
+        or value > identifiers.MAX_SAFE_INTEGER
+    ):
+        raise InvalidInput(
+            "artifact_version must be a positive JSON-safe integer"
+        )
+    return value
+
+
+# --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
 
@@ -1192,7 +2107,14 @@ __all__ = [
     "FACADE_PERMISSIONS",
     "HostAccess",
     "REVIEW_STATES",
+    "ReviewCandidateDetail",
+    "ReviewCandidateRef",
+    "ReviewCandidateSummary",
+    "ReviewCurrentView",
+    "ReviewDiffField",
     "ReviewFacade",
+    "ReviewProposalView",
+    "ReviewSourceView",
     "ReviewView",
     "ReviewWorkItem",
     "open_store",

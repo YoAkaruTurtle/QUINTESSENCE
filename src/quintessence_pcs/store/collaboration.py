@@ -125,6 +125,11 @@ _WORK_COLUMNS = (
     "control_version, rerun_authorization_ref, block_reason, updated_at, "
     "last_candidate_ref"
 )
+_CANDIDATE_SUMMARY_COLUMNS = (
+    "namespace, artifact_id, artifact_version, interaction_id, context_id, "
+    "status, created_at, decided_at, decision_ref, attempt_ref_json, "
+    "work_id, work_generation, structural_validation"
+)
 _INTERACTION_COLUMNS = (
     "interaction_id, namespace, schema_version, mode, activation_kind, "
     "host_instance, trigger_ref_json, work_id, work_generation, context_id, "
@@ -249,6 +254,31 @@ class CandidateState:
     work_id: str | None
     work_generation: int | None
     command_digest: str | None
+
+
+@dataclass(frozen=True)
+class CandidateSummary:
+    """C12c-PRE: one candidate's metadata, with no body or proposal payload.
+
+    This is a read-only projection of the ``collab_artifacts`` row.  Every
+    value is the exact stored value, including ``artifact_version`` and
+    ``work_generation``; nothing here assumes version 1.  ``attempt_ref`` is
+    decoded from ``attempt_ref_json`` only.
+    """
+
+    namespace: str
+    artifact_id: str
+    artifact_version: int
+    interaction_id: str
+    context_id: str
+    status: str
+    created_at: str
+    decided_at: str | None
+    decision_ref: str | None
+    attempt_ref: dict[str, Any] | None
+    work_id: str
+    work_generation: int
+    structural_validation: str | None
 
 
 @dataclass(frozen=True)
@@ -2199,6 +2229,69 @@ class CollaborationMixin:
         ).fetchone()
         return None if row is None else _work_control_from_row(row)
 
+    # ------------------------------------------------- candidate metadata reads
+
+    def candidate_summaries_for_work(
+        self,
+        namespace: str,
+        work_id: str,
+        generation: int | None = None,
+    ) -> tuple[CandidateSummary, ...]:
+        """Read candidate metadata for one Work, never a body or proposal.
+
+        The query selects only ``collab_artifacts`` metadata.  It is valid after
+        a deletion cleanup cleared the payloads, because no ``private_payloads``
+        row is read.  Ordering is stable: ``(created_at, artifact_id,
+        artifact_version)``.
+
+        ``generation`` is an exact filter when supplied; ``None`` means every
+        stored candidate generation of the Work.  The caller applies its own
+        visibility policy (C12c-PRE does so in the Facade).
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        work = _require_uuid(work_id, "work_id")
+        if generation is not None:
+            generation = _require_generation(generation, "generation")
+        statement = (
+            f"SELECT {_CANDIDATE_SUMMARY_COLUMNS} FROM collab_artifacts "
+            "WHERE namespace = ? AND work_id = ? AND kind = 'candidate' "
+        )
+        parameters: list[Any] = [ns, work]
+        if generation is not None:
+            statement += "AND work_generation = ? "
+            parameters.append(generation)
+        statement += "ORDER BY created_at, artifact_id, artifact_version"
+        rows = self._require_connection().execute(
+            statement, tuple(parameters)
+        ).fetchall()
+        return tuple(_candidate_summary_from_row(row) for row in rows)
+
+    def candidate_summary_for_ref(
+        self,
+        *,
+        namespace: str,
+        artifact_id: str,
+        artifact_version: int,
+    ) -> CandidateSummary | None:
+        """Read one candidate's metadata at its exact artifact version.
+
+        Returns ``None`` when no candidate row exists at that key.  Like the
+        Work-scoped read this never loads a payload; the Facade decides whether
+        the surrounding body/proposal may be read through ``read_experience``.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        identifier = _require_uuid(artifact_id, "artifact_id")
+        version = _require_version(artifact_version, "artifact_version")
+        row = self._require_connection().execute(
+            f"SELECT {_CANDIDATE_SUMMARY_COLUMNS} FROM collab_artifacts "
+            "WHERE namespace = ? AND artifact_id = ? AND artifact_version = ? "
+            "AND kind = 'candidate'",
+            (ns, identifier, version),
+        ).fetchone()
+        return None if row is None else _candidate_summary_from_row(row)
+
     # ------------------------------------------------------- candidate state
 
     def register_candidate(
@@ -3236,6 +3329,41 @@ def _work_control_from_row(row: Any) -> WorkControl:
     )
 
 
+def _candidate_summary_from_row(row: Any) -> CandidateSummary:
+    """Decode one metadata-only candidate row, failing closed on corruption."""
+
+    status = row["status"]
+    if status not in CANDIDATE_STATUSES:
+        raise CorruptStore(f"stored candidate status {status!r} is not frozen")
+    work_id = row["work_id"]
+    generation = row["work_generation"]
+    if work_id is None or generation is None:
+        raise CorruptStore("a candidate row is missing its Work binding")
+    attempt = _decode_json(row["attempt_ref_json"], "attempt_ref_json")
+    if attempt is not None and not isinstance(attempt, Mapping):
+        raise CorruptStore("stored attempt_ref_json is not a JSON object")
+    structural = row["structural_validation"]
+    if structural != "passed":
+        raise CorruptStore(
+            f"stored structural_validation {structural!r} is not frozen"
+        )
+    return CandidateSummary(
+        namespace=row["namespace"],
+        artifact_id=row["artifact_id"],
+        artifact_version=int(row["artifact_version"]),
+        interaction_id=row["interaction_id"],
+        context_id=row["context_id"],
+        status=status,
+        created_at=row["created_at"],
+        decided_at=row["decided_at"],
+        decision_ref=row["decision_ref"],
+        attempt_ref=None if attempt is None else dict(attempt),
+        work_id=work_id,
+        work_generation=int(generation),
+        structural_validation=structural,
+    )
+
+
 def _grant_from_row(row: Any) -> GrantRow:
     def array(name: str) -> tuple[str, ...]:
         value = _decode_json(row[name], name)
@@ -3285,6 +3413,7 @@ __all__ = [
     "COLLAB_SCHEMA_VERSION",
     "COLLAB_SOURCE_KINDS",
     "CandidateState",
+    "CandidateSummary",
     "CollaborationMixin",
     "DECIDED_STATUSES",
     "Decision",
