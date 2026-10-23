@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from quintessence_pcs.domains.cognition import BeliefCurrentQuery
+from quintessence_pcs.collaboration.facade import FACADE_PERMISSIONS
 from quintessence_pcs.foundation import identifiers
 from quintessence_pcs.foundation.errors import InvalidInput
 from quintessence_pcs.runtime import ModelManifest
@@ -37,6 +38,8 @@ RETENTION_VALUES = ("session", "standard", "durable")
 TRANSPORT_KINDS = ("http", "scripted")
 PROFILES = ("lab", "production")
 MODEL_PROTOCOL = "collab.v1"
+REVIEW_PURPOSE = "review"
+REVIEW_PERMISSION_VALUES = tuple(sorted(FACADE_PERMISSIONS))
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -69,6 +72,7 @@ class HostAuthority:
     retention: str
     policy_ref: str
     input_privacy_class: str
+    review_permissions: frozenset[str]
 
     def public_summary(self) -> dict[str, Any]:
         """The non-secret identity summary shown in the UI."""
@@ -119,6 +123,7 @@ class ModelSpec:
     manifest: ModelManifest
     transport_kind: str
     script: tuple[dict[str, Any], ...]
+    review_script: tuple[dict[str, Any], ...]
     delay_ms: int
 
 
@@ -197,7 +202,7 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
     _exact(
         document,
         required={"schema", "app", "store", "host", "consult", "destination"},
-        optional={"lab"},
+        optional={"lab", "review"},
         where="configuration",
     )
     if document["schema"] != CONFIG_SCHEMA:
@@ -260,6 +265,24 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
         raise ConfigError(
             "CONFIG_INVALID", "host.purposes must contain the consult purpose"
         )
+    review_object = _object(
+        document.get("review", {}), "review", set(), {"permissions"}
+    )
+    review_permissions = (
+        frozenset()
+        if "permissions" not in review_object
+        else _string_set(
+            review_object["permissions"],
+            "review.permissions",
+            REVIEW_PERMISSION_VALUES,
+        )
+    )
+    if review_permissions and REVIEW_PURPOSE not in purposes:
+        raise ConfigError(
+            "CONFIG_INVALID",
+            "host.purposes must contain the review purpose when review "
+            "permissions are configured",
+        )
     authority = HostAuthority(
         namespace=namespace,
         host_instance=_text(host_object["host_instance"], "host.host_instance", 256),
@@ -271,6 +294,7 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
         retention=_choice(host_object["retention"], "host.retention", RETENTION_VALUES),
         policy_ref=_text(host_object["policy_ref"], "host.policy_ref", 512),
         input_privacy_class=input_privacy,
+        review_permissions=review_permissions,
     )
 
     consult = _object(
@@ -394,16 +418,22 @@ def _parse_destination(value: Any, base: Path) -> ModelSpec:
         transport_value,
         "destination.transport",
         {"kind"},
-        {"script", "delay_ms"},
+        {"script", "delay_ms", "review_script"},
     )
     kind = _choice(transport["kind"], "destination.transport.kind", TRANSPORT_KINDS)
     script: tuple[dict[str, Any], ...] = ()
+    review_script: tuple[dict[str, Any], ...] = ()
     delay_ms = 0
     if kind == "http":
         if "script" in transport or "delay_ms" in transport:
             raise ConfigError(
                 "CONFIG_INVALID",
                 "the http transport does not accept script or delay_ms",
+            )
+        if "review_script" in transport:
+            raise ConfigError(
+                "CONFIG_INVALID",
+                "the http transport does not accept review_script",
             )
     else:
         raw_script = transport.get("script")
@@ -429,6 +459,22 @@ def _parse_destination(value: Any, base: Path) -> ModelSpec:
         delay_ms = _integer(
             transport.get("delay_ms", 0), "destination.transport.delay_ms", 0, 600_000
         )
+        if "review_script" in transport:
+            raw_review = transport["review_script"]
+            if not isinstance(raw_review, list) or not raw_review:
+                raise ConfigError(
+                    "CONFIG_INVALID",
+                    "destination.transport.review_script must be a non-empty list",
+                )
+            review_entries: list[dict[str, Any]] = []
+            for index, item in enumerate(raw_review):
+                if not isinstance(item, dict):
+                    raise ConfigError(
+                        "CONFIG_INVALID",
+                        f"transport.review_script[{index}] must be an object",
+                    )
+                review_entries.append(dict(item))
+            review_script = tuple(review_entries)
 
     return ModelSpec(
         provider=provider,
@@ -438,6 +484,7 @@ def _parse_destination(value: Any, base: Path) -> ModelSpec:
         manifest=manifest,
         transport_kind=kind,
         script=script,
+        review_script=review_script,
         delay_ms=delay_ms,
     )
 

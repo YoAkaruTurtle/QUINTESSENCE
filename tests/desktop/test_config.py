@@ -164,6 +164,65 @@ class ConfigTests(unittest.TestCase):
         clone["destination"]["provider"] = "other"
         self.assertEqual(document["destination"]["provider"], support.PROVIDER)
 
+    def test_review_permissions_are_closed_and_need_the_review_purpose(self) -> None:
+        document = support.config_document(
+            self.database, review_permissions=support.REVIEW_PERMISSIONS
+        )
+        config = self.load(document)
+        self.assertEqual(
+            config.authority.review_permissions,
+            frozenset(support.REVIEW_PERMISSIONS),
+        )
+        self.assertIn("review", config.authority.purposes)
+
+        missing_purpose = copy.deepcopy(document)
+        missing_purpose["host"]["purposes"] = ["consult", "reasoning"]
+        with self.assertRaises(ConfigError) as caught:
+            self.load(missing_purpose)
+        self.assertIn("review purpose", caught.exception.message)
+
+        unknown = copy.deepcopy(document)
+        unknown["review"]["permissions"] = ["review.root"]
+        with self.assertRaises(ConfigError):
+            self.load(unknown)
+
+        duplicate = copy.deepcopy(document)
+        duplicate["review"]["permissions"] = ["work.scan", "work.scan"]
+        with self.assertRaises(ConfigError):
+            self.load(duplicate)
+
+    def test_review_script_is_scripted_only_and_non_empty(self) -> None:
+        document = support.config_document(
+            self.database,
+            review_permissions=support.REVIEW_PERMISSIONS,
+            review_script=[{"operation": "wait", "reason": "synthetic"}],
+        )
+        config = self.load(document)
+        self.assertEqual(len(config.model.review_script), 1)
+
+        empty = copy.deepcopy(document)
+        empty["destination"]["transport"]["review_script"] = []
+        with self.assertRaises(ConfigError):
+            self.load(empty)
+
+        non_object = copy.deepcopy(document)
+        non_object["destination"]["transport"]["review_script"] = ["not-an-object"]
+        with self.assertRaises(ConfigError):
+            self.load(non_object)
+
+        http = support.config_document(self.database)
+        http["destination"]["transport"] = {
+            "kind": "http",
+            "review_script": [{"operation": "wait", "reason": "synthetic"}],
+        }
+        with self.assertRaises(ConfigError):
+            self.load(http)
+
+    def test_review_script_is_empty_when_not_configured(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertEqual(config.model.review_script, ())
+        self.assertEqual(config.authority.review_permissions, frozenset())
+
 
 if __name__ == "__main__":
     unittest.main()

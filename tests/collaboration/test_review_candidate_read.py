@@ -420,6 +420,79 @@ class ReviewCandidateReadTests(CognitionTestCase):
             self.facade.candidates(self.access(), work_id=work.work_id),
         )
 
+    def test_host_b_can_read_but_cannot_approve_or_recover(self) -> None:
+        """C12c audit: the read boundary and the approval boundary differ.
+
+        C07's formal read boundary is namespace + privacy classes + purpose;
+        its ``resolve``/``result`` boundary additionally requires the
+        interaction's ``host_instance`` and the matching host permission.  The
+        C12c desktop bridge adds no host check of its own, so this test pins
+        both halves: host B may read the exact candidate, and C07 refuses every
+        host-B write/recovery.
+        """
+
+        event, work = self.pending_event()
+        context = self.build_context(event.event_id)
+        candidate = self.register_candidate(
+            context, self.proposal_propose(event), work=work
+        )
+
+        host_b = self.access(host_instance="host:desktop-lab-b")
+        self.assertEqual(
+            1, len(self.facade.candidates(host_b, work_id=work.work_id))
+        )
+        host_b_detail = self.facade.candidate_detail(
+            host_b,
+            candidate_id=candidate.artifact_id,
+            artifact_version=1,
+        )
+        self.assertFalse(host_b_detail.redacted)
+        self.assertIsNotNone(host_b_detail.proposal)
+        self.assertTrue(host_b_detail.can_approve)
+
+        with self.assertRaises(AuthorizationRequired):
+            self.facade.resolve(
+                host_b,
+                candidate_id=candidate.artifact_id,
+                decision="approve",
+                decision_id="decision:audit:host-b:approve",
+            )
+        with self.assertRaises(AuthorizationRequired):
+            self.facade.resolve(
+                host_b,
+                candidate_id=candidate.artifact_id,
+                decision="reject",
+                decision_id="decision:audit:host-b:reject",
+            )
+        with self.assertRaises(AuthorizationRequired):
+            self.facade.result(
+                host_b, interaction_id=candidate.interaction_id
+            )
+
+        # ``can_approve`` is a content hint, never a permission: a host that
+        # may only read still gets AuthorizationRequired from resolve.
+        read_only = self.access(
+            permissions=frozenset({"work.scan", "experience.read"})
+        )
+        read_only_detail = self.facade.candidate_detail(
+            read_only,
+            candidate_id=candidate.artifact_id,
+            artifact_version=1,
+        )
+        self.assertTrue(read_only_detail.can_approve)
+        with self.assertRaises(AuthorizationRequired):
+            self.facade.resolve(
+                read_only,
+                candidate_id=candidate.artifact_id,
+                decision="approve",
+                decision_id="decision:audit:read-only",
+            )
+
+        # The same candidate remains valid for its own host and permission.
+        approved = self.approve(candidate.artifact_id)
+        self.assertEqual("committed", approved.state)
+        self.assertIsNotNone(approved.receipt)
+
     def test_candidates_are_scoped_to_the_access_namespace(self) -> None:
         other_event = self.ingest_event(namespace=NS_B)
         other_work = self.work_for(other_event.event_id, namespace=NS_B)

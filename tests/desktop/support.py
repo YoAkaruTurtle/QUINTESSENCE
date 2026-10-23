@@ -30,6 +30,7 @@ for _path in (SRC_DIR, SIDECAR_DIR):
         sys.path.insert(0, str(_path))
 
 import framing  # noqa: E402
+from quintessence_pcs.store import CognitionStore  # noqa: E402
 
 NAMESPACE = "example.test.desktop.lab"
 HOST_INSTANCE = "host:desktop-lab"
@@ -39,6 +40,15 @@ POLICY_REF = "policy:collab.v1"
 PROVIDER = "synthetic"
 MODEL = "scripted-collab-v1"
 MODEL_KEY_ENV = "QUINTESSENCE_DESKTOP_LAB_MODEL_KEY"
+LAB_BELIEF_CLAIM = "capability:lab-file-read"
+REVIEW_PERMISSIONS = [
+    "work.scan",
+    "experience.read",
+    "review.generate",
+    "review.approve",
+    "review.reject",
+    "result.read",
+]
 
 COUNTED_TABLES = (
     "collab_interactions",
@@ -76,6 +86,115 @@ def reply_script(reply: str = "合成回答：已核对可披露材料。") -> l
     ]
 
 
+def review_proposal(
+    event_id: str,
+    *,
+    claim: str = LAB_BELIEF_CLAIM,
+    claim_type: str = "capability",
+    strength: str = "moderate",
+    strength_reason: str = "synthetic desktop review fixture",
+    scope: dict[str, Any] | None = None,
+    valid_until: str | None = None,
+) -> dict[str, Any]:
+    """One synthetic ``propose_belief`` output for the scripted review model."""
+
+    body = {
+        "claim": claim,
+        "claim_type": claim_type,
+        "evidence_links": [
+            {
+                "ref": {
+                    "ref_type": "event",
+                    "namespace": NAMESPACE,
+                    "event_id": event_id,
+                },
+                "relation": "supports",
+                "origin_group_id": f"event:{event_id}",
+                "applicability_reason": "synthetic desktop review fixture",
+            }
+        ],
+        "strength": strength,
+        "strength_reason": strength_reason,
+        "inference_basis": "observation",
+        "premise_refs": [],
+        "alternative_group_id": None,
+        "valid_until": valid_until,
+        "review_condition": "review when the synthetic fixture changes",
+    }
+    return {
+        "operation": "propose_belief",
+        "body": body,
+        "scope": {"scene": "lab.synthetic"} if scope is None else dict(scope),
+    }
+
+
+def lab_belief_record_id() -> str:
+    """The deterministic record id the Lab seed uses for its synthetic Belief."""
+
+    import uuid
+
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"desktop-lab-belief:{LAB_BELIEF_CLAIM}")
+    )
+
+
+def seed_work(
+    db_path: Path,
+    *,
+    managed: bool = True,
+    event_type: str = "CapabilityObserved:review",
+    privacy_class: str = "private",
+) -> dict[str, Any]:
+    """Create one real pending Work outside the sidecar, then close the store.
+
+    This is test-seeding of the trusted host's own Work (an operational
+    fixture), not an alternate review implementation.  A managed Work has the
+    exact production ``collab_work_control`` row; a legacy Work deliberately has
+    none.
+    """
+
+    store = CognitionStore.open(db_path)
+    try:
+        receipt = store.ingest_event(
+            namespace=NAMESPACE,
+            source_kind="host_observation",
+            source_instance="desktop-review-test",
+            source_event_id=f"review-source-{event_type}-{time.time_ns()}",
+            event_type=event_type,
+            payload={"text": "synthetic desktop review event"},
+            privacy_class=privacy_class,
+            observed_at=utc_now(),
+        )
+        works = [
+            item
+            for item in store.unfinished_work_for_event(NAMESPACE, receipt.event_id)
+        ]
+        if not works:
+            raise RuntimeError("the seeded event produced no pending Work")
+        work = works[0]
+        if managed:
+            store.register_work_control(
+                namespace=NAMESPACE,
+                work_id=work.work_id,
+                generation=0,
+            )
+        return {
+            "event_id": receipt.event_id,
+            "work_id": work.work_id,
+            "kind": work.kind,
+            "status": work.status,
+            "created_at": work.created_at,
+        }
+    finally:
+        store.close()
+
+
+def utc_now() -> str:
+    from quintessence_pcs.foundation.timeutil import utc_now_rfc3339
+
+    return utc_now_rfc3339()
+
+
 _UNSET = object()
 
 
@@ -90,6 +209,9 @@ def config_document(
     transport_kind: str = "scripted",
     max_question_chars: int = 8000,
     privacy_classes: list[str] | None = None,
+    purposes: list[str] | None = None,
+    review_permissions: list[str] | None = None,
+    review_script: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if query_plan is _UNSET:
         query_plan = {
@@ -104,6 +226,12 @@ def config_document(
             reply_script() if script is None else list(script)
         )
         transport["delay_ms"] = delay_ms
+        if review_script is not None:
+            transport["review_script"] = list(review_script)
+    if purposes is None:
+        purposes = ["consult", "reasoning"]
+        if review_permissions:
+            purposes.append("review")
     document: dict[str, Any] = {
         "schema": "desktop.host.v1",
         "app": {"profile": profile, "label": "QUINTESSENCE Lab"},
@@ -114,7 +242,7 @@ def config_document(
             "operator": OPERATOR,
             "access_ref": ACCESS_REF,
             "privacy_classes": privacy_classes or ["private"],
-            "purposes": ["consult", "reasoning"],
+            "purposes": purposes,
             "disclose": True,
             "retention": "standard",
             "policy_ref": POLICY_REF,
@@ -132,6 +260,8 @@ def config_document(
             "transport": transport,
         },
     }
+    if review_permissions is not None:
+        document["review"] = {"permissions": list(review_permissions)}
     if profile == "lab":
         document["lab"] = {
             "seed": True,
@@ -139,7 +269,7 @@ def config_document(
             "profile_version": "0.0.1",
             "authorization_ref": "authorization:desktop-lab-model",
             "belief": {
-                "claim": "capability:lab-file-read",
+                "claim": LAB_BELIEF_CLAIM,
                 "claim_type": "capability",
                 "strength": "strong",
                 "scope": {"scene": "lab.synthetic"},
@@ -456,6 +586,8 @@ class DesktopCase(unittest.TestCase):
                 )
             else:
                 path = self.config_path
+        if db_path is not None:
+            self.db_path = Path(db_path)
         process = BridgeProcess(
             config_path=path,
             executable=executable,
@@ -512,6 +644,7 @@ __all__ = [
     "COUNTED_TABLES",
     "DesktopCase",
     "HOST_INSTANCE",
+    "LAB_BELIEF_CLAIM",
     "MODEL",
     "MODEL_KEY_ENV",
     "NAMESPACE",
@@ -519,9 +652,14 @@ __all__ = [
     "POLICY_REF",
     "PROVIDER",
     "ProtocolFailure",
+    "REVIEW_PERMISSIONS",
     "config_document",
     "framing",
+    "lab_belief_record_id",
     "manifest",
     "reply_script",
+    "review_proposal",
+    "seed_work",
+    "utc_now",
     "write_config",
 ]

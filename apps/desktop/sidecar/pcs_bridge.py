@@ -36,7 +36,24 @@ from host_config import (
     load_config,
 )
 from locking import DataInstanceLock, DataLocked
-from runtime import DesktopRuntime, InputRegistrationError, RuntimeStartupError
+from runtime import (
+    DesktopRuntime,
+    InputRegistrationError,
+    ReviewRequestError,
+    RuntimeStartupError,
+)
+from quintessence_pcs.foundation.errors import (
+    AuthorizationRequired,
+    ContextStale,
+    CorruptStore,
+    DbBusy,
+    InvalidInput,
+    RecordNotFound,
+    RecordVersionConflict,
+    Redacted,
+    StateRevisionConflict,
+)
+from quintessence_pcs.store.errors import CandidateTransitionDenied
 
 LOGGER = logging.getLogger("quintessence.desktop.bridge")
 
@@ -56,23 +73,50 @@ ERROR_CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
 ERROR_DESTINATION_MISMATCH = "DESTINATION_MISMATCH"
 ERROR_INPUT_REGISTRATION = "INPUT_REGISTRATION_FAILED"
 ERROR_UNAVAILABLE = "SIDECAR_UNAVAILABLE"
+ERROR_AUTHORIZATION_REQUIRED = "AUTHORIZATION_REQUIRED"
+ERROR_REVISION_CONFLICT = "REVISION_CONFLICT"
+ERROR_CANDIDATE_STALE = "CANDIDATE_STALE"
+ERROR_CANDIDATE_VERSION_MISMATCH = "CANDIDATE_VERSION_MISMATCH"
+ERROR_CANDIDATE_EXISTS = "CANDIDATE_EXISTS"
+ERROR_WORK_ALREADY_RESOLVED = "WORK_ALREADY_RESOLVED"
+ERROR_WORK_NOT_PENDING = "WORK_NOT_PENDING"
+ERROR_LEGACY_WORK_READ_ONLY = "LEGACY_WORK_READ_ONLY"
+ERROR_UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
+ERROR_NOT_FOUND = "NOT_FOUND"
+ERROR_REDACTED = "REDACTED"
 
+REVIEW_READ_METHODS = frozenset(
+    {"review.work.list", "review.candidates.list", "review.candidate.detail"}
+)
+REVIEW_METHODS = frozenset(
+    {
+        *REVIEW_READ_METHODS,
+        "review.generate",
+        "review.resolve",
+        "review.result",
+    }
+)
 IMPLEMENTED_METHODS = frozenset(
-    {"app.info", "app.confirm_destination", "consult.interact", "bridge.ping"}
+    {
+        "app.info",
+        "app.confirm_destination",
+        "consult.interact",
+        "bridge.ping",
+        *REVIEW_METHODS,
+    }
 )
 
 #: Methods that exist in the long-term interaction vocabulary but are not
-#: implemented by C12b.  They are answered honestly instead of being faked.
+#: implemented by C12c.  They are answered honestly instead of being faked.
 RESERVED_METHODS = frozenset(
     {
         "consult.result",
         "consult.history",
         "consult.resume",
         "consult.cancel",
-        "review.generate",
         "review.commit",
-        "review.reject",
-        "review.result",
+        "review.cancel",
+        "review.history",
     }
 )
 
@@ -126,6 +170,44 @@ AUTHORITY_FIELDS = frozenset(
 #: ``destination_id`` is legitimate in ``app.confirm_destination`` but never in
 #: ``consult.interact``; the consult path adds it to the rejected set.
 _CONSULT_AUTHORITY_FIELDS = AUTHORITY_FIELDS | {"destination_id"}
+
+#: A review decision accepts no authority material.  ``candidate_id``,
+#: ``artifact_version`` and ``decision`` are the only decision inputs; the
+#: decision id, any Approval/grant, the candidate body and the model/provider
+#: are host-owned.
+_RESOLVE_AUTHORITY_FIELDS = AUTHORITY_FIELDS | {
+    "approval",
+    "approvals",
+    "authority",
+    "candidate_body",
+    "body",
+    "proposal",
+    "decision_id",
+    "decision_ref",
+    "grant_id",
+    "permissions",
+    "role",
+    "state_revision",
+    "token",
+    "reviewer",
+}
+
+#: ``review.result`` is the one method whose legitimate argument is an
+#: interaction id; every other method rejects a frontend-supplied one.
+_REVIEW_RESULT_AUTHORITY_FIELDS = AUTHORITY_FIELDS - {"interaction_id"}
+
+_WORK_LIST_KEYS = frozenset({"session_id"})
+_CANDIDATE_LIST_KEYS = frozenset({"session_id", "work_id", "generation"})
+_CANDIDATE_DETAIL_KEYS = frozenset(
+    {"session_id", "candidate_id", "artifact_version"}
+)
+_REVIEW_GENERATE_KEYS = frozenset(
+    {"session_id", "work_id", "event_id", "confirmed_destination_id"}
+)
+_REVIEW_RESOLVE_KEYS = frozenset(
+    {"session_id", "candidate_id", "artifact_version", "decision"}
+)
+_REVIEW_RESULT_KEYS = frozenset({"session_id", "interaction_id"})
 
 _CONSULT_KEYS = frozenset({"session_id", "question", "confirmed_destination_id"})
 _CONFIRM_KEYS = frozenset({"session_id", "destination_id"})
@@ -222,7 +304,7 @@ class Bridge:
         self._seen_lock = threading.Lock()
         self._seen_order: list[str] = []
         self._seen: set[str] = set()
-        self._consult_lock = threading.Lock()
+        self._model_lock = threading.Lock()
         self._confirm_lock = threading.Lock()
         self._confirmations: dict[tuple[str, str], str] = {}
         self._stopping = threading.Event()
@@ -364,7 +446,7 @@ class Bridge:
             self._send_error(
                 request_id,
                 ERROR_RESERVED,
-                f"{method} is reserved and not implemented in C12b",
+                f"{method} is reserved and not implemented in C12c",
             )
             return
         if method not in IMPLEMENTED_METHODS:
@@ -382,6 +464,9 @@ class Bridge:
             return
         if method == "app.confirm_destination":
             self._dispatch_confirm(request_id, params)
+            return
+        if method in REVIEW_METHODS:
+            self._dispatch_review(request_id, method, params)
             return
         self._dispatch_consult(request_id, params)
 
@@ -413,6 +498,13 @@ class Bridge:
         reason_code, reason_detail = self._reason()
         config = self.config
         authority = config.authority if config is not None else None
+        review_caps = self._review_capabilities()
+        review_reason = None
+        if not review_caps["read"]:
+            if self.runtime is not None:
+                review_reason = self.runtime.review_workspace_reason()
+            else:
+                review_reason = reason_code or "HOST_NOT_READY"
         return {
             "app": APP_NAME,
             "version": APP_VERSION,
@@ -441,13 +533,14 @@ class Bridge:
             ),
             "workspace": {
                 "consult": ready,
-                "review": False,
-                "review_reason": "C12C_NOT_IMPLEMENTED",
+                "review": review_caps["read"],
+                "review_reason": review_reason,
             },
             "capabilities": {
                 "consult": ready,
                 "confirm_destination": ready,
                 "input_registration": ready,
+                "review": review_caps,
             },
             "limits": {
                 "frame_bytes": framing.MAX_FRAME_BYTES,
@@ -464,9 +557,20 @@ class Bridge:
                 "schema_migrations": (
                     self.runtime.migrations_version if self.runtime is not None else 0
                 ),
-                "facade": "ConsultFacade",
+                "facade": "ConsultFacade + ReviewFacade",
             },
         }
+
+    def _review_capabilities(self) -> dict[str, bool]:
+        if self.runtime is None:
+            return {
+                "read": False,
+                "generate": False,
+                "approve": False,
+                "reject": False,
+                "result": False,
+            }
+        return self.runtime.review_capabilities()
 
     def _ping(self) -> dict[str, Any]:
         return {
@@ -678,7 +782,7 @@ class Bridge:
             )
             return
 
-        if not self._consult_lock.acquire(blocking=False):
+        if not self._model_lock.acquire(blocking=False):
             LOGGER.info("consult busy request_id=%s", request_id)
             self._send_error(
                 request_id,
@@ -689,7 +793,7 @@ class Bridge:
         try:
             self.worker.submit(lambda: self._run_consult(request_id, question))
         except BaseException:
-            self._consult_lock.release()
+            self._model_lock.release()
             raise
 
     def _run_consult(self, request_id: str, question: str) -> None:
@@ -725,7 +829,415 @@ class Bridge:
                 result_unknown=True,
             )
         finally:
-            self._consult_lock.release()
+            self._model_lock.release()
+
+    # ----------------------------------------------------------------- review
+
+    def _dispatch_review(
+        self, request_id: str, method: str, params: dict[str, Any]
+    ) -> None:
+        """Validate one ``review.*`` request, then run it on the DB worker.
+
+        The frontend supplies identities and the user's decision only.  Every
+        permission, host instance, destination confirmation, Approval/grant,
+        candidate body, model and provider stay host-owned.
+        """
+
+        if method == "review.generate" and "feedback" in params:
+            self._send_error(
+                request_id,
+                ERROR_INVALID_PARAMS,
+                "review.generate does not accept feedback",
+            )
+            return
+
+        allowed = {
+            "review.work.list": _WORK_LIST_KEYS,
+            "review.candidates.list": _CANDIDATE_LIST_KEYS,
+            "review.candidate.detail": _CANDIDATE_DETAIL_KEYS,
+            "review.generate": _REVIEW_GENERATE_KEYS,
+            "review.resolve": _REVIEW_RESOLVE_KEYS,
+            "review.result": _REVIEW_RESULT_KEYS,
+        }[method]
+        forbidden = {
+            "review.work.list": AUTHORITY_FIELDS,
+            "review.candidates.list": AUTHORITY_FIELDS,
+            "review.candidate.detail": AUTHORITY_FIELDS,
+            "review.generate": AUTHORITY_FIELDS,
+            "review.resolve": _RESOLVE_AUTHORITY_FIELDS,
+            "review.result": _REVIEW_RESULT_AUTHORITY_FIELDS,
+        }[method]
+        poisoned = sorted(forbidden.intersection(params))
+        if poisoned:
+            LOGGER.warning(
+                "review authority field rejected method=%s fields=%s request_id=%s",
+                method,
+                ",".join(poisoned),
+                request_id,
+            )
+            self._send_error(
+                request_id,
+                ERROR_AUTHORITY_FIELD,
+                "authority, approval and grant fields are host-owned",
+            )
+            return
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            self._send_error(
+                request_id,
+                ERROR_INVALID_PARAMS,
+                f"{method} accepts only {', '.join(sorted(allowed))}",
+            )
+            return
+
+        session_id = params.get("session_id")
+        if not _valid_id(session_id):
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "session_id is required")
+            return
+
+        if method == "review.candidates.list":
+            work_id = params.get("work_id")
+            if not _valid_id(work_id):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "work_id is required"
+                )
+                return
+            generation = params.get("generation")
+            if generation is not None and not _valid_generation(generation):
+                self._send_error(
+                    request_id,
+                    ERROR_INVALID_PARAMS,
+                    "generation must be a non-negative integer",
+                )
+                return
+        elif method == "review.candidate.detail":
+            if not _valid_id(params.get("candidate_id")):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "candidate_id is required"
+                )
+                return
+            if not _valid_version(params.get("artifact_version")):
+                self._send_error(
+                    request_id,
+                    ERROR_INVALID_PARAMS,
+                    "artifact_version must be a positive integer",
+                )
+                return
+        elif method == "review.generate":
+            if not _valid_id(params.get("work_id")):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "work_id is required"
+                )
+                return
+            if not _valid_id(params.get("event_id")):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "event_id is required"
+                )
+                return
+            confirmed = params.get("confirmed_destination_id")
+            if confirmed is not None and (
+                not isinstance(confirmed, str) or not confirmed
+            ):
+                self._send_error(
+                    request_id,
+                    ERROR_INVALID_PARAMS,
+                    "confirmed_destination_id must be a non-empty string or null",
+                )
+                return
+        elif method == "review.resolve":
+            if not _valid_id(params.get("candidate_id")):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "candidate_id is required"
+                )
+                return
+            if not _valid_version(params.get("artifact_version")):
+                self._send_error(
+                    request_id,
+                    ERROR_INVALID_PARAMS,
+                    "artifact_version must be a positive integer",
+                )
+                return
+            if params.get("decision") not in ("approve", "reject"):
+                self._send_error(
+                    request_id,
+                    ERROR_INVALID_PARAMS,
+                    "decision must be approve or reject",
+                )
+                return
+        elif method == "review.result":
+            if not _valid_id(params.get("interaction_id")):
+                self._send_error(
+                    request_id, ERROR_INVALID_PARAMS, "interaction_id is required"
+                )
+                return
+
+        if self.data_locked:
+            self._send_error(
+                request_id,
+                ERROR_DATA_LOCKED,
+                "another process owns this data instance",
+            )
+            return
+        if self.config is None or self.runtime is None or not self.runtime.ready:
+            self._send_error(
+                request_id, ERROR_HOST_NOT_READY, "the trusted host is not ready"
+            )
+            return
+        if session_id != self.session_id:
+            self._send_error(
+                request_id,
+                ERROR_SESSION_MISMATCH,
+                "the request belongs to a different host session",
+            )
+            return
+        if method == "review.generate":
+            failure = self._destination_confirmation_error(
+                params.get("confirmed_destination_id")
+            )
+            if failure is not None:
+                code, message = failure
+                self._send_error(request_id, code, message)
+                return
+
+        if self.worker is None:
+            self._send_error(
+                request_id, ERROR_HOST_NOT_READY, "the trusted host is not ready"
+            )
+            return
+
+        runtime = self.runtime
+        if method == "review.work.list":
+            self.worker.submit(
+                lambda: self._run_review_read(
+                    request_id, "review.work.list", runtime.review_work_list
+                )
+            )
+            return
+        if method == "review.candidates.list":
+            work_id = params.get("work_id")
+            generation = params.get("generation")
+            self.worker.submit(
+                lambda: self._run_review_read(
+                    request_id,
+                    "review.candidates.list",
+                    lambda: runtime.review_candidates(
+                        work_id=work_id, generation=generation
+                    ),
+                )
+            )
+            return
+        if method == "review.candidate.detail":
+            candidate_id = params.get("candidate_id")
+            artifact_version = params.get("artifact_version")
+            self.worker.submit(
+                lambda: self._run_review_read(
+                    request_id,
+                    "review.candidate.detail",
+                    lambda: runtime.review_candidate_detail(
+                        candidate_id=candidate_id,
+                        artifact_version=artifact_version,
+                    ),
+                )
+            )
+            return
+        if method == "review.result":
+            interaction_id = params.get("interaction_id")
+            self.worker.submit(
+                lambda: self._run_review_result(request_id, interaction_id)
+            )
+            return
+        if method == "review.generate":
+            work_id = params.get("work_id")
+            event_id = params.get("event_id")
+            if not self._model_lock.acquire(blocking=False):
+                self._send_error(
+                    request_id,
+                    ERROR_BUSY,
+                    "a model interaction is already running; it is not queued",
+                )
+                return
+            try:
+                self.worker.submit(
+                    lambda: self._run_review_generate(
+                        request_id, work_id, event_id
+                    )
+                )
+            except BaseException:
+                self._model_lock.release()
+                raise
+            return
+        # review.resolve
+        candidate_id = params.get("candidate_id")
+        artifact_version = params.get("artifact_version")
+        decision = params.get("decision")
+        if not self._model_lock.acquire(blocking=False):
+            self._send_error(
+                request_id,
+                ERROR_BUSY,
+                "a model interaction is already running; the decision was not submitted",
+            )
+            return
+        try:
+            self.worker.submit(
+                lambda: self._run_review_resolve(
+                    request_id, candidate_id, artifact_version, decision
+                )
+            )
+        except BaseException:
+            self._model_lock.release()
+            raise
+
+    def _destination_confirmation_error(
+        self, confirmed: Any
+    ) -> tuple[str, str] | None:
+        descriptor = self.config.destination if self.config is not None else None
+        if descriptor is None:
+            return ERROR_HOST_NOT_READY, "the trusted host has no destination"
+        if descriptor.confirmation_required:
+            if confirmed is None:
+                return (
+                    ERROR_CONFIRMATION_REQUIRED,
+                    "this external destination has not been confirmed in this session",
+                )
+            if confirmed != descriptor.destination_id:
+                return (
+                    ERROR_CONFIRMATION_REQUIRED,
+                    "the destination changed; confirm the current destination again",
+                )
+            with self._confirm_lock:
+                recorded = self._confirmations.get(
+                    (self.session_id, descriptor.destination_id)
+                )
+            if recorded is None:
+                return (
+                    ERROR_CONFIRMATION_REQUIRED,
+                    "no host confirmation record exists for this destination",
+                )
+        elif confirmed is not None and confirmed != descriptor.destination_id:
+            return (
+                ERROR_DESTINATION_MISMATCH,
+                "the confirmed destination does not match the current destination",
+            )
+        return None
+
+    def _run_review_read(
+        self, request_id: str, method: str, call: Callable[[], dict[str, Any]]
+    ) -> None:
+        try:
+            result = call()
+        except ReviewRequestError as exc:
+            self._send_error(request_id, exc.code, exc.message)
+        except BaseException as exc:  # noqa: BLE001 - a read must not kill the worker
+            self._review_failure(request_id, method, exc, unknown=False)
+        else:
+            self._send_ok(request_id, result)
+
+    def _run_review_generate(
+        self, request_id: str, work_id: str, event_id: str
+    ) -> None:
+        started = time.monotonic()
+        LOGGER.info("review generate start request_id=%s", request_id)
+        assert self.runtime is not None
+        try:
+            result = self.runtime.review_generate(
+                work_id=work_id, event_id=event_id
+            )
+            self._send_ok(request_id, result)
+            LOGGER.info(
+                "review generate done request_id=%s state=%s elapsed_ms=%.3f",
+                request_id,
+                result.get("state"),
+                (time.monotonic() - started) * 1000,
+            )
+        except ReviewRequestError as exc:
+            self._send_error(request_id, exc.code, exc.message)
+            LOGGER.info(
+                "review generate refused request_id=%s code=%s",
+                request_id,
+                exc.code,
+            )
+        except BaseException as exc:  # noqa: BLE001 - never crash the reader
+            self._review_failure(
+                request_id, "review.generate", exc, unknown=True
+            )
+        finally:
+            self._model_lock.release()
+
+    def _run_review_resolve(
+        self,
+        request_id: str,
+        candidate_id: str,
+        artifact_version: int,
+        decision: str,
+    ) -> None:
+        started = time.monotonic()
+        LOGGER.info(
+            "review resolve start request_id=%s decision=%s",
+            request_id,
+            decision,
+        )
+        assert self.runtime is not None
+        try:
+            result = self.runtime.review_resolve(
+                candidate_id=candidate_id,
+                artifact_version=artifact_version,
+                decision=decision,
+            )
+            self._send_ok(request_id, result)
+            LOGGER.info(
+                "review resolve done request_id=%s decision=%s state=%s elapsed_ms=%.3f",
+                request_id,
+                decision,
+                result.get("state"),
+                (time.monotonic() - started) * 1000,
+            )
+        except ReviewRequestError as exc:
+            self._send_error(request_id, exc.code, exc.message)
+            LOGGER.info(
+                "review resolve refused request_id=%s code=%s",
+                request_id,
+                exc.code,
+            )
+        except BaseException as exc:  # noqa: BLE001 - never crash the reader
+            self._review_failure(
+                request_id, "review.resolve", exc, unknown=True
+            )
+        finally:
+            self._model_lock.release()
+
+    def _run_review_result(self, request_id: str, interaction_id: str) -> None:
+        assert self.runtime is not None
+        try:
+            result = self.runtime.review_result(interaction_id=interaction_id)
+        except ReviewRequestError as exc:
+            self._send_error(request_id, exc.code, exc.message)
+        except BaseException as exc:  # noqa: BLE001 - never crash the reader
+            self._review_failure(
+                request_id, "review.result", exc, unknown=True
+            )
+        else:
+            self._send_ok(request_id, result)
+
+    def _review_failure(
+        self,
+        request_id: str,
+        method: str,
+        exc: BaseException,
+        *,
+        unknown: bool,
+    ) -> None:
+        code, message, result_unknown = _map_review_error(
+            exc, default_unknown=unknown
+        )
+        LOGGER.warning(
+            "review method failed method=%s code=%s class=%s",
+            method,
+            code,
+            type(exc).__name__,
+        )
+        self._send_error(
+            request_id, code, message, result_unknown=result_unknown
+        )
 
     # ------------------------------------------------------------------ ids
 
@@ -808,6 +1320,69 @@ def _valid_id(value: Any) -> bool:
         isinstance(value, str)
         and 1 <= len(value) <= 128
         and all(char in _ID_CHARS for char in value)
+    )
+
+
+def _valid_version(value: Any) -> bool:
+    return type(value) is int and value >= 1
+
+
+def _valid_generation(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _map_review_error(
+    exc: BaseException, *, default_unknown: bool
+) -> tuple[str, str, bool]:
+    """Map one trusted-host failure to a public review label.
+
+    Known refusals are definite failures.  An unexpected failure on a mutating
+    call (generate/resolve) or on result recovery is reported as unknown: a
+    write may have happened and the UI must refresh/recover, never retry.
+    """
+
+    if isinstance(exc, AuthorizationRequired):
+        return (
+            ERROR_AUTHORIZATION_REQUIRED,
+            "当前操作者缺少审查权限或许可；没有提交任何内容",
+            False,
+        )
+    if isinstance(exc, (StateRevisionConflict, RecordVersionConflict)):
+        return (
+            ERROR_REVISION_CONFLICT,
+            "目标版本已变化，需要重新获取权威状态",
+            False,
+        )
+    if isinstance(exc, ContextStale):
+        return (
+            ERROR_CANDIDATE_STALE,
+            "上下文或候选已过期，需要刷新候选",
+            False,
+        )
+    if isinstance(exc, CandidateTransitionDenied):
+        return (
+            ERROR_CANDIDATE_STALE,
+            "候选状态已变化，需要刷新候选",
+            False,
+        )
+    if isinstance(exc, RecordNotFound):
+        return (ERROR_NOT_FOUND, "未找到对应的审查记录", False)
+    if isinstance(exc, Redacted):
+        return (ERROR_REDACTED, "该内容受删除或隐私屏障保护", False)
+    if isinstance(exc, InvalidInput):
+        return (ERROR_INVALID_PARAMS, "审查请求参数不被接受", False)
+    if isinstance(exc, DbBusy):
+        return ("DB_BUSY", "宿主数据库忙；没有取得权威结果", False)
+    if isinstance(exc, CorruptStore):
+        return (
+            ERROR_INTERNAL,
+            "宿主内部状态不一致；结果未知，请刷新权威状态",
+            default_unknown,
+        )
+    return (
+        ERROR_INTERNAL,
+        "审查操作在可信宿主内失败；结果未知，请刷新权威状态",
+        default_unknown,
     )
 
 

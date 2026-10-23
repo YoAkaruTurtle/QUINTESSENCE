@@ -80,11 +80,18 @@ function host(options = {}) {
       reason_detail: ready ? null : "no private configuration",
     },
     destination: destination(external),
-    workspace: { consult: ready, review: false, review_reason: "C12C_NOT_IMPLEMENTED" },
+    workspace: { consult: ready, review: false, review_reason: "REVIEW_NOT_CONFIGURED" },
     capabilities: {
       consult: ready,
       confirm_destination: ready,
       input_registration: ready,
+      review: {
+        read: false,
+        generate: false,
+        approve: false,
+        reject: false,
+        result: false,
+      },
     },
     limits: {
       frame_bytes: 1048576,

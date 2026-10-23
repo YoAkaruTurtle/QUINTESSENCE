@@ -93,23 +93,25 @@ impl HostSession {
             .unwrap_or(false)
     }
 
+    pub fn validate_session(&self, session_id: &str) -> Result<(), HostError> {
+        let current_session = self
+            .session_id()
+            .ok_or_else(|| HostError::new("HOST_NOT_READY", "宿主会话尚未就绪"))?;
+        if session_id != current_session {
+            return Err(HostError::new("SESSION_MISMATCH", "请求属于另一个宿主会话"));
+        }
+        Ok(())
+    }
+
     pub fn validate_consult(
         &self,
         session_id: &str,
         confirmed_destination_id: Option<&str>,
     ) -> Result<(), HostError> {
-        let current_session = self.session_id().ok_or_else(|| {
-            HostError::new("HOST_NOT_READY", "宿主会话尚未就绪")
-        })?;
-        if session_id != current_session {
-            return Err(HostError::new(
-                "SESSION_MISMATCH",
-                "请求属于另一个宿主会话",
-            ));
-        }
-        let destination = self.destination_id().ok_or_else(|| {
-            HostError::new("HOST_NOT_READY", "宿主尚无可用的目的地")
-        })?;
+        self.validate_session(session_id)?;
+        let destination = self
+            .destination_id()
+            .ok_or_else(|| HostError::new("HOST_NOT_READY", "宿主尚无可用的目的地"))?;
         if self.confirmation_required() {
             match confirmed_destination_id {
                 None => Err(HostError::new(
@@ -140,18 +142,10 @@ impl HostSession {
         session_id: &str,
         destination_id: &str,
     ) -> Result<(), HostError> {
-        let current_session = self.session_id().ok_or_else(|| {
-            HostError::new("HOST_NOT_READY", "宿主会话尚未就绪")
-        })?;
-        if session_id != current_session {
-            return Err(HostError::new(
-                "SESSION_MISMATCH",
-                "确认属于另一个宿主会话",
-            ));
-        }
-        let current = self.destination_id().ok_or_else(|| {
-            HostError::new("HOST_NOT_READY", "宿主尚无可用的目的地")
-        })?;
+        self.validate_session(session_id)?;
+        let current = self
+            .destination_id()
+            .ok_or_else(|| HostError::new("HOST_NOT_READY", "宿主尚无可用的目的地"))?;
         if destination_id != current {
             return Err(HostError::new(
                 "DESTINATION_MISMATCH",
@@ -205,19 +199,13 @@ mod tests {
         );
         assert_eq!(
             state
-                .validate_consult(
-                    "11111111-1111-4111-8111-111111111111",
-                    Some("sha256:other")
-                )
+                .validate_consult("11111111-1111-4111-8111-111111111111", Some("sha256:other"))
                 .unwrap_err()
                 .code,
             "CONFIRMATION_REQUIRED"
         );
         assert!(state
-            .validate_consult(
-                "11111111-1111-4111-8111-111111111111",
-                Some("sha256:abc")
-            )
+            .validate_consult("11111111-1111-4111-8111-111111111111", Some("sha256:abc"))
             .is_ok());
     }
 
@@ -229,10 +217,7 @@ mod tests {
             .is_ok());
         assert_eq!(
             state
-                .validate_consult(
-                    "11111111-1111-4111-8111-111111111111",
-                    Some("sha256:other")
-                )
+                .validate_consult("11111111-1111-4111-8111-111111111111", Some("sha256:other"))
                 .unwrap_err()
                 .code,
             "DESTINATION_MISMATCH"
@@ -251,10 +236,22 @@ mod tests {
         );
         assert_eq!(
             state
-                .validate_confirm(
-                    "22222222-2222-4222-8222-222222222222",
-                    "sha256:abc"
-                )
+                .validate_confirm("22222222-2222-4222-8222-222222222222", "sha256:abc")
+                .unwrap_err()
+                .code,
+            "SESSION_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn review_reads_require_only_the_current_session() {
+        let state = session(true);
+        assert!(state
+            .validate_session("11111111-1111-4111-8111-111111111111")
+            .is_ok());
+        assert_eq!(
+            state
+                .validate_session("22222222-2222-4222-8222-222222222222")
                 .unwrap_err()
                 .code,
             "SESSION_MISMATCH"
@@ -266,19 +263,13 @@ mod tests {
         let state = session(true);
         assert_eq!(
             state
-                .validate_confirm(
-                    "11111111-1111-4111-8111-111111111111",
-                    "sha256:other"
-                )
+                .validate_confirm("11111111-1111-4111-8111-111111111111", "sha256:other")
                 .unwrap_err()
                 .code,
             "DESTINATION_MISMATCH"
         );
         assert!(state
-            .validate_confirm(
-                "11111111-1111-4111-8111-111111111111",
-                "sha256:abc"
-            )
+            .validate_confirm("11111111-1111-4111-8111-111111111111", "sha256:abc")
             .is_ok());
     }
 }

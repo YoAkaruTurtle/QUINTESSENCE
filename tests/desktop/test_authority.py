@@ -66,7 +66,10 @@ class AuthorityTests(DesktopCase):
         self.assertTrue(info["host"]["ready"])
         self.assertEqual(info["protocol"], "desktop.v1")
         self.assertEqual(info["workspace"]["review"], False)
-        self.assertEqual(info["workspace"]["review_reason"], "C12C_NOT_IMPLEMENTED")
+        self.assertEqual(
+            info["workspace"]["review_reason"], "REVIEW_NOT_CONFIGURED"
+        )
+        self.assertFalse(info["capabilities"]["review"]["read"])
         self.assertTrue(info["destination"]["confirmation_required"])
         self.assertTrue(info["destination"]["external"])
         self.assertNotIn("127.0.0.1", text)
@@ -76,7 +79,18 @@ class AuthorityTests(DesktopCase):
         self.assertIsNone(re.search(r"lab-[0-9a-f]{40,}", text))
         self.assertEqual(
             sorted(info["methods"]),
-            ["app.confirm_destination", "app.info", "bridge.ping", "consult.interact"],
+            [
+                "app.confirm_destination",
+                "app.info",
+                "bridge.ping",
+                "consult.interact",
+                "review.candidate.detail",
+                "review.candidates.list",
+                "review.generate",
+                "review.resolve",
+                "review.result",
+                "review.work.list",
+            ],
         )
 
     def test_authority_fields_are_rejected_before_any_write(self) -> None:
@@ -154,10 +168,9 @@ class AuthorityTests(DesktopCase):
             "consult.history",
             "consult.resume",
             "consult.cancel",
-            "review.generate",
             "review.commit",
-            "review.reject",
-            "review.result",
+            "review.cancel",
+            "review.history",
         ):
             reply = process.request(method, {"interaction_id": "x"})
             self.assertFalse(reply["ok"], method)

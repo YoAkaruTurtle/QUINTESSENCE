@@ -82,6 +82,7 @@ export type UiAction =
   | { type: "confirm-open" }
   | { type: "confirm-cancel" }
   | { type: "confirm-accepted" }
+  | { type: "destination-confirmed"; destinationId: string }
   | { type: "result"; result: ConsultResult }
   | { type: "error"; error: BridgeError }
   | { type: "new-question" }
@@ -196,6 +197,14 @@ export function reduce(state: UiState, action: UiAction): UiState {
         result: null,
         error: null,
         notice: null,
+      };
+    }
+    case "destination-confirmed": {
+      return {
+        ...state,
+        confirmedDestinationId: action.destinationId,
+        confirmPending: false,
+        error: null,
       };
     }
     case "result": {

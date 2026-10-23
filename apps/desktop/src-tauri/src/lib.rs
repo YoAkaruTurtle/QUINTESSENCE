@@ -3,9 +3,9 @@
 //! Trusted-host boundary: Rust is the single application process, resolves and
 //! spawns the installed one-folder Python sidecar, owns its lifecycle and
 //! framed stdio, re-reads `app.info` before each action and exposes only
-//! `app.info`, `app.confirm_destination`, `consult.interact` and
-//! `bridge.ping` to the WebView.  The WebView has no shell, filesystem, HTTP or
-//! process capability.
+//! `app.info`, `app.confirm_destination`, `consult.interact`, the six
+//! `review.*` reads/decisions and `bridge.ping` to the WebView.  The WebView has
+//! no shell, filesystem, HTTP or process capability.
 
 mod commands;
 mod paths;
@@ -117,6 +117,12 @@ pub fn run() {
             commands::bridge_ping,
             commands::confirm_destination,
             commands::consult_interact,
+            commands::review_work_list,
+            commands::review_candidates,
+            commands::review_candidate_detail,
+            commands::review_generate,
+            commands::review_resolve,
+            commands::review_result,
             commands::set_ai_display_name
         ]);
 
@@ -127,11 +133,7 @@ pub fn run() {
     application.run(|handle, event| {
         if let RunEvent::Exit = event {
             let state = handle.state::<AppState>();
-            let manager = state
-                .manager
-                .lock()
-                .ok()
-                .and_then(|guard| guard.clone());
+            let manager = state.manager.lock().ok().and_then(|guard| guard.clone());
             if let Some(manager) = manager {
                 manager.shutdown();
             }

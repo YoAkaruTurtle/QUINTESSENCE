@@ -31,12 +31,57 @@ import {
   type UiAction,
   type UiState,
 } from "./state";
+import {
+  approveEnabled,
+  buildGenerateParams,
+  buildResolveParams,
+  buildResultParams,
+  candidateStatusLabel,
+  candidateStatusTone,
+  canStartResolve,
+  diffFieldLabel,
+  eligibilityLabel,
+  formatReviewValue,
+  generateBlockReason,
+  generateEnabled,
+  INITIAL_REVIEW_STATE,
+  isLegacySelection,
+  operationLabel,
+  receiptOperationLabel,
+  receiptVisible,
+  recoveryInteractionId,
+  rejectEnabled,
+  reviewAvailable,
+  reviewCanRecover,
+  reviewCaps,
+  reviewErrorText,
+  reviewReasonLabel,
+  reviewReduce,
+  reviewViewLabel,
+  resolveBlockReason,
+  sourceAvailabilityLabel,
+  sourceKindLabel,
+  sourceReasonLabel,
+  sourceRefId,
+  sourceRefLabel,
+  splitDiff,
+  type ReviewAction,
+  type ReviewDecision,
+  type ReviewState,
+} from "./review";
 import type {
   AppInfo,
   BridgeError,
   ConfirmResult,
   ConsultResult,
   HostReply,
+  LegacyWorkItem,
+  ReviewCandidateDetail,
+  ReviewCandidateList,
+  ReviewCandidateSummary,
+  ReviewView,
+  ReviewWorkItem,
+  ReviewWorkList,
 } from "./types";
 
 // --------------------------------------------------------------------------
@@ -67,6 +112,59 @@ async function consultInteract(params: {
 
 async function setAiDisplayName(name: string): Promise<HostReply> {
   return (await invoke("set_ai_display_name", { name })) as HostReply;
+}
+
+async function reviewWorkList(sessionId: string): Promise<HostReply> {
+  return (await invoke("review_work_list", { sessionId })) as HostReply;
+}
+
+async function reviewCandidates(
+  sessionId: string,
+  workId: string,
+  generation: number | null = null,
+): Promise<HostReply> {
+  return (await invoke("review_candidates", {
+    sessionId,
+    workId,
+    generation,
+  })) as HostReply;
+}
+
+async function reviewCandidateDetail(
+  sessionId: string,
+  candidateId: string,
+  artifactVersion: number,
+): Promise<HostReply> {
+  return (await invoke("review_candidate_detail", {
+    sessionId,
+    candidateId,
+    artifactVersion,
+  })) as HostReply;
+}
+
+async function reviewGenerate(params: {
+  sessionId: string;
+  workId: string;
+  eventId: string;
+  confirmedDestinationId: string | null;
+}): Promise<HostReply> {
+  return (await invoke("review_generate", params)) as HostReply;
+}
+
+async function reviewResolve(params: {
+  sessionId: string;
+  candidateId: string;
+  artifactVersion: number;
+  decision: ReviewDecision;
+}): Promise<HostReply> {
+  return (await invoke("review_resolve", params)) as HostReply;
+}
+
+async function reviewResult(params: {
+  sessionId: string;
+  interactionId: string;
+}): Promise<HostReply> {
+  return (await invoke("review_result", params)) as HostReply;
 }
 
 function invokeError(error: unknown): BridgeError {
@@ -107,6 +205,40 @@ function isConsultResult(value: unknown): value is ConsultResult {
   );
 }
 
+function isReviewWorkList(value: unknown): value is ReviewWorkList {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.managed) &&
+    Array.isArray(value.legacy)
+  );
+}
+
+function isReviewCandidateList(value: unknown): value is ReviewCandidateList {
+  return isRecord(value) && Array.isArray(value.candidates);
+}
+
+function isReviewCandidateDetail(value: unknown): value is ReviewCandidateDetail {
+  return (
+    isRecord(value) &&
+    isRecord(value.candidate) &&
+    typeof value.candidate.candidate_id === "string" &&
+    typeof value.candidate.artifact_version === "number" &&
+    typeof value.can_approve === "boolean" &&
+    typeof value.can_reject === "boolean" &&
+    Array.isArray(value.diff) &&
+    Array.isArray(value.sources)
+  );
+}
+
+function isReviewView(value: unknown): value is ReviewView {
+  return (
+    isRecord(value) &&
+    typeof value.state === "string" &&
+    typeof value.redacted === "boolean" &&
+    "receipt" in value
+  );
+}
+
 function replyError(reply: HostReply): BridgeError {
   return (
     reply.error ?? {
@@ -122,11 +254,14 @@ function replyError(reply: HostReply): BridgeError {
 // --------------------------------------------------------------------------
 
 let state: UiState = INITIAL_STATE;
+let review: ReviewState = INITIAL_REVIEW_STATE;
 let workspace: "consult" | "review" = "consult";
 let composing = false;
 let drawerWasOpen = false;
 let drawerTrigger: HTMLElement | null = null;
 let toastTimer: number | null = null;
+let reviewRefreshing = false;
+let reviewModalWasOpen = false;
 
 const root = document.getElementById("app") as HTMLElement;
 
@@ -153,6 +288,8 @@ interface Shell {
   announcer: HTMLElement;
   consultTab: HTMLButtonElement;
   reviewTab: HTMLButtonElement;
+  reviewOverlay: HTMLElement;
+  reviewModal: HTMLElement;
 }
 
 let shell: Shell;
@@ -336,8 +473,36 @@ function buildShell(): void {
     class: "visually-hidden",
     attrs: { id: "status-announcer", role: "status", "aria-live": "polite" },
   });
+  const reviewModal = el("div", {
+    class: "review-modal",
+    attrs: {
+      id: "review-modal",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "review-modal-title",
+    },
+  });
+  const reviewOverlay = el("div", {
+    class: "review-overlay hidden",
+    attrs: { id: "review-overlay" },
+    children: [reviewModal],
+  });
+  reviewOverlay.addEventListener("click", (event) => {
+    if (event.target === reviewOverlay) {
+      closeReviewModal();
+    }
+  });
 
-  root.append(topbar, main, footer, drawerBackdrop, drawer, toast, announcer);
+  root.append(
+    topbar,
+    main,
+    footer,
+    drawerBackdrop,
+    drawer,
+    reviewOverlay,
+    toast,
+    announcer,
+  );
   drawerClose.addEventListener("click", () => closeDrawer());
   drawerBackdrop.addEventListener("click", () => closeDrawer());
   document.addEventListener("keydown", onGlobalKeydown);
@@ -365,6 +530,8 @@ function buildShell(): void {
     announcer,
     consultTab,
     reviewTab,
+    reviewOverlay,
+    reviewModal,
   };
 }
 
@@ -384,6 +551,11 @@ function brandMark(size: "sm" | "lg"): HTMLElement {
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && isReviewModalOpen()) {
+    event.preventDefault();
+    closeReviewModal();
+    return;
+  }
   if (event.key === "Escape" && state.drawer.open) {
     event.preventDefault();
     closeDrawer();
@@ -420,15 +592,21 @@ function render(): void {
   renderMain();
   syncComposer();
   renderDrawer();
+  renderReviewOverlay();
   root.setAttribute("data-phase", state.phase);
   root.setAttribute("data-workspace", workspace);
+  root.setAttribute("data-review-screen", review.screen);
+  root.setAttribute("data-review-tab", review.tab);
   root.setAttribute("data-host-ready", state.host?.host.ready ? "true" : "false");
   root.setAttribute(
     "data-confirmed",
     state.destination && isConfirmed(state) ? "true" : "false",
   );
   root.setAttribute("data-destination", state.destination?.destination_id ?? "");
-  shell.announcer.textContent = `${workspace === "review" ? "Review" : "Consult"} · ${phaseTitle(state.phase)}`;
+  shell.announcer.textContent =
+    workspace === "review"
+      ? `Review · ${review.screen}`
+      : `Consult · ${phaseTitle(state.phase)}`;
 }
 
 function syncTopbar(): void {
@@ -481,23 +659,34 @@ function switchWorkspace(next: "consult" | "review"): void {
   }
   workspace = next;
   state = reduce(state, { type: "drawer-close" });
+  if (next === "review") {
+    closeReviewModal();
+  }
   render();
   if (next === "consult") {
     window.setTimeout(() => shell.textarea.focus({ preventScroll: true }), 0);
   } else {
     shell.main.focus({ preventScroll: true });
+    void ensureReviewLoaded();
   }
 }
 
 function renderMain(): void {
   clear(shell.main);
-  const conversation = el("div", { class: "conversation" });
-  const inner = el("div", { class: "conversation-inner" });
+  const conversation = el("div", {
+    class: workspace === "review" ? "conversation conversation-review" : "conversation",
+  });
+  const inner = el("div", {
+    class:
+      workspace === "review"
+        ? "conversation-inner review-inner"
+        : "conversation-inner",
+  });
   conversation.appendChild(inner);
   shell.main.appendChild(conversation);
 
   if (workspace === "review") {
-    inner.appendChild(reviewPlaceholder());
+    inner.appendChild(reviewWorkspace());
     return;
   }
 
@@ -890,37 +1079,2107 @@ function busyCard(): HTMLElement {
   });
 }
 
-function reviewPlaceholder(): HTMLElement {
+// --------------------------------------------------------------------------
+// review workspace
+// --------------------------------------------------------------------------
+
+function applyReview(action: ReviewAction): void {
+  review = reviewReduce(review, action);
+  render();
+}
+
+function reviewSession(): string {
+  return state.host?.session_id ?? "";
+}
+
+function reviewInvalid(what: string): BridgeError {
+  return {
+    code: "HOST_INTERNAL",
+    message: `宿主返回了无法识别的${what}`,
+    result_unknown: false,
+  };
+}
+
+async function ensureReviewLoaded(): Promise<void> {
+  if (workspace !== "review" || review.loaded || review.loading) {
+    return;
+  }
+  if (!reviewAvailable(state.host)) {
+    return;
+  }
+  await loadReviewWorks();
+}
+
+async function loadReviewWorks(): Promise<void> {
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  applyReview({ type: "works-loading" });
+  let reply: HostReply;
+  try {
+    reply = await reviewWorkList(session);
+  } catch (error) {
+    applyReview({ type: "works-error", error: invokeError(error) });
+    return;
+  }
+  if (!reply.ok) {
+    const error = replyError(reply);
+    applyReview({ type: "works-error", error });
+    if (
+      error.code === "SESSION_MISMATCH" ||
+      error.code === "HOST_NOT_READY" ||
+      error.code === "DATA_LOCKED"
+    ) {
+      await refreshHost();
+    }
+    return;
+  }
+  if (!isReviewWorkList(reply.result)) {
+    applyReview({ type: "works-error", error: reviewInvalid("工作列表") });
+    return;
+  }
+  applyReview({
+    type: "works-loaded",
+    managed: reply.result.managed,
+    legacy: reply.result.legacy,
+  });
+}
+
+async function loadReviewCandidates(workId: string): Promise<void> {
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  applyReview({ type: "candidates-loading" });
+  let reply: HostReply;
+  try {
+    reply = await reviewCandidates(session, workId, null);
+  } catch (error) {
+    if (review.selectedWorkId === workId) {
+      applyReview({ type: "candidates-error", error: invokeError(error) });
+    }
+    return;
+  }
+  if (review.selectedWorkId !== workId) {
+    return;
+  }
+  if (!reply.ok) {
+    applyReview({ type: "candidates-error", error: replyError(reply) });
+    return;
+  }
+  if (!isReviewCandidateList(reply.result)) {
+    applyReview({
+      type: "candidates-error",
+      error: reviewInvalid("候选列表"),
+    });
+    return;
+  }
+  applyReview({
+    type: "candidates-loaded",
+    candidates: reply.result.candidates,
+  });
+}
+
+async function loadReviewDetail(
+  candidate: ReviewCandidateSummary,
+): Promise<void> {
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  applyReview({ type: "detail-loading" });
+  let reply: HostReply;
+  try {
+    reply = await reviewCandidateDetail(
+      session,
+      candidate.candidate_id,
+      candidate.artifact_version,
+    );
+  } catch (error) {
+    if (
+      review.selectedCandidateId === candidate.candidate_id &&
+      review.selectedVersion === candidate.artifact_version
+    ) {
+      applyReview({ type: "detail-error", error: invokeError(error) });
+    }
+    return;
+  }
+  if (
+    review.selectedCandidateId !== candidate.candidate_id ||
+    review.selectedVersion !== candidate.artifact_version
+  ) {
+    return;
+  }
+  if (!reply.ok) {
+    applyReview({ type: "detail-error", error: replyError(reply) });
+    return;
+  }
+  if (!isReviewCandidateDetail(reply.result)) {
+    applyReview({ type: "detail-error", error: reviewInvalid("候选详情") });
+    return;
+  }
+  applyReview({ type: "detail-loaded", detail: reply.result });
+}
+
+async function refreshReviewData(): Promise<void> {
+  if (reviewRefreshing) {
+    return;
+  }
+  reviewRefreshing = true;
+  try {
+    const work = review.selectedWork;
+    const legacy = review.selectedLegacy;
+    const candidate =
+      review.selectedCandidateId === null
+        ? null
+        : review.candidates.find(
+            (item) => item.candidate_id === review.selectedCandidateId,
+          ) ?? null;
+    await loadReviewWorks();
+    if (work && review.managed.some((item) => item.work_id === work.work_id)) {
+      await loadReviewCandidates(work.work_id);
+    } else if (
+      legacy &&
+      review.legacy.some((item) => item.work_id === legacy.work_id)
+    ) {
+      applyReview({ type: "legacy-selected", work: legacy });
+    }
+    if (candidate && review.selectedCandidateId === candidate.candidate_id) {
+      const refreshed = review.candidates.find(
+        (item) =>
+          item.candidate_id === candidate.candidate_id &&
+          item.artifact_version === candidate.artifact_version,
+      );
+      if (refreshed) {
+        await loadReviewDetail(refreshed);
+      }
+    }
+  } finally {
+    reviewRefreshing = false;
+    applyReview({ type: "refresh-consumed" });
+  }
+}
+
+async function afterReviewError(
+  error: BridgeError,
+  kind: "generate" | "resolve" | "result",
+): Promise<void> {
+  if (error.result_unknown) {
+    const interactionId = review.lastInteractionId;
+    if (interactionId && reviewCaps(state.host).result) {
+      await performReviewResult(interactionId, true);
+    } else {
+      await refreshReviewData();
+    }
+    return;
+  }
+  if (
+    error.code === "REVISION_CONFLICT" ||
+    error.code === "CANDIDATE_STALE" ||
+    error.code === "CANDIDATE_VERSION_MISMATCH" ||
+    error.code === "NOT_FOUND" ||
+    error.code === "REDACTED" ||
+    error.code === "CANDIDATE_EXISTS" ||
+    error.code === "WORK_ALREADY_RESOLVED" ||
+    error.code === "UNSUPPORTED_VERSION" ||
+    error.code === "WORK_NOT_PENDING" ||
+    error.code === "LEGACY_WORK_READ_ONLY" ||
+    error.code === "AUTHORIZATION_REQUIRED"
+  ) {
+    await refreshReviewData();
+    if (error.code === "AUTHORIZATION_REQUIRED") {
+      await refreshHost();
+    }
+  }
+  if (kind === "generate" && error.code === "CANDIDATE_EXISTS") {
+    applyReview({ type: "note", message: reviewErrorText(error) });
+  }
+}
+
+function selectManagedWork(work: ReviewWorkItem): void {
+  applyReview({ type: "work-selected", work });
+  void loadReviewCandidates(work.work_id);
+}
+
+function selectLegacyWork(work: LegacyWorkItem): void {
+  applyReview({ type: "legacy-selected", work });
+}
+
+function selectReviewCandidate(candidate: ReviewCandidateSummary): void {
+  applyReview({ type: "candidate-selected", candidate });
+  void loadReviewDetail(candidate);
+}
+
+function backToReviewWorks(): void {
+  applyReview({ type: "works-back" });
+}
+
+function backToCandidates(): void {
+  if (review.outcome) {
+    applyReview({ type: "outcome-dismiss" });
+    return;
+  }
+  applyReview({ type: "note", message: null });
+  review = {
+    ...review,
+    screen:
+      review.selectedWork || review.selectedLegacy ? "candidates" : "works",
+    detail: null,
+    detailError: null,
+    selectedCandidateId: null,
+    selectedVersion: null,
+  };
+  render();
+}
+
+function confirmedDestinationId(): string | null {
+  const destination = state.destination;
+  if (!destination) {
+    return null;
+  }
+  return state.confirmedDestinationId === destination.destination_id
+    ? destination.destination_id
+    : null;
+}
+
+function openReviewGenerate(): void {
+  const reason = generateBlockReason(review, state.host);
+  if (reason !== null) {
+    applyReview({ type: "note", message: reason });
+    return;
+  }
+  if (needsConfirmation(state)) {
+    applyReview({ type: "generate-confirm", open: true });
+    return;
+  }
+  void performReviewGenerate();
+}
+
+async function confirmReviewGenerate(): Promise<void> {
+  const destination = state.destination;
+  const session = reviewSession();
+  if (!destination || !session) {
+    return;
+  }
+  let reply: HostReply;
+  try {
+    reply = await confirmDestination(session, destination.destination_id);
+  } catch (error) {
+    applyReview({ type: "action-error", error: invokeError(error), kind: "generate" });
+    return;
+  }
+  if (!reply.ok) {
+    applyReview({
+      type: "action-error",
+      error: replyError(reply),
+      kind: "generate",
+    });
+    return;
+  }
+  state = reduce(state, {
+    type: "destination-confirmed",
+    destinationId: destination.destination_id,
+  });
+  render();
+  applyReview({ type: "generate-confirm", open: false });
+  await performReviewGenerate(destination.destination_id);
+}
+
+async function performReviewGenerate(
+  confirmed: string | null = confirmedDestinationId(),
+): Promise<void> {
+  if (!generateEnabled(review, state.host)) {
+    return;
+  }
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  const workId = review.selectedWorkId;
+  if (!workId) {
+    return;
+  }
+  const params = buildGenerateParams(session, review, confirmed);
+  applyReview({ type: "generate-start" });
+  let reply: HostReply;
+  try {
+    reply = await reviewGenerate(params);
+  } catch (error) {
+    const bridgeError = invokeError(error);
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "generate",
+    });
+    await afterReviewError(bridgeError, "generate");
+    return;
+  }
+  if (!reply.ok) {
+    const bridgeError = replyError(reply);
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "generate",
+    });
+    await afterReviewError(bridgeError, "generate");
+    return;
+  }
+  if (!isReviewView(reply.result)) {
+    const bridgeError = reviewInvalid("审查结果");
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "generate",
+    });
+    await afterReviewError(bridgeError, "generate");
+    return;
+  }
+  const view = reply.result;
+  applyReview({ type: "generate-result", view });
+  await loadReviewWorks();
+  if (view.state === "pending" && view.candidate_id) {
+    const work = review.managed.find((item) => item.work_id === workId);
+    if (work) {
+      await loadReviewCandidates(workId);
+      const candidate = review.candidates.find(
+        (item) => item.candidate_id === view.candidate_id,
+      );
+      if (candidate) {
+        selectReviewCandidate(candidate);
+      }
+    }
+  }
+  await refreshHost();
+}
+
+function openReviewDecision(decision: ReviewDecision): void {
+  if (!canStartResolve(review, state.host, decision)) {
+    applyReview({
+      type: "note",
+      message:
+        resolveBlockReason(review, state.host, decision) ??
+        "当前不能提交这个决定",
+    });
+    return;
+  }
+  applyReview({ type: "decision-confirm", decision });
+}
+
+async function performReviewDecision(decision: ReviewDecision): Promise<void> {
+  if (!review.detail || !canStartResolve(review, state.host, decision)) {
+    return;
+  }
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  const params = buildResolveParams(session, review.detail, decision);
+  applyReview({ type: "resolve-start", decision });
+  let reply: HostReply;
+  try {
+    reply = await reviewResolve(params);
+  } catch (error) {
+    const bridgeError = invokeError(error);
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "resolve",
+    });
+    await afterReviewError(bridgeError, "resolve");
+    return;
+  }
+  if (!reply.ok) {
+    const bridgeError = replyError(reply);
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "resolve",
+    });
+    await afterReviewError(bridgeError, "resolve");
+    return;
+  }
+  if (!isReviewView(reply.result)) {
+    const bridgeError = reviewInvalid("决定结果");
+    applyReview({
+      type: "action-error",
+      error: bridgeError,
+      kind: "resolve",
+    });
+    await afterReviewError(bridgeError, "resolve");
+    return;
+  }
+  const view = reply.result;
+  applyReview({ type: "resolve-result", view });
+  await loadReviewWorks();
+  if (review.selectedWorkId) {
+    await loadReviewCandidates(review.selectedWorkId);
+    const candidate = review.candidates.find(
+      (item) =>
+        item.candidate_id === view.candidate_id ||
+        (item.candidate_id === review.lastCandidateId &&
+          item.artifact_version === review.lastVersion),
+    );
+    if (candidate) {
+      await loadReviewDetail(candidate);
+    }
+  }
+  await refreshHost();
+}
+
+async function performReviewResult(
+  interactionId: string,
+  auto: boolean = false,
+): Promise<void> {
+  const session = reviewSession();
+  if (!session) {
+    return;
+  }
+  applyReview({ type: "result-start" });
+  let reply: HostReply;
+  try {
+    reply = await reviewResult(buildResultParams(session, interactionId));
+  } catch (error) {
+    const bridgeError = invokeError(error);
+    applyReview({ type: "action-error", error: bridgeError, kind: "result" });
+    if (!auto) {
+      await afterReviewError(bridgeError, "result");
+    }
+    return;
+  }
+  if (!reply.ok) {
+    const bridgeError = replyError(reply);
+    applyReview({ type: "action-error", error: bridgeError, kind: "result" });
+    if (!auto) {
+      await afterReviewError(bridgeError, "result");
+    }
+    return;
+  }
+  if (!isReviewView(reply.result)) {
+    const bridgeError = reviewInvalid("结果恢复");
+    applyReview({ type: "action-error", error: bridgeError, kind: "result" });
+    if (!auto) {
+      await afterReviewError(bridgeError, "result");
+    }
+    return;
+  }
+  applyReview({ type: "result-result", view: reply.result });
+  await refreshReviewData();
+}
+
+function reviewWorkspace(): HTMLElement {
+  const info = state.host;
+  if (!info) {
+    return bootingCard();
+  }
+  if (!info.host.ready) {
+    return notReadyCard();
+  }
+  if (!reviewAvailable(info)) {
+    return reviewUnavailableCard(info);
+  }
+  const section = el("section", {
+    class: "review",
+    attrs: {
+      "data-review-screen": review.screen,
+      "data-review-tab": review.tab,
+    },
+    children: [
+      reviewHeader(info),
+      reviewCallouts(),
+      el("div", {
+        class:
+          review.screen === "detail" ||
+          review.screen === "result" ||
+          review.screen === "reauth" ||
+          review.selectedLegacy !== null
+            ? "review-grid is-detail"
+            : "review-grid",
+        children: [reviewWorkPane(info), reviewDetailPane(info)],
+      }),
+      reviewActionBar(info),
+    ],
+  });
+  return section;
+}
+
+function reviewUnavailableCard(info: AppInfo): HTMLElement {
+  const refresh = el("button", {
+    class: "quiet-button",
+    text: "刷新宿主状态",
+    attrs: { type: "button", id: "review-refresh-host" },
+  });
+  refresh.addEventListener("click", () => void refreshHost());
+  return el("section", {
+    class: "system-card system-card-warn review-unavailable",
+    children: [
+      el("div", { class: "system-icon is-warn", children: [icon("alert")] }),
+      el("div", {
+        children: [
+          el("h2", { text: "Review 暂不可用" }),
+          el("p", {
+            class: "state-lead",
+            text: reviewReasonLabel(info.workspace.review_reason),
+          }),
+          el("p", {
+            class: "muted",
+            text: "审查权限由私有宿主配置；本窗口不能自行赋权，也不能读取数据库补齐。",
+          }),
+          el("p", {
+            class: "muted",
+            text: "Consult 不受影响；你可以继续在 Consult 工作区使用。",
+          }),
+          refresh,
+        ],
+      }),
+    ],
+  });
+}
+
+function reviewHeader(info: AppInfo): HTMLElement {
+  const refresh = el("button", {
+    class: "quiet-button",
+    text: "刷新",
+    attrs: { type: "button", id: "review-refresh" },
+  });
+  refresh.addEventListener("click", () => void refreshReviewData());
+  return el("header", {
+    class: "review-head",
+    children: [
+      el("div", {
+        children: [
+          el("p", { class: "eyebrow", text: "REVIEW · 认知审查" }),
+          el("h1", { text: "Review" }),
+          el("p", {
+            class: "review-meta",
+            text: [
+              info.host.namespace ?? "—",
+              info.host.host_instance ?? "—",
+              info.host.operator ?? "—",
+            ].join(" · "),
+          }),
+        ],
+      }),
+      el("div", { class: "review-head-actions", children: [refresh] }),
+    ],
+  });
+}
+
+function reviewCallouts(): HTMLElement {
+  const children: HTMLElement[] = [];
+  if (review.unknown) {
+    const recover =
+      reviewCaps(state.host).result && recoveryInteractionId(review);
+    const row = el("div", {
+      class: "review-unknown-actions",
+    });
+    if (recover) {
+      const result = el("button", {
+        class: "quiet-button",
+        text: "查询权威结果",
+        attrs: { type: "button", id: "review-recover" },
+      });
+      result.addEventListener("click", () => {
+        const id = recoveryInteractionId(review);
+        if (id) {
+          void performReviewResult(id);
+        }
+      });
+      row.appendChild(result);
+    }
+    const refresh = el("button", {
+      class: "quiet-button",
+      text: "刷新工作与候选",
+      attrs: { type: "button" },
+    });
+    refresh.addEventListener("click", () => void refreshReviewData());
+    row.appendChild(refresh);
+    children.push(
+      el("div", {
+        class: "callout callout-danger review-unknown",
+        children: [
+          icon("alert"),
+          el("div", {
+            children: [
+              el("strong", { text: "结果未知" }),
+              el("p", { text: review.unknown.message }),
+              el("p", {
+                class: "muted",
+                text: "不会自动重发本次审查或决定；只以权威结果恢复。",
+              }),
+              row,
+            ],
+          }),
+        ],
+      }),
+    );
+  }
+  if (review.conflict) {
+    children.push(callout(review.conflict, "warn"));
+  }
+  if (review.notice) {
+    children.push(callout(review.notice, "info"));
+  }
+  if (review.error) {
+    children.push(callout(reviewErrorText(review.error), "danger"));
+  }
+  return el("div", { class: "review-callouts", children });
+}
+
+function reviewWorkPane(info: AppInfo): HTMLElement {
+  const tabs = el("div", {
+    class: "review-tabs",
+    attrs: { role: "tablist", "aria-label": "审查工作列表" },
+  });
+  const managedTab = el("button", {
+    class: `review-tab ${review.tab === "managed" ? "is-active" : ""}`,
+    text: "待审查",
+    attrs: {
+      type: "button",
+      role: "tab",
+      "aria-selected": review.tab === "managed" ? "true" : "false",
+    },
+  });
+  managedTab.addEventListener("click", () => applyReview({ type: "tab", tab: "managed" }));
+  const legacyTab = el("button", {
+    class: `review-tab ${review.tab === "legacy" ? "is-active" : ""}`,
+    text: "旧工作项（无控制）",
+    attrs: {
+      type: "button",
+      role: "tab",
+      "aria-selected": review.tab === "legacy" ? "true" : "false",
+    },
+  });
+  legacyTab.addEventListener("click", () => applyReview({ type: "tab", tab: "legacy" }));
+  tabs.append(managedTab, legacyTab);
+
+  const body = el("div", { class: "review-work-list" });
+  if (review.loading && !review.loaded) {
+    body.appendChild(reviewSkeleton("正在读取工作列表…", 3));
+  } else if (review.error) {
+    const retry = el("button", {
+      class: "quiet-button",
+      text: "重新加载",
+      attrs: { type: "button" },
+    });
+    retry.addEventListener("click", () => void loadReviewWorks());
+    body.append(
+      callout(reviewErrorText(review.error), "danger"),
+      retry,
+    );
+  } else if (review.tab === "managed") {
+    if (review.managed.length === 0) {
+      body.appendChild(
+        el("p", {
+          class: "review-empty",
+          text: "没有待审查的工作项。新的工作项由宿主在处理事件时创建。",
+        }),
+      );
+    }
+    for (const work of review.managed) {
+      body.appendChild(reviewManagedRow(work));
+    }
+  } else {
+    if (review.legacy.length === 0) {
+      body.appendChild(
+        el("p", { class: "review-empty", text: "没有旧工作项。" }),
+      );
+    }
+    for (const work of review.legacy) {
+      body.appendChild(reviewLegacyRow(work));
+    }
+  }
+  return el("aside", {
+    class: "review-pane review-workpane",
+    attrs: { "aria-label": "审查工作项" },
+    children: [
+      el("div", {
+        class: "review-pane-head",
+        children: [
+          el("h2", { text: "工作列表" }),
+          el("span", {
+            class: "review-visible-count",
+            text: `${review.managed.length} 待审查 · ${review.legacy.length} 旧项`,
+          }),
+        ],
+      }),
+      tabs,
+      body,
+      el("p", {
+        class: "review-pane-note",
+        text: "只显示本 namespace 的待处理工作；不显示候选数量或内部 generation。",
+      }),
+    ],
+  });
+}
+
+function reviewManagedRow(work: ReviewWorkItem): HTMLElement {
+  const active = review.selectedWork?.work_id === work.work_id;
+  const row = el("button", {
+    class: `review-work-row ${active ? "is-active" : ""}`,
+    attrs: {
+      type: "button",
+      "data-work-id": work.work_id,
+      "data-blocked": work.blocked ? "true" : "false",
+      "data-rerun": work.rerun_registered ? "true" : "false",
+      title: `generation ${work.generation}`,
+    },
+    children: [
+      el("div", {
+        class: "review-work-top",
+        children: [
+          el("span", { class: "review-work-id", text: `工作 ${shortId(work.work_id)}` }),
+          reviewBadge(
+            work.blocked ? "已暂停" : "待处理",
+            work.blocked ? "warn" : "pending",
+          ),
+        ],
+      }),
+      el("div", {
+        class: "review-work-meta",
+        children: [
+          el("span", { text: `事件 ${shortId(work.event_id)}` }),
+          ...(work.rerun_registered
+            ? [
+                reviewBadge(
+                  "复查许可已登记（待校验）",
+                  "neutral",
+                ),
+              ]
+            : []),
+        ],
+      }),
+    ],
+  });
+  row.addEventListener("click", () => selectManagedWork(work));
+  return row;
+}
+
+function reviewLegacyRow(work: LegacyWorkItem): HTMLElement {
+  const active = review.selectedLegacy?.work_id === work.work_id;
+  const row = el("button", {
+    class: `review-work-row review-legacy-row ${active ? "is-active" : ""}`,
+    attrs: {
+      type: "button",
+      "data-work-id": work.work_id,
+      "data-legacy": "true",
+    },
+    children: [
+      el("div", {
+        class: "review-work-top",
+        children: [
+          el("span", { class: "review-work-id", text: `工作 ${shortId(work.work_id)}` }),
+          reviewBadge("只读", "neutral"),
+        ],
+      }),
+      el("div", {
+        class: "review-work-meta",
+        children: [
+          el("span", { text: `事件 ${shortId(work.event_id)}` }),
+          el("span", { text: `类型 ${work.kind}` }),
+          el("span", { text: work.created_at }),
+        ],
+      }),
+    ],
+  });
+  row.addEventListener("click", () => selectLegacyWork(work));
+  return row;
+}
+
+function reviewBadge(label: string, tone: string): HTMLElement {
+  return el("span", {
+    class: `review-badge is-${tone}`,
+    text: label,
+  });
+}
+
+function reviewSkeleton(label: string, rows: number): HTMLElement {
+  const children: HTMLElement[] = [
+    el("p", { class: "muted", text: label }),
+  ];
+  for (let index = 0; index < rows; index += 1) {
+    children.push(el("div", { class: "review-skeleton-row" }));
+  }
+  return el("div", { class: "review-skeleton", children });
+}
+
+function reviewDetailPane(info: AppInfo): HTMLElement {
+  const children: HTMLElement[] = [];
+  if (review.screen === "result" && review.outcome) {
+    children.push(reviewOutcomePanel(review.outcome, info));
+  } else if (review.screen === "reauth") {
+    children.push(reviewReauthPanel(info));
+  } else if (review.selectedLegacy) {
+    children.push(reviewLegacyPanel(review.selectedLegacy));
+  } else if (!review.selectedWork) {
+    children.push(
+      el("div", {
+        class: "review-empty-pane",
+        children: [
+          el("p", { class: "eyebrow", text: "REVIEW" }),
+          el("h2", { text: "选择左侧工作项" }),
+          el("p", {
+            class: "muted",
+            text: "工作项由宿主创建；本窗口只读取正式 Facade 返回的 Work、候选与状态。",
+          }),
+        ],
+      }),
+    );
+  } else if (review.detailLoading) {
+    children.push(reviewSkeleton("正在读取候选详情…", 4));
+  } else if (review.detailError) {
+    const retry = el("button", {
+      class: "quiet-button",
+      text: "重新读取候选",
+      attrs: { type: "button" },
+    });
+    retry.addEventListener("click", () => {
+      const candidate = review.candidates.find(
+        (item) => item.candidate_id === review.selectedCandidateId,
+      );
+      if (candidate) {
+        void loadReviewDetail(candidate);
+      }
+    });
+    children.push(
+      callout(reviewErrorText(review.detailError), "danger"),
+      retry,
+    );
+  } else if (review.screen === "detail" && review.detail) {
+    children.push(reviewDetailView(review.detail));
+  } else {
+    children.push(reviewCandidatesPane(review.selectedWork, info));
+  }
+  return el("section", {
+    class: "review-pane review-detailpane",
+    attrs: { "aria-label": "审查详情" },
+    children,
+  });
+}
+
+function reviewLegacyPanel(work: LegacyWorkItem): HTMLElement {
+  return el("div", {
+    class: "review-legacy-panel",
+    children: [
+      reviewSelectionHeader(`工作 ${shortId(work.work_id)}`, "旧工作项"),
+      el("div", {
+        class: "review-readonly-card",
+        children: [
+          el("h2", { text: "旧工作项只读" }),
+          el("p", {
+            class: "muted",
+            text: "该工作项没有审查控制行（collab_work_control），因此没有候选投影，也不能在本窗口开始审查或批准。",
+          }),
+          el("dl", {
+            class: "kv",
+            children: [
+              kv("工作", work.work_id),
+              kv("事件", work.event_id),
+              kv("类型", work.kind),
+              kv("状态", work.status),
+              kv("创建", work.created_at),
+            ],
+          }),
+          el("p", {
+            class: "muted",
+            text: "缺失的候选/差异字段属于正式能力缺口；本窗口不读数据库补齐。",
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function reviewSelectionHeader(title: string, badge: string): HTMLElement {
+  return el("div", {
+    class: "review-selection-head",
+    children: [
+      el("div", {
+        children: [
+          el("p", { class: "eyebrow", text: "审查工作" }),
+          el("h2", { text: title }),
+        ],
+      }),
+      reviewBadge(badge, badge === "已暂停" ? "warn" : "neutral"),
+    ],
+  });
+}
+
+function reviewCandidatesPane(
+  work: ReviewWorkItem,
+  info: AppInfo,
+): HTMLElement {
+  const reason = generateBlockReason(review, info);
+  const children: HTMLElement[] = [];
+  children.push(
+    reviewSelectionHeader(
+      `工作 ${shortId(work.work_id)} · 事件 ${shortId(work.event_id)}`,
+      work.blocked ? "已暂停" : "待审查",
+    ),
+  );
+  if (work.blocked) {
+    children.push(
+      callout(
+        work.rerun_registered
+          ? "该工作已暂停；宿主已登记复查许可（待校验）。旧候选保持已拒绝，不会复活。"
+          : "该工作已暂停；需要宿主发放新的复查许可。本窗口不能自行授权。",
+        "warn",
+      ),
+    );
+  }
+  if (review.candidatesLoading) {
+    children.push(reviewSkeleton("正在读取候选…", 2));
+    return el("div", { class: "review-candidates", children });
+  }
+  if (review.candidatesError) {
+    const retry = el("button", {
+      class: "quiet-button",
+      text: "重新读取候选",
+      attrs: { type: "button" },
+    });
+    retry.addEventListener("click", () => void loadReviewCandidates(work.work_id));
+    children.push(callout(reviewErrorText(review.candidatesError), "danger"), retry);
+    return el("div", { class: "review-candidates", children });
+  }
+  if (review.candidates.length === 0) {
+    children.push(
+      el("div", {
+        class: "review-empty-card",
+        children: [
+          el("h2", { text: "没有候选" }),
+          el("p", {
+            class: "muted",
+            text: "这个工作项还没有候选。开始审查会调用 C07 生成候选或 WAIT；它不会直接提交 Belief。",
+          }),
+        ],
+      }),
+    );
+  } else {
+    children.push(
+      el("div", {
+        class: "review-candidate-head",
+        children: [
+          el("h2", { text: "候选" }),
+          el("span", {
+            class: "muted",
+            text: `${review.candidates.length} 项 · 按创建顺序`,
+          }),
+        ],
+      }),
+    );
+    for (const candidate of review.candidates) {
+      children.push(reviewCandidateRow(candidate));
+    }
+  }
+  children.push(reviewGenerateArea(info, reason));
+  return el("div", { class: "review-candidates", children });
+}
+
+function reviewCandidateRow(candidate: ReviewCandidateSummary): HTMLElement {
+  const active = review.selectedCandidateId === candidate.candidate_id;
+  const row = el("button", {
+    class: `review-candidate-row ${active ? "is-active" : ""}`,
+    attrs: {
+      type: "button",
+      "data-candidate-id": candidate.candidate_id,
+      "data-status": candidate.status,
+    },
+    children: [
+      el("div", {
+        class: "review-candidate-main",
+        children: [
+          el("div", {
+            class: "review-candidate-title",
+            children: [
+              el("span", {
+                class: "review-candidate-id",
+                text: `候选 ${shortId(candidate.candidate_id)} · v${candidate.artifact_version}`,
+              }),
+              reviewBadge(
+                candidateStatusLabel(candidate.status),
+                candidateStatusTone(candidate.status),
+              ),
+            ],
+          }),
+          el("p", {
+            class: "review-candidate-meta",
+            text: [
+              `交互 ${shortId(candidate.interaction_id)}`,
+              `创建 ${candidate.created_at}`,
+              candidate.decided_at ? `决定 ${candidate.decided_at}` : "",
+              candidate.attempt_id
+                ? `尝试 ${shortId(candidate.attempt_id)} #${candidate.attempt_no ?? "—"}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          }),
+        ],
+      }),
+      el("span", { class: "review-chevron", text: "›" }),
+    ],
+  });
+  row.addEventListener("click", () => selectReviewCandidate(candidate));
+  return row;
+}
+
+function reviewGenerateArea(info: AppInfo, reason: string | null): HTMLElement {
+  const action = el("button", {
+    class: "primary-button review-generate",
+    text:
+      reason === null && review.selectedWork?.blocked
+        ? "开始新的审查（新候选）"
+        : "开始审查",
+    attrs: { type: "button", id: "review-generate" },
+  });
+  action.disabled = reason !== null;
+  action.addEventListener("click", () => openReviewGenerate());
+  const children: HTMLElement[] = [
+    el("p", {
+      class: "muted",
+      text: "开始审查会把工作上下文发送到上方目的地，只生成候选或 WAIT，不提交 Belief。",
+    }),
+  ];
+  if (reason !== null) {
+    children.push(
+      el("p", { class: "review-lock-reason", text: reason }),
+    );
+  }
+  if (needsConfirmation(state)) {
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "外部目的地：首次或目的地变化后，开始前会再次确认本次发送意图。",
+      }),
+    );
+  }
+  children.push(action);
+  return el("div", {
+    class: "review-generate-area",
+    attrs: {
+      "data-generate-enabled": reason === null ? "true" : "false",
+      "data-generate-reason": reason ?? "",
+    },
+    children,
+  });
+}
+
+function reviewDetailView(detail: ReviewCandidateDetail): HTMLElement {
   const back = el("button", {
     class: "quiet-button",
-    text: "返回 Consult",
-    attrs: { type: "button" },
+    text: "← 返回候选",
+    attrs: { type: "button", id: "review-back-candidates" },
   });
-  back.addEventListener("click", () => switchWorkspace("consult"));
-  return el("section", {
-    class: "review-placeholder",
+  back.addEventListener("click", () => backToCandidates());
+  const sourceButton = el("button", {
+    class: "quiet-button",
+    text: `来源详情（${detail.sources.length}）`,
+    attrs: { type: "button", id: "review-open-sources" },
+  });
+  sourceButton.addEventListener("click", () => openDrawer("sources"));
+  const head = el("div", {
+    class: "review-detail-head",
     children: [
-      el("p", { class: "eyebrow", text: "REVIEW · 认知审查" }),
-      el("h1", { text: "Review 尚未实现（C12c）" }),
-      el("p", {
-        class: "state-lead",
-        text: "C12b 只实现 Consult。这里没有可执行候选、批准或拒绝。",
-      }),
-      el("ul", {
-        class: "plain-list",
+      el("div", {
         children: [
-          el("li", { text: "没有候选枚举或候选差异投影。" }),
-          el("li", { text: "没有批准、拒绝或提交入口。" }),
-          el("li", { text: "没有从 Consult 回答直达 Review 的按钮（D7=B）。" }),
+          el("p", { class: "eyebrow", text: "候选差异" }),
+          el("h2", {
+            text: `候选 ${shortId(detail.candidate.candidate_id)} · v${detail.candidate.artifact_version}`,
+          }),
+          el("p", {
+            class: "review-meta",
+            text: [
+              `工作 ${shortId(detail.candidate.work_id)}`,
+              `交互 ${shortId(detail.candidate.interaction_id)}`,
+              `结构校验 ${detail.structural_validation ?? "—"}`,
+            ].join(" · "),
+          }),
+        ],
+      }),
+      el("div", {
+        class: "review-detail-actions",
+        children: [
+          reviewBadge(
+            candidateStatusLabel(detail.candidate.status),
+            candidateStatusTone(detail.candidate.status),
+          ),
+          back,
+          sourceButton,
+        ],
+      }),
+    ],
+  });
+  const children: HTMLElement[] = [head];
+  if (detail.redacted) {
+    children.push(
+      el("div", {
+        class: "review-readonly-card",
+        children: [
+          el("h2", { text: "候选内容不可读" }),
+          el("p", {
+            class: "muted",
+            text: "候选受隐私或删除屏障保护；本窗口不显示正文，也不提供批准或拒绝。",
+          }),
+        ],
+      }),
+    );
+    children.push(reviewLockReason(detail));
+    return el("div", { class: "review-detail", children });
+  }
+  if (!detail.proposal) {
+    children.push(
+      el("div", {
+        class: "review-readonly-card",
+        children: [
+          el("h2", { text: "没有候选投影" }),
+          el("p", {
+            class: "muted",
+            text: "宿主没有返回 proposal；本窗口不推断、不读取数据库补字段。",
+          }),
+        ],
+      }),
+    );
+    children.push(reviewLockReason(detail));
+    return el("div", { class: "review-detail", children });
+  }
+  children.push(reviewProposalBlock(detail));
+  children.push(reviewCurrentBlock(detail));
+  children.push(reviewDiffBlock(detail));
+  children.push(reviewSourcesBlock(detail));
+  children.push(reviewLockReason(detail));
+  return el("div", { class: "review-detail", children });
+}
+
+function reviewProposalBlock(detail: ReviewCandidateDetail): HTMLElement {
+  const proposal = detail.proposal!;
+  const rows: Array<Node> = [];
+  if (proposal.operation === "retract_belief") {
+    rows.push(
+      kv("操作", operationLabel(proposal.operation)),
+      kv("目标", sourceRefLabel(proposal.target_ref)),
+      kv("撤回理由", proposal.strength_reason ?? "—"),
+      kv("证据来源", `${proposal.evidence_links.length} 项`),
+    );
+  } else {
+    rows.push(
+      kv("操作", operationLabel(proposal.operation)),
+      ...(proposal.target_ref
+        ? [kv("目标", sourceRefLabel(proposal.target_ref))]
+        : []),
+      kv("主张", proposal.claim ?? "—"),
+      kv("类型", proposal.claim_type ?? "—"),
+      kv("范围 / 适用性", formatReviewValue("scope", proposal.scope ?? {})),
+      kv("强度", proposal.strength ?? "—"),
+      kv("有效期", formatReviewValue("valid_until", proposal.valid_until)),
+      kv("证据来源", `${proposal.evidence_links.length} 项`),
+    );
+    if (proposal.strength_reason) {
+      rows.push(kv("强度理由", proposal.strength_reason));
+    }
+  }
+  return el("section", {
+    class: "review-card",
+    children: [
+      el("h2", { text: "候选内容" }),
+      el("dl", { class: "kv", children: rows }),
+      el("p", {
+        class: "muted",
+        text: "只显示正式投影的字段；不显示 Prompt、HTTP 正文、候选原始 body 或内部 revision。",
+      }),
+    ],
+  });
+}
+
+function reviewCurrentBlock(detail: ReviewCandidateDetail): HTMLElement {
+  if (detail.current_state === "not_applicable") {
+    return el("section", {
+      class: "review-card",
+      children: [
+        el("h2", { text: "当前版本" }),
+        el("p", {
+          class: "muted",
+          text: "新增：没有可比较的当前 Belief。差异表中的“当前”为空，而不是空 Belief。",
+        }),
+      ],
+    });
+  }
+  if (
+    detail.current_state === "redacted" ||
+    detail.current_state === "missing"
+  ) {
+    return el("section", {
+      class: "review-card",
+      children: [
+        el("h2", { text: "当前版本" }),
+        callout(
+          detail.current_state === "redacted"
+            ? "当前版本不可读（隐私或删除屏障）；没有用空 Belief 替代。"
+            : "当前版本不存在或不可读；没有用空 Belief 替代。",
+          "warn",
+        ),
+      ],
+    });
+  }
+  const current = detail.current!;
+  return el("section", {
+    class: "review-card",
+    children: [
+      el("h2", { text: "当前版本" }),
+      el("dl", {
+        class: "kv",
+        children: [
+          kv("引用", sourceRefLabel(current.ref)),
+          kv("主张", current.claim),
+          kv("类型", current.claim_type),
+          kv("状态", current.status),
+          kv("强度", current.strength),
+          kv("范围 / 适用性", current.applicability),
+          kv("有效期", current.valid_until ?? "—"),
+        ],
+      }),
+    ],
+  });
+}
+
+function reviewDiffBlock(detail: ReviewCandidateDetail): HTMLElement {
+  const { changed, unchanged } = splitDiff(detail);
+  if (detail.current_state === "redacted" || detail.current_state === "missing") {
+    return el("section", {
+      class: "review-card",
+      children: [
+        el("h2", { text: "字段差异" }),
+        el("p", {
+          class: "muted",
+          text: "当前版本不可读或不存在，因此不生成字段差异；这不是“全部变化”。",
+        }),
+      ],
+    });
+  }
+  const changedRows = el("div", { class: "review-diff" });
+  if (detail.proposal?.operation === "retract_belief") {
+    changedRows.appendChild(
+      el("p", {
+        class: "muted",
+        text: "撤回只比较证据来源；Belief 正文、类型、范围与强度不参与比较。",
+      }),
+    );
+  }
+  changedRows.appendChild(
+    el("div", {
+      class: "review-diff-head",
+      children: [
+        el("span", { text: "字段" }),
+        el("span", {
+          text:
+            detail.current_state === "not_applicable" ? "当前（新增）" : "当前版本",
+        }),
+        el("span", { text: "候选版本" }),
+        el("span", { text: "变化" }),
+      ],
+    }),
+  );
+  for (const row of changed) {
+    changedRows.appendChild(
+      reviewDiffRow(
+        row,
+        detail.proposal?.operation === "propose_belief" ? "新增" : undefined,
+      ),
+    );
+  }
+  if (changed.length === 0) {
+    changedRows.appendChild(
+      el("p", { class: "muted", text: "没有变化字段。" }),
+    );
+  }
+  const block = el("section", {
+    class: "review-card",
+    children: [
+      el("div", {
+        class: "review-card-head",
+        children: [
+          el("h2", { text: "字段差异" }),
+          reviewBadge(`${changed.length} 项变化`, changed.length ? "warn" : "neutral"),
+        ],
+      }),
+      changedRows,
+    ],
+  });
+  if (unchanged.length > 0) {
+    const rows = el("div", { class: "review-diff" });
+    rows.appendChild(
+      el("div", {
+        class: "review-diff-head",
+        children: [
+          el("span", { text: "字段" }),
+          el("span", { text: "当前版本" }),
+          el("span", { text: "候选版本" }),
+          el("span", { text: "变化" }),
+        ],
+      }),
+    );
+    for (const row of unchanged) {
+      rows.appendChild(reviewDiffRow(row));
+    }
+    block.appendChild(
+      el("details", {
+        class: "review-unchanged",
+        children: [
+          el("summary", { text: `未变化字段（${unchanged.length}）` }),
+          rows,
+        ],
+      }),
+    );
+  }
+  return block;
+}
+
+function reviewDiffRow(
+  row: {
+    field: string;
+    before: unknown;
+    after: unknown;
+    changed: boolean;
+  },
+  changedLabel?: string,
+): HTMLElement {
+  return el("div", {
+    class: `review-diff-row ${row.changed ? "is-changed" : ""}`,
+    attrs: { "data-field": row.field },
+    children: [
+      el("span", {
+        class: "review-diff-field",
+        text: diffFieldLabel(row.field),
+      }),
+      el("span", {
+        class: "review-diff-before",
+        text: formatReviewValue(row.field, row.before),
+      }),
+      el("span", {
+        class: "review-diff-after",
+        text: formatReviewValue(row.field, row.after),
+      }),
+      el("span", {
+        class: "review-diff-change",
+        text: row.changed ? changedLabel ?? "变化" : "未变",
+      }),
+    ],
+  });
+}
+
+function reviewSourcesBlock(detail: ReviewCandidateDetail): HTMLElement {
+  const readable = detail.sources.filter(
+    (source) => source.availability === "available",
+  ).length;
+  const hidden = detail.sources.filter(
+    (source) => source.availability === "redacted",
+  ).length;
+  const unavailable = detail.sources.length - readable - hidden;
+  const rows = detail.sources.map((source) =>
+    el("div", {
+      class: "review-source-row",
+      children: [
+        el("span", {
+          class: "review-source-kind",
+          text: sourceKindLabel(source.kind),
+        }),
+        el("span", {
+          class: "review-source-ref",
+          text: sourceRefId(source.ref),
+        }),
+        el("span", {
+          class: `review-source-status is-${source.availability}`,
+          text: sourceAvailabilityLabel(source.availability),
+        }),
+        ...(source.reason
+          ? [
+              el("span", {
+                class: "review-source-reason",
+                text: sourceReasonLabel(source.reason),
+              }),
+            ]
+          : []),
+      ],
+    }),
+  );
+  return el("section", {
+    class: "review-card",
+    children: [
+      el("div", {
+        class: "review-card-head",
+        children: [
+          el("h2", { text: "来源" }),
+          reviewBadge(
+            `可读 ${readable} · 隐藏 ${hidden} · 不可用 ${unavailable}`,
+            hidden || unavailable ? "warn" : "ok",
+          ),
+        ],
+      }),
+      el("details", {
+        class: "review-sources",
+        children: [
+          el("summary", {
+            text: "来源引用默认折叠；展开查看可读性与精确引用",
+          }),
+          detail.sources.length === 0
+            ? el("p", { class: "muted", text: "本次没有可披露的来源引用。" })
+            : el("div", { class: "review-source-list", children: rows }),
+          el("p", {
+            class: "muted",
+            text: "来源正文只在正式可读时出现在来源抽屉；隐藏来源不显示正文，也不以空值替代。",
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function reviewLockReason(detail: ReviewCandidateDetail): HTMLElement {
+  const approveReason = resolveBlockReason(review, state.host, "approve");
+  const rejectReason = resolveBlockReason(review, state.host, "reject");
+  const reasons: string[] = [];
+  if (approveReason) {
+    reasons.push(`批准不可用：${approveReason}`);
+  }
+  if (rejectReason) {
+    reasons.push(`拒绝不可用：${rejectReason}`);
+  }
+  if (reasons.length === 0) {
+    reasons.push("批准与拒绝会在提交前重新核对 exact candidate/version/Work/current。");
+  }
+  return el("p", {
+    class: "review-lock-reason",
+    attrs: {
+      "data-approve-enabled": approveReason ? "false" : "true",
+      "data-reject-enabled": rejectReason ? "false" : "true",
+      "data-eligibility": detail.eligibility_reason ?? "",
+    },
+    text: reasons.join(" · "),
+  });
+}
+
+function reviewActionBar(info: AppInfo): HTMLElement {
+  const left = el("div", { class: "review-action-left" });
+  const right = el("div", { class: "review-action-right" });
+  const refresh = el("button", {
+    class: "quiet-button",
+    text: "刷新",
+    attrs: { type: "button", id: "review-action-refresh" },
+  });
+  refresh.addEventListener("click", () => void refreshReviewData());
+  const back = el("button", {
+    class: "quiet-button",
+    text: "← 返回工作列表",
+    attrs: { type: "button", id: "review-back-works" },
+  });
+  back.addEventListener("click", () => backToReviewWorks());
+
+  if (review.screen === "detail") {
+    left.append(back, refresh);
+    if (review.detail) {
+      const sources = el("button", {
+        class: "quiet-button",
+        text: "来源与详情",
+        attrs: { type: "button", id: "review-action-sources" },
+      });
+      sources.addEventListener("click", () => openDrawer("sources"));
+      left.appendChild(sources);
+    }
+    const approveReason = resolveBlockReason(review, info, "approve");
+    const rejectReason = resolveBlockReason(review, info, "reject");
+    const actionReasons = [approveReason, rejectReason].filter(
+      (reason): reason is string => Boolean(reason),
+    );
+    if (actionReasons.length > 0) {
+      left.appendChild(
+        el("span", {
+          class: "review-action-reason",
+          text: Array.from(new Set(actionReasons)).join(" · "),
+        }),
+      );
+    }
+    const approve = el("button", {
+      class: "primary-button review-approve",
+      text: review.busy === "resolve" ? "正在提交…" : "批准…",
+      attrs: { type: "button", id: "review-approve" },
+    });
+    approve.disabled = !approveEnabled(review, info);
+    approve.title = approveReason ?? "";
+    approve.addEventListener("click", () => openReviewDecision("approve"));
+    const reject = el("button", {
+      class: "danger-button review-reject",
+      text: "拒绝…",
+      attrs: { type: "button", id: "review-reject" },
+    });
+    reject.disabled = !rejectEnabled(review, info);
+    reject.title = rejectReason ?? "";
+    reject.addEventListener("click", () => openReviewDecision("reject"));
+    right.append(reject, approve);
+  } else if (review.screen === "reauth") {
+    left.append(refresh);
+    const backPaused = el("button", {
+      class: "quiet-button",
+      text: "← 返回已暂停的审查",
+      attrs: { type: "button", id: "review-back-paused" },
+    });
+    backPaused.addEventListener("click", () => applyReview({ type: "reauth-close" }));
+    left.appendChild(backPaused);
+  } else if (review.screen === "result") {
+    left.append(back, refresh);
+    const sources = el("button", {
+      class: "quiet-button",
+      text: "来源与详情",
+      attrs: { type: "button", id: "review-action-sources" },
+    });
+    sources.addEventListener("click", () => openDrawer("sources"));
+    left.appendChild(sources);
+  } else {
+    left.append(refresh);
+  }
+  if (
+    (review.screen === "candidates" && review.selectedWork) ||
+    review.screen === "reauth"
+  ) {
+    const reason = generateBlockReason(review, info);
+    if (reason) {
+      left.appendChild(
+        el("span", { class: "review-action-reason", text: reason }),
+      );
+    }
+    const generate = el("button", {
+      class: "primary-button",
+      text:
+        review.selectedWork?.blocked
+          ? "开始新的审查（新候选）"
+          : "开始审查",
+      attrs: { type: "button", id: "review-generate-action" },
+    });
+    generate.disabled = reason !== null;
+    generate.title = reason ?? "";
+    generate.addEventListener("click", () => openReviewGenerate());
+    right.appendChild(generate);
+  }
+  const enabled =
+    review.busy === null &&
+    review.screen === "detail" &&
+    review.detail !== null &&
+    approveEnabled(review, info);
+  const rejectable =
+    review.busy === null &&
+    review.screen === "detail" &&
+    review.detail !== null &&
+    rejectEnabled(review, info);
+  return el("footer", {
+    class: "review-actionbar",
+    attrs: {
+      "data-approve-enabled": enabled ? "true" : "false",
+      "data-reject-enabled": rejectable ? "true" : "false",
+    },
+    children: [left, right],
+  });
+}
+
+function reviewOutcomePanel(view: ReviewView, info: AppInfo): HTMLElement {
+  const copy: Record<
+    string,
+    { title: string; lead: string; tone: string }
+  > = {
+    committed: {
+      title: "已提交（committed）",
+      lead: "回执只代表本地提交；没有把候选再次发送给模型。",
+      tone: "ok",
+    },
+    rejected: {
+      title: "已拒绝 · 已暂停",
+      lead: "旧候选不能再次批准；重新考虑需要新的复查许可和新的审查。",
+      tone: "warn",
+    },
+    waiting: {
+      title: "已记录：暂不形成 Belief（WAIT）",
+      lead: "本次审查没有形成 Belief；已记录为 WAIT 回执，工作项完成。它不是失败，也不能再次批准。",
+      tone: "wait",
+    },
+    denied: {
+      title: "审查未启动（denied）",
+      lead: "宿主当前未允许启动这次审查，未生成候选。它不是权限不足。",
+      tone: "warn",
+    },
+    failed: {
+      title: "审查未完成（failed）",
+      lead: "生成或提交流程中断，未提交，也没有形成 Belief。",
+      tone: "danger",
+    },
+    stale: {
+      title: "已过期（stale）",
+      lead: "工作或候选状态已变化，本次审查未提交，也没有形成 Belief。",
+      tone: "warn",
+    },
+    incomplete: {
+      title: "结论不完整（incomplete）",
+      lead: "没有取得权威结论。这不等于拒绝，也不等于提交。",
+      tone: "warn",
+    },
+    pending: {
+      title: "待决定（pending）",
+      lead: "候选存在，但还没有回执；审批仍需要单独确认。",
+      tone: "pending",
+    },
+    structural_only: {
+      title: "仅结构校验",
+      lead: "没有持久化候选。",
+      tone: "neutral",
+    },
+  };
+  const item = copy[view.state] ?? copy.failed;
+  const children: HTMLElement[] = [
+    el("div", {
+      class: "review-outcome-head",
+      children: [
+        el("div", {
+          children: [
+            el("p", { class: "eyebrow", text: "REVIEW RESULT" }),
+            el("h2", { text: item.title }),
+            el("p", { class: "state-lead", text: item.lead }),
+          ],
+        }),
+        reviewBadge(reviewViewLabel(view.state), item.tone),
+      ],
+    }),
+  ];
+  if (view.state === "committed") {
+    children.push(reviewReceiptBlock(view));
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "已提交只由 C07 ReviewView 的权威回执证明；模型文本不算回执。",
+      }),
+    );
+  } else if (view.state === "waiting") {
+    children.push(reviewReceiptBlock(view));
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "WAIT 是正式结果：工作项已完成，没有候选，也不能再次批准。",
+      }),
+    );
+  } else if (view.state === "rejected") {
+    children.push(
+      el("dl", {
+        class: "kv",
+        children: [
+          kv("旧候选", shortId(view.candidate_id)),
+          kv("状态", "已拒绝（只读）"),
+          kv("工作", review.selectedWork ? "已暂停" : "见工作列表"),
+          kv(
+            "复查许可",
+            review.selectedWork?.rerun_registered
+              ? "已登记（待校验）"
+              : "未登记；需要宿主发放",
+          ),
+        ],
+      }),
+    );
+    const reauth = el("button", {
+      class: "quiet-button",
+      text: "重新授权复查",
+      attrs: { type: "button", id: "review-reauth" },
+    });
+    reauth.addEventListener("click", () => applyReview({ type: "reauth-open" }));
+    children.push(reauth);
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "本窗口不发放许可；旧候选保持已拒绝，不能复活。",
+      }),
+    );
+  } else if (view.state === "failed" || view.state === "stale") {
+    children.push(
+      el("p", {
+        class: "reason-line",
+        text: `原因标签：${view.detail ?? "无阶段标签"}`,
+      }),
+    );
+    const refresh = el("button", {
+      class: "quiet-button",
+      text: "刷新工作列表",
+      attrs: { type: "button" },
+    });
+    refresh.addEventListener("click", () => void refreshReviewData());
+    children.push(refresh);
+    if (generateEnabled(review, info)) {
+      const retry = el("button", {
+        class: "primary-button",
+        text: "重新开始审查（新候选）",
+        attrs: { type: "button", id: "review-retry" },
+      });
+      retry.addEventListener("click", () => openReviewGenerate());
+      children.push(retry);
+    }
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "这不是自动重试：只有你再次操作才会生成新的候选；旧候选不会复活。",
+      }),
+    );
+  } else if (view.state === "denied") {
+    children.push(
+      el("p", {
+        class: "reason-line",
+        text: `原因标签：${view.detail ?? "审查入口关闭"}`,
+      }),
+    );
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "denied 表示审查入口关闭，不是权限不足；没有生成候选。",
+      }),
+    );
+  } else if (view.state === "incomplete") {
+    const id = recoveryInteractionId(review);
+    if (id && reviewCaps(info).result) {
+      const recover = el("button", {
+        class: "quiet-button",
+        text: "刷新结果",
+        attrs: { type: "button", id: "review-recover-result" },
+      });
+      recover.addEventListener("click", () => void performReviewResult(id));
+      children.push(recover);
+    }
+    children.push(
+      el("p", {
+        class: "muted",
+        text: "结论不完整既不是拒绝也不是提交；没有自动重试。",
+      }),
+    );
+  } else if (view.state === "pending") {
+    const candidate = review.candidates.find(
+      (item2) => item2.candidate_id === view.candidate_id,
+    );
+    if (candidate) {
+      const open = el("button", {
+        class: "quiet-button",
+        text: "查看候选",
+        attrs: { type: "button" },
+      });
+      open.addEventListener("click", () => selectReviewCandidate(candidate));
+      children.push(open);
+    }
+  }
+  if (view.detail && view.state !== "failed" && view.state !== "stale" && view.state !== "denied") {
+    children.push(reviewTechnical(view.detail));
+  }
+  return el("div", {
+    class: `review-outcome review-outcome-${item.tone}`,
+    attrs: { "data-review-state": view.state },
+    children,
+  });
+}
+
+function reviewReceiptBlock(view: ReviewView): HTMLElement {
+  if (!view.receipt) {
+    return el("div", {
+      class: "review-receipt is-empty",
+      children: [
+        el("h3", { text: "回执" }),
+        el("p", {
+          class: "muted",
+          text: view.redacted
+            ? "回执不可见（redacted）。不伪造回执，也不改变生命周期状态。"
+            : "尚未生成回执；只有权威提交结果才会产生回执。",
+        }),
+      ],
+    });
+  }
+  const receipt = view.receipt;
+  return el("div", {
+    class: "review-receipt",
+    children: [
+      el("h3", { text: "回执" }),
+      el("dl", {
+        class: "kv",
+        children: [
+          kv("请求", shortId(receipt.request_id)),
+          kv("上下文", shortId(receipt.context_id)),
+          kv("操作", receiptOperationLabel(receipt.operation)),
+          kv("结果", receipt.outcome),
+          kv("时间", receipt.committed_at),
+          kv(
+            "记录",
+            receipt.record_refs.length === 0
+              ? "无记录引用"
+              : receipt.record_refs
+                  .map((ref) => `${shortId(ref.record_id)} · v${ref.record_version}`)
+                  .join(" · "),
+          ),
         ],
       }),
       el("p", {
         class: "muted",
-        text: "Review 的正式实现、候选投影与权限发放在 C12c；本卡不提前实现，也不伪造占位动作。",
+        text: "界面不显示 state_revision、proposal_digest、command_digest 或内部授权引用。",
       }),
-      back,
     ],
   });
+}
+
+function reviewTechnical(detail: string | null): HTMLElement {
+  return el("details", {
+    class: "technical",
+    children: [
+      el("summary", { text: "技术详情" }),
+      el("code", { text: detail ?? "无阶段标签" }),
+      el("p", {
+        class: "muted",
+        text: "只显示阶段/原因标签；不包含 Prompt、HTTP 正文、模型原始输出或数据库列。",
+      }),
+    ],
+  });
+}
+
+function reviewReauthPanel(info: AppInfo): HTMLElement {
+  const work = review.selectedWork;
+  const rejected = review.candidates.find(
+    (candidate) => candidate.status === "rejected",
+  );
+  const oldCandidate = review.outcome?.candidate_id ?? rejected?.candidate_id ?? null;
+  const rerun = work?.rerun_registered ?? false;
+  const children: HTMLElement[] = [
+    reviewSelectionHeader("重新授权复查", "已暂停"),
+    el("div", {
+      class: "review-step",
+      children: [
+        el("span", { class: "review-step-number", text: "1" }),
+        el("div", {
+          children: [
+            el("h3", { text: "旧候选" }),
+            el("p", {
+              class: "muted",
+              text: `${shortId(oldCandidate)} · 已拒绝（只读）`,
+            }),
+            el("p", {
+              class: "muted",
+              text: "旧候选不能复活，也不能再次批准。",
+            }),
+          ],
+        }),
+      ],
+    }),
+    el("div", {
+      class: "review-step",
+      children: [
+        el("span", { class: "review-step-number", text: "2" }),
+        el("div", {
+          children: [
+            el("h3", { text: "新的复查许可" }),
+            el("p", {
+              class: "muted",
+              text: rerun
+                ? "已登记（开始审查时由 C07/C05d 校验有效性）。"
+                : "未登记；需要宿主或负责人发放新许可。本窗口不显示许可令牌。",
+            }),
+            (() => {
+              const grant = el("button", {
+                class: "quiet-button",
+                text: "申请新的复查许可（当前不可用）",
+                attrs: { type: "button", id: "review-request-grant" },
+              });
+              grant.disabled = true;
+              grant.title = "没有公共发放入口；由宿主/负责人发放";
+              return grant;
+            })(),
+          ],
+        }),
+      ],
+    }),
+    el("div", {
+      class: "review-step",
+      children: [
+        el("span", { class: "review-step-number", text: "3" }),
+        el("div", {
+          children: [
+            el("h3", { text: "开始新的审查" }),
+            el("p", {
+              class: "muted",
+              text: "新审查会生成新的审查轮次和候选；旧候选仍保持已拒绝。",
+            }),
+          ],
+        }),
+      ],
+    }),
+  ];
+  const reason = generateBlockReason(review, info);
+  const start = el("button", {
+    class: "primary-button",
+    text: "开始新的审查（新候选）",
+    attrs: { type: "button", id: "review-reauth-start" },
+  });
+  start.disabled = reason !== null;
+  start.title = reason ?? "";
+  start.addEventListener("click", () => openReviewGenerate());
+  const refresh = el("button", {
+    class: "quiet-button",
+    text: "刷新工作列表",
+    attrs: { type: "button" },
+  });
+  refresh.addEventListener("click", () => void refreshReviewData());
+  const back = el("button", {
+    class: "quiet-button",
+    text: "返回已暂停的审查",
+    attrs: { type: "button" },
+  });
+  back.addEventListener("click", () => applyReview({ type: "reauth-close" }));
+  children.push(
+    el("div", { class: "review-reauth-actions", children: [start, refresh, back] }),
+  );
+  if (reason) {
+    children.push(el("p", { class: "review-lock-reason", text: reason }));
+  }
+  return el("div", { class: "review-reauth", children });
+}
+
+function isReviewModalOpen(): boolean {
+  return review.confirmGenerate || review.confirmDecision !== null;
+}
+
+function closeReviewModal(): void {
+  if (!isReviewModalOpen()) {
+    return;
+  }
+  applyReview({ type: "generate-confirm", open: false });
+  applyReview({ type: "decision-confirm", decision: null });
+}
+
+function renderReviewOverlay(): void {
+  const open = workspace === "review" && isReviewModalOpen();
+  shell.reviewOverlay.classList.toggle("hidden", !open);
+  if (!open) {
+    reviewModalWasOpen = false;
+    clear(shell.reviewModal);
+    return;
+  }
+  clear(shell.reviewModal);
+  if (review.confirmGenerate) {
+    renderGenerateModal();
+  } else if (review.confirmDecision) {
+    renderDecisionModal(review.confirmDecision);
+  }
+  if (!reviewModalWasOpen) {
+    reviewModalWasOpen = true;
+    window.setTimeout(() => {
+      const first = shell.reviewModal.querySelector<HTMLButtonElement>(
+        "button:not([disabled])",
+      );
+      first?.focus({ preventScroll: true });
+    }, 0);
+  }
+}
+
+function renderGenerateModal(): void {
+  const destination = state.destination;
+  const confirm = el("button", {
+    class: "primary-button",
+    text: "确认并开始审查",
+    attrs: { type: "button", id: "review-confirm-generate" },
+  });
+  confirm.disabled = review.busy !== null;
+  confirm.addEventListener("click", () => void confirmReviewGenerate());
+  const cancel = el("button", {
+    class: "quiet-button",
+    text: "返回检查",
+    attrs: { type: "button", id: "review-cancel-generate" },
+  });
+  cancel.addEventListener("click", () => closeReviewModal());
+  shell.reviewModal.append(
+    el("div", {
+      class: "review-modal-head",
+      children: [
+        el("h2", {
+          text: "开始审查？",
+          attrs: { id: "review-modal-title" },
+        }),
+        el("span", { class: "eyebrow", text: "D3 · 外部发送确认" }),
+      ],
+    }),
+    el("div", {
+      class: "review-modal-body",
+      children: [
+        el("p", {
+          text: destination
+            ? `本次将把工作上下文发送到 ${destination.provider} / ${destination.model}。`
+            : "宿主尚未提供目的地。",
+        }),
+        el("p", {
+          class: "muted",
+          text: "只生成候选或 WAIT，不提交 Belief。生成后仍需要单独批准；批准提交不会再次发送给模型。",
+        }),
+        el("p", {
+          class: "muted",
+          text: "确认只表达本次用户意图，不是授权凭据。",
+        }),
+      ],
+    }),
+    el("div", { class: "review-modal-actions", children: [cancel, confirm] }),
+  );
+}
+
+function renderDecisionModal(decision: ReviewDecision): void {
+  const detail = review.detail;
+  if (!detail) {
+    closeReviewModal();
+    return;
+  }
+  const approve = decision === "approve";
+  const confirm = el("button", {
+    class: approve ? "primary-button" : "danger-button",
+    text: approve ? "批准并提交" : "确认拒绝",
+    attrs: { type: "button", id: "review-confirm-decision" },
+  });
+  confirm.disabled = !canStartResolve(review, state.host, decision);
+  confirm.addEventListener("click", () => void performReviewDecision(decision));
+  const cancel = el("button", {
+    class: "quiet-button",
+    text: approve ? "返回检查" : "返回",
+    attrs: { type: "button", id: "review-cancel-decision" },
+  });
+  cancel.addEventListener("click", () => closeReviewModal());
+  const proposal = detail.proposal;
+  const summary: Node[] = [];
+  if (proposal) {
+    summary.push(
+      kv("操作", operationLabel(proposal.operation)),
+      kv("主张", proposal.claim ?? "—"),
+      kv("类型", proposal.claim_type ?? "—"),
+      kv("范围", formatReviewValue("scope", proposal.scope ?? {})),
+      kv("强度", proposal.strength ?? "—"),
+      kv("来源", `${proposal.evidence_links.length} 项（详情在审查记录中）`),
+    );
+  }
+  shell.reviewModal.append(
+    el("div", {
+      class: "review-modal-head",
+      children: [
+        el("h2", {
+          text: approve ? "批准并提交这个候选？" : "拒绝这个候选？",
+          attrs: { id: "review-modal-title" },
+        }),
+        el("span", { class: "review-badge is-warn", text: "二次确认" }),
+      ],
+    }),
+    el("div", {
+      class: "review-modal-body",
+      children: [
+        summary.length > 0 ? el("dl", { class: "kv", children: summary }) : null,
+        el("p", {
+          text: approve
+            ? "这会写入本地 Belief，供之后的咨询使用。批准后不能在这个界面撤回。批准提交不会再次发送给模型。"
+            : "拒绝后工作项会暂停，旧候选不能再次批准。重新考虑需要新的复查许可，并会生成新的候选。此决定不能在这个界面撤销。",
+        }),
+        el("p", {
+          class: "muted",
+          text: "提交前会重新核对 exact candidate/version/Work/current；如果已变化，本窗口不会自动重试。",
+        }),
+      ],
+    }),
+    el("div", { class: "review-modal-actions", children: [cancel, confirm] }),
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -1270,9 +3529,17 @@ function renderDrawer(): void {
   }
   clear(shell.drawerBody);
   if (state.drawer.tab === "sources") {
-    renderSourcesTab();
+    if (workspace === "review") {
+      renderReviewSourcesTab();
+    } else {
+      renderSourcesTab();
+    }
   } else if (state.drawer.tab === "audit") {
-    renderAuditTab();
+    if (workspace === "review") {
+      renderReviewAuditTab();
+    } else {
+      renderAuditTab();
+    }
   } else if (state.drawer.tab === "destination") {
     renderDestinationTab();
   } else {
@@ -1380,6 +3647,192 @@ function renderAuditTab(): void {
         el("strong", { text: "缺口说明" }),
         el("p", {
           text: "Consult 的 Attempt 明细与完整 Context 来源在 C12c 之前没有公共读取接口；本窗口将它们标为暂不可用，而不是补字段或读库。",
+        }),
+      ],
+    }),
+  );
+}
+
+function renderReviewSourcesTab(): void {
+  const detail = review.detail;
+  if (!detail) {
+    shell.drawerBody.append(
+      el("p", {
+        class: "muted",
+        text: "本次还没有可展示的候选来源。选择一个候选后，来源摘要会显示在这里。",
+      }),
+    );
+  } else if (detail.redacted) {
+    shell.drawerBody.append(
+      callout(
+        "候选内容不可读；没有可披露的来源，也没有用空值替代。",
+        "warn",
+      ),
+    );
+  } else {
+    const list = el("div", { class: "source-list" });
+    for (const source of detail.sources) {
+      const row = el("div", {
+        class: "review-source-detail",
+        children: [
+          el("div", {
+            class: "source-row",
+            children: [
+              el("div", {
+                class: "source-main",
+                children: [
+                  el("span", {
+                    class: "source-kind",
+                    text: sourceKindLabel(source.kind),
+                  }),
+                  el("span", {
+                    class: "source-id",
+                    text: sourceRefId(source.ref),
+                  }),
+                ],
+              }),
+              el("span", {
+                class: `source-status is-${source.availability}`,
+                text: sourceAvailabilityLabel(source.availability),
+              }),
+              ...(source.reason
+                ? [
+                    el("span", {
+                      class: "source-note",
+                      text: sourceReasonLabel(source.reason),
+                    }),
+                  ]
+                : []),
+            ],
+          }),
+        ],
+      });
+      if (source.availability === "available" && source.body !== null) {
+        row.appendChild(
+          el("pre", {
+            class: "review-source-body",
+            text: source.body,
+          }),
+        );
+      } else if (
+        source.kind !== "event" &&
+        source.kind !== "record"
+      ) {
+        row.appendChild(
+          el("p", {
+            class: "muted",
+            text: "正文不可读或未提供；不显示空值占位。",
+          }),
+        );
+      }
+      list.appendChild(row);
+    }
+    shell.drawerBody.append(
+      drawerSection("审查来源（只显示正式可读引用）", [
+        el("p", {
+          class: "muted",
+          text: "Event/Record 只显示引用与可读性；Input/Artifact 正文仅在正式可读时显示。",
+        }),
+        list,
+        el("p", {
+          class: "muted",
+          text: "Event/Record 只显示精确引用与可读性，不读取正文。Input/Artifact 的正文仅在 read_experience 正式可读时显示；隐藏来源不显示正文。",
+        }),
+      ]),
+    );
+  }
+  shell.drawerBody.append(
+    el("div", {
+      class: "gap-box",
+      children: [
+        el("strong", { text: "缺口说明" }),
+        el("p", {
+          text: "不显示 Prompt、HTTP 正文、候选原始 body、内部 revision 或其他 namespace 的来源。",
+        }),
+      ],
+    }),
+  );
+}
+
+function renderReviewAuditTab(): void {
+  const detail = review.detail;
+  const work = review.selectedWork;
+  const outcome = review.outcome;
+  if (!detail && !outcome && !work) {
+    shell.drawerBody.append(
+      el("p", { class: "muted", text: "本次还没有可审查的 Review 引用。" }),
+    );
+    return;
+  }
+  const rows: Node[] = [];
+  if (work) {
+    rows.push(
+      kv("工作", work.work_id),
+      kv("事件", work.event_id),
+      kv("轮次", String(work.generation)),
+      kv("暂停", work.blocked ? "是" : "否"),
+      kv("复查许可", work.rerun_registered ? "已登记（待校验）" : "未登记"),
+    );
+  }
+  if (detail) {
+    rows.push(
+      kv("候选", detail.candidate.candidate_id),
+      kv("候选版本", String(detail.candidate.artifact_version)),
+      kv("工作轮次", String(detail.candidate.work_generation)),
+      kv("交互", detail.candidate.interaction_id),
+      kv("上下文", detail.candidate.context_id),
+      kv("状态", candidateStatusLabel(detail.candidate.status)),
+      kv("操作", operationLabel(detail.proposal?.operation)),
+      kv("结构校验", detail.structural_validation ?? "—"),
+      kv("可批准提示", detail.can_approve ? "是（仅内容提示）" : "否"),
+      kv("可拒绝提示", detail.can_reject ? "是（仅内容提示）" : "否"),
+      kv("资格原因", detail.eligibility_reason ?? "—"),
+      kv("尝试", detail.candidate.attempt_id
+        ? `${shortId(detail.candidate.attempt_id)} #${detail.candidate.attempt_no ?? "—"}`
+        : "暂不可用"),
+    );
+  }
+  if (outcome) {
+    rows.push(
+      kv("结果状态", reviewViewLabel(outcome.state)),
+      kv("模型适配器", outcome.model_adapter ?? "—"),
+      kv("结果交互", shortId(outcome.interaction_id)),
+    );
+    if (outcome.receipt) {
+      rows.push(
+        kv("回执请求", shortId(outcome.receipt.request_id)),
+        kv("回执操作", receiptOperationLabel(outcome.receipt.operation)),
+        kv("回执结果", outcome.receipt.outcome),
+        kv("回执时间", outcome.receipt.committed_at),
+      );
+    } else if (outcome.state === "committed") {
+      rows.push(kv("回执", "不可见"));
+    }
+  }
+  const caps = reviewCaps(state.host);
+  rows.push(
+    kv("宿主读取权限", caps.read ? "可用" : "不可用"),
+    kv("宿主开始审查权限", caps.generate ? "可用" : "不可用"),
+    kv("宿主批准权限", caps.approve ? "可用" : "不可用"),
+    kv("宿主拒绝权限", caps.reject ? "可用" : "不可用"),
+    kv("宿主结果权限", caps.result ? "可用" : "不可用"),
+  );
+  shell.drawerBody.append(
+    drawerSection("审查与候选引用", [
+      el("dl", { class: "kv", children: rows }),
+      el("p", {
+        class: "muted",
+        text: "只显示公开引用与状态；不显示 Prompt、HTTP 正文、proposal body、内部 revision、Approval/grant 或数据库列。",
+      }),
+    ]),
+  );
+  shell.drawerBody.append(
+    el("div", {
+      class: "gap-box",
+      children: [
+        el("strong", { text: "动作边界" }),
+        el("p", {
+          text: "can_approve/can_reject 只是内容提示；按钮同时要求宿主 review.approve/review.reject 权限、pending 状态、v1 版本与工作轮次一致。最终由 C07 resolve 复验。",
         }),
       ],
     }),
@@ -1533,10 +3986,26 @@ function renderSettingsTab(): void {
         children: [
           kv("品牌", "QUINTESSENCE"),
           kv("版本", info ? `${info.version} · ${info.protocol}` : "—"),
-          kv("工作区", "Consult（C12b）"),
+          kv("工作区", "Consult + Review（C12c）"),
           kv("PCS", info ? `${info.pcs.version} · schema ${info.pcs.schema_migrations}` : "—"),
           kv("外观", "深色主题（品牌固定）"),
         ],
+      }),
+    ]),
+    drawerSection("审查能力（宿主派生，只读）", [
+      el("dl", {
+        class: "kv",
+        children: [
+          kv("读取", reviewCaps(info).read ? "可用" : "不可用"),
+          kv("开始审查", reviewCaps(info).generate ? "可用" : "不可用"),
+          kv("批准", reviewCaps(info).approve ? "可用" : "不可用"),
+          kv("拒绝", reviewCaps(info).reject ? "可用" : "不可用"),
+          kv("结果恢复", reviewCaps(info).result ? "可用" : "不可用"),
+        ],
+      }),
+      el("p", {
+        class: "muted",
+        text: "这些布尔值由可信宿主派生；本窗口不能自行赋权，也不显示 token、grant 或权限表。",
       }),
     ]),
   );

@@ -67,10 +67,20 @@ def build(args: argparse.Namespace) -> dict[str, object]:
             "operator": "operator:desktop-lab",
             "access_ref": "authorization:host:desktop-lab",
             "privacy_classes": ["private"],
-            "purposes": ["consult", "reasoning"],
+            "purposes": ["consult", "reasoning", "review"],
             "disclose": True,
             "retention": "standard",
             "policy_ref": "policy:collab.v1",
+        },
+        "review": {
+            "permissions": [
+                "work.scan",
+                "experience.read",
+                "review.generate",
+                "review.approve",
+                "review.reject",
+                "result.read",
+            ]
         },
         "consult": {"query_plan": query_plan, "max_question_chars": 8000},
         "destination": {

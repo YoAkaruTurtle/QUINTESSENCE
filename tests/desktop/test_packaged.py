@@ -5,13 +5,109 @@ from __future__ import annotations
 import os
 import unittest
 
-from tests.desktop.support import DesktopCase
+from tests.desktop.support import (
+    DesktopCase,
+    NAMESPACE,
+    REVIEW_PERMISSIONS,
+    config_document,
+    review_proposal,
+    seed_work,
+)
 
 EXE = os.environ.get("QUINTESSENCE_DESKTOP_SIDECAR_EXE", "")
 
 
 @unittest.skipUnless(EXE, "packaged sidecar executable is not selected")
 class PackagedSidecarTests(DesktopCase):
+    def test_packaged_sidecar_runs_a_review_approval(self) -> None:
+        database = self.tmp_path / "packaged-review.sqlite"
+        work = seed_work(database, managed=True)
+        document = config_document(
+            database,
+            review_permissions=REVIEW_PERMISSIONS,
+            review_script=[review_proposal(work["event_id"])],
+        )
+        process = self.start(
+            executable=EXE, document=document, db_path=database
+        )
+        info = process.request("app.info")["result"]
+        self.assertTrue(info["workspace"]["review"], info["workspace"])
+        self.assertEqual(
+            info["capabilities"]["review"],
+            {
+                "read": True,
+                "generate": True,
+                "approve": True,
+                "reject": True,
+                "result": True,
+            },
+        )
+        confirm = process.request(
+            "app.confirm_destination",
+            {
+                "session_id": info["session_id"],
+                "destination_id": info["destination"]["destination_id"],
+            },
+        )
+        self.assertTrue(confirm["ok"], confirm)
+        listed = process.request(
+            "review.work.list", {"session_id": info["session_id"]}
+        )
+        self.assertTrue(listed["ok"], listed)
+        self.assertIn(
+            work["work_id"],
+            [item["work_id"] for item in listed["result"]["managed"]],
+        )
+        generated = process.request(
+            "review.generate",
+            {
+                "session_id": info["session_id"],
+                "work_id": work["work_id"],
+                "event_id": work["event_id"],
+                "confirmed_destination_id": info["destination"]["destination_id"],
+            },
+        )
+        self.assertTrue(generated["ok"], generated)
+        self.assertEqual(generated["result"]["state"], "pending")
+        candidate = generated["result"]["candidate_id"]
+        detail = process.request(
+            "review.candidate.detail",
+            {
+                "session_id": info["session_id"],
+                "candidate_id": candidate,
+                "artifact_version": 1,
+            },
+        )
+        self.assertTrue(detail["ok"], detail)
+        self.assertTrue(detail["result"]["can_approve"])
+        resolved = process.request(
+            "review.resolve",
+            {
+                "session_id": info["session_id"],
+                "candidate_id": candidate,
+                "artifact_version": 1,
+                "decision": "approve",
+            },
+        )
+        self.assertTrue(resolved["ok"], resolved)
+        self.assertEqual(resolved["result"]["state"], "committed")
+        self.assertIsNotNone(resolved["result"]["receipt"])
+        self.assertEqual(
+            self.scalar(
+                "SELECT COUNT(*) FROM collab_artifacts "
+                "WHERE kind = 'candidate' AND status = 'committed'"
+            ),
+            1,
+        )
+        self.assertEqual(
+            self.scalar(
+                "SELECT COUNT(*) FROM collab_interactions "
+                "WHERE mode = 'review' AND namespace = ?",
+                (NAMESPACE,),
+            ),
+            1,
+        )
+
     def test_packaged_sidecar_runs_the_real_consult(self) -> None:
         process = self.start(executable=EXE)
         info = process.request("app.info")["result"]
