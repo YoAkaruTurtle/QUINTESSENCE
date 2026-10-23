@@ -1,0 +1,21 @@
+{
+  "name": "quintessence-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "QUINTESSENCE desktop Consult workspace and trusted desktop.v1 bridge",
+  "scripts": {
+    "dev": "vite --port 1420 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "test": "node scripts/run-frontend-tests.mjs",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability: core IPC only. No shell, fs, http, opener or process permission is granted to the WebView.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

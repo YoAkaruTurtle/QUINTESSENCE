@@ -1,0 +1,49 @@
+[package]
+name = "quintessence-desktop"
+version = "0.1.0"
+description = "QUINTESSENCE desktop Consult workspace and trusted bridge host"
+authors = ["QUINTESSENCE"]
+edition = "2021"
+rust-version = "1.77"
+default-run = "quintessence-desktop"
+
+[lib]
+name = "quintessence_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "quintessence-desktop"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake_sidecar"
+path = "src/bin/fake_sidecar.rs"
+required-features = ["host-tests"]
+
+[features]
+default = []
+host-tests = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
