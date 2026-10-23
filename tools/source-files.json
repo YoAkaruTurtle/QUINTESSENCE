@@ -41,6 +41,7 @@
   "contracts/v2/response.json",
   "contracts/v2/scope.json",
   "docs/collaboration/FACADE.md",
+  "docs/design/C12a-INTERACTION.md",
   "docs/development/MIGRATION-BOUNDARY.md",
   "docs/development/STATUS.md",
   "pyproject.toml",
