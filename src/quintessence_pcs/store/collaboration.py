@@ -31,6 +31,7 @@ from ..foundation import identifiers
 from ..foundation.errors import (
     AuthorizationRequired,
     CommandConflict,
+    ContextStale,
     CorruptStore,
     InvalidInput,
     RecordNotFound,
@@ -1021,6 +1022,97 @@ class CollaborationMixin:
             f"interaction {current.interaction_id} is terminal at {previous!r}; "
             f"it cannot move to {result!r}"
         )
+
+    # -------------------------------------------------------- context binding
+
+    def bind_interaction_context(
+        self, namespace: str, interaction_id: str, context_id: str
+    ) -> InteractionRow:
+        """Bind an open consult interaction to its final Context (C11).
+
+        This is the one controlled ``context_id`` update.  The 0008 update
+        trigger already permits ``context_id`` to change while freezing every
+        other creation column, so no migration is added.  The method never
+        touches ``result``, ``receipt_request_id``, ``completed_at`` or any
+        frozen field.
+
+        Rules:
+
+        * the interaction must exist, belong to ``namespace`` and be
+          ``mode="consult"``;
+        * it must still be open (``result`` is NULL or ``incomplete``); a
+          terminal interaction is ``CORRUPT_STORE``;
+        * the new Context must exist, belong to ``namespace``, be a consult
+          Context and not be inside a deletion barrier;
+        * every artifact already bound to the interaction must name the same
+          Context (otherwise the audit chain would be ambiguous);
+        * re-binding the identical Context is idempotent and writes nothing.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        iid = _require_uuid(interaction_id, "interaction_id")
+        cid = _require_uuid(context_id, "context_id")
+
+        with self.transaction():
+            current = self.interaction(namespace=ns, interaction_id=iid)
+            if current is None:
+                raise RecordNotFound(f"no interaction {iid} in {ns!r}")
+            if current.mode != "consult":
+                raise InvalidInput(
+                    "only a consult interaction can bind a final Context"
+                )
+            if current.result not in (None, "incomplete"):
+                raise CorruptStore(
+                    f"interaction {iid} is terminal at {current.result!r}; it "
+                    "cannot be rebound to another Context"
+                )
+            row = self._require_connection().execute(
+                "SELECT namespace, context_kind FROM context_snapshots "
+                "WHERE context_id = ?",
+                (cid,),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound(f"no persisted context {cid!r}")
+            if row["namespace"] != ns:
+                raise ScopeViolation(
+                    f"context {cid} belongs to namespace {row['namespace']!r}, "
+                    f"not {ns!r}"
+                )
+            if row["context_kind"] != "consult":
+                raise InvalidInput(
+                    f"context {cid} is not a consult Context"
+                )
+            if self.context_barred(namespace=ns, context_id=cid):
+                raise ContextStale(
+                    f"context {cid} is inside a deletion barrier"
+                )
+            for artifact in self._require_connection().execute(
+                "SELECT context_id FROM collab_artifacts "
+                "WHERE namespace = ? AND interaction_id = ?",
+                (ns, iid),
+            ).fetchall():
+                if artifact["context_id"] != cid:
+                    raise CorruptStore(
+                        f"interaction {iid} already has an artifact bound to "
+                        "another Context"
+                    )
+            if current.context_id == cid:
+                return current
+            cursor = self._require_connection().execute(
+                "UPDATE collab_interactions SET context_id = ? "
+                "WHERE namespace = ? AND interaction_id = ?",
+                (cid, ns, iid),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - row was just read
+                raise CorruptStore(
+                    f"interaction {iid} disappeared during its Context bind"
+                )
+            updated = self.interaction(namespace=ns, interaction_id=iid)
+            if updated is None:  # pragma: no cover - row was just updated
+                raise CorruptStore(
+                    f"interaction {iid} cannot be read back after its bind"
+                )
+            return updated
 
     # ------------------------------------------------------------- artifacts
 

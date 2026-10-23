@@ -61,10 +61,12 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..domains.cognition.beliefs import BELIEF_KIND
 from ..domains.cognition.context_guard import (
     require_current_consult_context,
     require_live_context,
 )
+from ..domains.memory.episode_shape import EPISODE_KIND
 from ..domains.refs import RecordRef
 from ..foundation.errors import RecordNotFound, StorageError
 from ..foundation.jsonutil import canonical_json_text, strict_json_loads
@@ -186,6 +188,31 @@ class _ValidatedResponse:
     finish_reason: str
 
 
+@dataclass(frozen=True)
+class ModelCallEvidence:
+    """The exact attempt a successful ``propose`` produced.
+
+    ``content`` is the assistant text this call actually returned;
+    ``attempt_ref`` is the frozen ``attempt_ref`` shape
+    (authorization_id/attempt_id/attempt_no/request_hash) of the settled
+    attempt.  C11 turns this into a reply-artifact binding; a guess based on
+    "the latest successful attempt for this run" is never accepted.
+    """
+
+    content: str
+    attempt_ref: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, str) or not self.content:
+            raise ModelConfigurationError(
+                "model call evidence requires non-empty content"
+            )
+        if not isinstance(self.attempt_ref, dict):
+            raise ModelConfigurationError(
+                "model call evidence requires an attempt_ref object"
+            )
+
+
 class DirectHttpModel:
     """Tool-free OpenAI-compatible chat-completions adapter (PCS2-009)."""
 
@@ -232,6 +259,11 @@ class DirectHttpModel:
         #: make a format-repair request explicit (assistant turn + feedback).
         #: Keyed by run_id; a repair must reuse the same run *and* Context.
         self._last_content: dict[str, tuple[str, str]] = {}
+        #: C11: evidence for the attempt settled by the *current* propose call.
+        #: Cleared at the start of every call and set only after a fully
+        #: successful HTTP 200 / stop / non-empty / ok-attempt completion.
+        self._evidence: ModelCallEvidence | None = None
+        self._evidence_binding: tuple[str, str] | None = None
 
     # ------------------------------------------------------------- preflight
 
@@ -305,6 +337,11 @@ class DirectHttpModel:
         feedback: str | None = None,
     ) -> str:
         del references  # the exact rendered text contains the available refs
+        # A new logical generation starts here, before any validation: any
+        # evidence from an earlier call is void even if this call fails before
+        # an attempt is settled.
+        self._evidence = None
+        self._evidence_binding = None
         if self._active is None:
             raise ModelConfigurationError(
                 "DirectHttpModel.propose requires bind_run(context)"
@@ -439,7 +476,7 @@ class DirectHttpModel:
                     f"provider response is not a usable proposal: {exc.label}"
                 ) from exc
 
-            self._finish(
+            settled = self._finish(
                 reservation.attempt,
                 outcome=MODEL_ATTEMPT_OK,
                 response_body=response_text,
@@ -452,6 +489,19 @@ class DirectHttpModel:
                 cost_estimate=None,
                 error_label=None,
             )
+            # Bind the exact settled attempt to this successful call.  C11 may
+            # only cite an attempt this call actually produced; a stale or
+            # inferred reference is unrepresentable.
+            self._evidence = ModelCallEvidence(
+                content=validated.content,
+                attempt_ref={
+                    "authorization_id": settled.authorization_id,
+                    "attempt_id": settled.attempt_id,
+                    "attempt_no": settled.attempt_no,
+                    "request_hash": settled.request_hash,
+                },
+            )
+            self._evidence_binding = (context.run_id, context.context_id)
             # Keep only a small repair memory; a Context/run is short-lived.
             if len(self._last_content) >= 8:
                 self._last_content.clear()
@@ -464,6 +514,24 @@ class DirectHttpModel:
         # Defensive: the loop either returns or raises.
         label = last_failure.label if last_failure is not None else "UNKNOWN"
         raise ModelTransportError(f"provider call failed: {label}")
+
+    def last_attempt_evidence(
+        self, *, run_id: str, context_id: str
+    ) -> ModelCallEvidence | None:
+        """Return the evidence for the last successful ``propose`` call.
+
+        The value exists only when the call actually completed (HTTP 200,
+        ``finish_reason="stop"``, non-empty content, settled ``ok`` attempt) and
+        only for the exact run/Context that call was bound to.  A failed,
+        transport-retried or superseded call returns ``None``; a caller may never
+        fall back to "the latest successful attempt for this run".
+        """
+
+        if not isinstance(run_id, str) or not isinstance(context_id, str):
+            return None
+        if self._evidence is None or self._evidence_binding != (run_id, context_id):
+            return None
+        return self._evidence
 
     # --------------------------------------------------------------- internals
 
@@ -630,110 +698,153 @@ class DirectHttpModel:
                 "pre-send check refused: the Context profile read_set usage "
                 "is not pinned_asset"
             )
-        current_entries = [entry for entry in read_set if entry.usage == "current"]
-        if len(current_entries) > 1:
-            raise ModelAdapterError(
-                "pre-send check refused: the Context has more than one "
-                "current read_set record"
-            )
-        self_view_ref = current_entries[0].ref if current_entries else None
-        if self_view_ref is not None and self_view_ref.namespace != namespace:
-            raise ModelAdapterError(
-                "pre-send check refused: the Context self view is not an "
-                "exact record in this namespace"
-            )
-
-        expected_entries = {
-            (profile_ref.record_id, profile_ref.record_version, "pinned_asset")
-        }
-        if self_view_ref is not None:
-            expected_entries.add(
-                (self_view_ref.record_id, self_view_ref.record_version, "current")
-            )
-        if len(read_set) != len(expected_entries):
-            raise ModelAdapterError(
-                "pre-send check refused: read_set contains a record this "
-                "Context did not render"
-            )
+        # Prove every read_set record through its exact frozen version.  The
+        # Profile participates as pinned_asset; a fresh SelfView remains the one
+        # ``current`` self_view record; C11 query records (Belief/Episode) are
+        # the only other records allowed, each exactly once.
+        versions: dict[tuple[str, int], Any] = {}
         for entry in read_set:
-            key = (entry.ref.record_id, entry.ref.record_version, entry.usage)
-            if key not in expected_entries:
+            ref = entry.ref
+            if not isinstance(ref, RecordRef) or ref.namespace != namespace:
                 raise ModelAdapterError(
-                    "pre-send check refused: read_set contains an unknown record"
+                    "pre-send check refused: a read_set reference is not an "
+                    "exact record in this namespace"
                 )
-
-        if any(source.ref_kind != "record" for source in context.sources):
-            raise ModelAdapterError(
-                "pre-send check refused: the Context has a body source that "
-                "is not an exact record"
+            key = (ref.record_id, ref.record_version)
+            if key in versions:
+                raise ModelAdapterError(
+                    "pre-send check refused: read_set contains a repeated "
+                    "exact record version"
+                )
+            versions[key] = self._exact_record_version(
+                namespace,
+                ref.record_id,
+                ref.record_version,
+                what="read-set",
             )
+
         profile_key = (profile_ref.record_id, profile_ref.record_version)
-        source_keys = [
-            (source.ref_id, int(source.ref_version)) for source in context.sources
-        ]
-        if source_keys.count(profile_key) != 1:
-            raise ModelAdapterError(
-                "pre-send check refused: the Context profile source must "
-                "appear exactly once"
-            )
-        expected_keys = {profile_key}
-        if self_view_ref is not None:
-            self_view_key = (self_view_ref.record_id, self_view_ref.record_version)
-            expected_keys.add(self_view_key)
-            if source_keys.count(self_view_key) != 1:
-                raise ModelAdapterError(
-                    "pre-send check refused: the Context self-view source "
-                    "must appear exactly once"
-                )
-        if len(source_keys) != len(expected_keys):
-            raise ModelAdapterError(
-                "pre-send check refused: the Context sources contain a "
-                "duplicate or unknown record"
-            )
-        for key in source_keys:
-            if key not in expected_keys:
-                raise ModelAdapterError(
-                    "pre-send check refused: the Context sources contain an "
-                    "unknown record"
-                )
-
-        profile_version = self._exact_record_version(
-            namespace,
-            profile_ref.record_id,
-            profile_ref.record_version,
-            what="profile",
-        )
-        if profile_version.kind != "persona_profile":
+        if versions[profile_key].kind != "persona_profile":
             raise ModelAdapterError(
                 "pre-send check refused: the Context profile source is not a "
                 "persona_profile"
             )
-        self_view_version = None
-        if self_view_ref is not None:
-            self_view_version = self._exact_record_version(
-                namespace,
-                self_view_ref.record_id,
-                self_view_ref.record_version,
-                what="self view",
-            )
-            if self_view_version.kind != "self_view":
-                raise ModelAdapterError(
-                    "pre-send check refused: the Context current read_set "
-                    "record is not a self_view"
-                )
-        if profile_version.privacy_class not in policy.privacy_classes:
+        if versions[profile_key].privacy_class not in policy.privacy_classes:
             raise ModelNotAuthorizedError(
                 "pre-send check refused: the profile privacy class is not "
                 "allowed by the send policy"
             )
-        if (
-            self_view_version is not None
-            and self_view_version.privacy_class not in policy.privacy_classes
-        ):
-            raise ModelNotAuthorizedError(
-                "pre-send check refused: the self-view privacy class is not "
-                "allowed by the send policy"
+
+        self_view_entries = [
+            entry
+            for entry in read_set
+            if entry.ref != profile_ref
+            and versions[(entry.ref.record_id, entry.ref.record_version)].kind
+            == "self_view"
+        ]
+        if len(self_view_entries) > 1:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context has more than one "
+                "self-view record in read_set"
             )
+        self_view_ref = None
+        if self_view_entries:
+            self_view_entry = self_view_entries[0]
+            if self_view_entry.usage != "current":
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context self-view read_set "
+                    "usage is not current"
+                )
+            self_view_ref = self_view_entry.ref
+            self_view_version = versions[
+                (self_view_ref.record_id, self_view_ref.record_version)
+            ]
+            if self_view_version.privacy_class not in policy.privacy_classes:
+                raise ModelNotAuthorizedError(
+                    "pre-send check refused: the self-view privacy class is not "
+                    "allowed by the send policy"
+                )
+
+        for entry in read_set:
+            if entry.ref == profile_ref or entry in self_view_entries:
+                continue
+            version = versions[(entry.ref.record_id, entry.ref.record_version)]
+            if version.kind not in (BELIEF_KIND, EPISODE_KIND):
+                raise ModelAdapterError(
+                    "pre-send check refused: read_set contains a record this "
+                    "Context did not render"
+                )
+            if entry.usage not in ("current", "historical"):
+                raise ModelAdapterError(
+                    "pre-send check refused: a query read_set record must be "
+                    "current or historical"
+                )
+            if version.privacy_class not in policy.privacy_classes:
+                raise ModelNotAuthorizedError(
+                    "pre-send check refused: a query record privacy class is "
+                    "not allowed by the send policy"
+                )
+            if entry.usage == "current":
+                pointer = self._store.record_pointer(
+                    namespace, entry.ref.record_id
+                )
+                if (
+                    pointer is None
+                    or pointer.current_version != entry.ref.record_version
+                ):
+                    raise ModelAdapterError(
+                        "pre-send check refused: a current query read_set "
+                        "record is no longer the current version"
+                    )
+
+        # Every record source must be exactly one read_set entry.  Event
+        # sources may only be the Episode EventRefs of a query material; an
+        # unknown source kind is refused rather than silently ignored.
+        source_records: list[tuple[str, int]] = []
+        source_events: list[str] = []
+        for source in context.sources:
+            if source.ref_kind == "record":
+                source_records.append(
+                    (source.ref_id, int(source.ref_version))
+                )
+            elif source.ref_kind == "event":
+                source_events.append(source.ref_id)
+            else:
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context has a source kind "
+                    "this gate does not know"
+                )
+        read_keys = sorted(
+            (entry.ref.record_id, entry.ref.record_version) for entry in read_set
+        )
+        if sorted(source_records) != read_keys:
+            raise ModelAdapterError(
+                "pre-send check refused: the Context record sources do not "
+                "exactly cover read_set"
+            )
+        seen_events: set[str] = set()
+        for event_id in source_events:
+            if event_id in seen_events:
+                raise ModelAdapterError(
+                    "pre-send check refused: the Context has a duplicate "
+                    "event source"
+                )
+            seen_events.add(event_id)
+            if self._store.event_is_deleted(namespace, event_id):
+                raise ModelAdapterError(
+                    "pre-send check refused: a Context event source has been "
+                    "deleted"
+                )
+            header = self._store.event_header(namespace, event_id)
+            if header is None:
+                raise ModelAdapterError(
+                    "pre-send check refused: a Context event source is missing"
+                )
+            if header.privacy_class not in policy.privacy_classes:
+                raise ModelNotAuthorizedError(
+                    "pre-send check refused: an event source privacy class is "
+                    "not allowed by the send policy"
+                )
 
         stored_refs = self._store.context_collab_sources(
             namespace=namespace, context_id=context.context_id
@@ -1096,4 +1207,5 @@ __all__ = [
     "MAX_RETRIES",
     "MIN_SOCKET_TIMEOUT",
     "DirectHttpModel",
+    "ModelCallEvidence",
 ]

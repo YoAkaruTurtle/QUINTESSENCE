@@ -30,6 +30,7 @@ from .context import (
     MAX_EPISODES,
     PROPOSAL_CONTRACT,
     ConsultContextEnvelope,
+    ConsultQueryMaterial,
     ContextEnvelope,
     ContextService,
     ReadSetEntry,
@@ -44,6 +45,7 @@ from .http_model import (
     DIRECT_HTTP_ADAPTER_KIND,
     DIRECT_HTTP_POLICY_VERSION,
     DirectHttpModel,
+    ModelCallEvidence,
 )
 from .manifest import (
     MANIFEST_FIELDS,
@@ -83,6 +85,7 @@ __all__ = [
     "CognitionRuntime",
     "CollabOutput",
     "ConsultContextEnvelope",
+    "ConsultQueryMaterial",
     "ConsultSendPolicy",
     "ContextEnvelope",
     "ContextService",
@@ -103,6 +106,7 @@ __all__ = [
     "ManifestError",
     "ModelAdapterError",
     "ModelBudgetExceededError",
+    "ModelCallEvidence",
     "ModelConfigurationError",
     "ModelManifest",
     "ModelNotAuthorizedError",

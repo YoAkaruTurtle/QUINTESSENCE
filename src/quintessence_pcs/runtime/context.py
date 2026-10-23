@@ -82,6 +82,7 @@ from ..domains.cognition.context_guard import (
     require_current_consult_context as _require_current_consult_context,
     require_live_consult_context as _require_live_consult_context,
 )
+from ..domains.cognition.query import INTERNAL_OMISSION_REASONS
 from ..domains.cognition.views import (
     SELF_VIEW_FRESH,
     SELF_VIEW_KIND,
@@ -347,6 +348,112 @@ class ReadSetEntry:
 
     def to_dict(self) -> dict[str, Any]:
         return {"ref": self.ref.to_dict(), "usage": self.usage}
+
+
+#: Read-set usages a deterministic query material may contribute.  The pinned
+#: Profile is the only ``pinned_asset``; a query record is ``current`` when the
+#: query result says the version was current, otherwise ``historical``.
+QUERY_READ_USAGES = ("current", "historical")
+
+#: Query omission reasons that must never reach a model-visible body.  They are
+#: exactly the C10 internal set (``unavailable`` is a legitimate public status
+#: and is deliberately not in this tuple).
+_FORBIDDEN_QUERY_REASONS = tuple(
+    reason for reason in INTERNAL_OMISSION_REASONS if reason != "unavailable"
+)
+
+
+@dataclass(frozen=True)
+class ConsultQueryMaterial:
+    """One C10 query result supplied to a consult Context as formal material.
+
+    ``body`` is exactly :meth:`QueryResult.to_body`; ``state_revision`` is the
+    internal query basis the C11 save transaction re-checks, and is never
+    rendered.  ``read_set``/``event_sources`` are the exact dependencies the
+    Context must record and the C09 send gate must re-prove.  This value is
+    built by C11 from a :class:`QueryResult`; applications never supply
+    arbitrary JSON or references here.
+    """
+
+    body: str
+    state_revision: int
+    read_set: tuple[ReadSetEntry, ...]
+    event_sources: tuple[EventRef, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.body, str) or not self.body:
+            raise InvalidInput("query material body must be a non-empty string")
+        try:
+            document = strict_json_loads(self.body)
+        except ValueError as exc:
+            raise InvalidInput("query material body must be strict JSON") from exc
+        if not isinstance(document, dict):
+            raise InvalidInput("query material body must be a JSON object")
+        _reject_internal_query_fields(document)
+        if type(self.state_revision) is not int or self.state_revision < 0:
+            raise InvalidInput(
+                "query material state_revision must be a non-negative integer"
+            )
+        if not isinstance(self.read_set, tuple):
+            raise InvalidInput("query material read_set must be a tuple")
+        seen: set[tuple[str, int]] = set()
+        for entry in self.read_set:
+            if not isinstance(entry, ReadSetEntry):
+                raise InvalidInput(
+                    "query material read_set entries must be ReadSetEntry values"
+                )
+            if entry.usage not in QUERY_READ_USAGES:
+                raise InvalidInput(
+                    "query material read_set usage must be current or historical"
+                )
+            key = (entry.ref.record_id, entry.ref.record_version)
+            if key in seen:
+                raise InvalidInput(
+                    "query material read_set must not repeat an exact record version"
+                )
+            seen.add(key)
+        if not isinstance(self.event_sources, tuple):
+            raise InvalidInput("query material event_sources must be a tuple")
+        seen_events: set[str] = set()
+        for ref in self.event_sources:
+            if not isinstance(ref, EventRef):
+                raise InvalidInput(
+                    "query material event_sources entries must be EventRef values"
+                )
+            if ref.event_id in seen_events:
+                raise InvalidInput(
+                    "query material event_sources must not repeat an event"
+                )
+            seen_events.add(ref.event_id)
+
+
+def _reject_internal_query_fields(value: Any) -> None:
+    """Refuse a material body that carries a C10 internal projection field."""
+
+    if isinstance(value, Mapping):
+        if "state_revision" in value:
+            raise InvalidInput(
+                "query material body must not contain the internal state_revision"
+            )
+        for key, child in value.items():
+            if (
+                key == "reason"
+                and isinstance(child, str)
+                and child in INTERNAL_OMISSION_REASONS
+            ):
+                raise InvalidInput(
+                    "query material body must not contain an internal omission reason"
+                )
+            _reject_internal_query_fields(child)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _reject_internal_query_fields(child)
+        return
+    if isinstance(value, str) and value in _FORBIDDEN_QUERY_REASONS:
+        raise InvalidInput(
+            "query material body must not contain an internal omission reason"
+        )
 
 
 @dataclass(frozen=True)
@@ -623,6 +730,7 @@ class ContextService:
         access: ExperienceAccess,
         input_refs: Sequence[Mapping[str, Any]],
         adapter_kind: str | None = None,
+        query_materials: Sequence[ConsultQueryMaterial] = (),
     ) -> ConsultContextEnvelope:
         """Assemble one consult Context without any cognition write.
 
@@ -639,6 +747,14 @@ class ContextService:
         A source deleted between the two phases is caught by
         ``register_context_sources`` and rolls the whole transaction back: no
         "new watermark + old body" row can survive.
+
+        C11 adds ``query_materials``: each material's body is rendered under
+        ``query_results`` and its exact records/events are merged into
+        ``read_set``/``context_sources``.  Inside the same save transaction the
+        C10 ``state_revision`` basis, every exact record version (including the
+        current pointer for ``usage=current``) and every source event are
+        re-proved; any movement is ``CONTEXT_STALE`` and nothing is written.
+        A consult without query materials renders exactly as before.
 
         ``adapter_kind`` only records the adapter that will eventually send
         this Context; C09 no longer requires it to be ``None``.  Supplying a
@@ -662,6 +778,7 @@ class ContextService:
             )
         self._store.require_standalone("build_consult_context")
         refs = _normalise_consult_input_refs(ns, input_refs)
+        materials = _normalise_query_materials(ns, query_materials)
 
         run_id = str(uuid.uuid4())
         render = self._render_consult(
@@ -669,14 +786,19 @@ class ContextService:
             input_refs=refs,
             access=access,
             run_id=run_id,
+            query_materials=materials,
         )
         read_set, source_records = self._consult_accounting(render)
+        query_read_set, query_sources = self._consult_query_accounting(materials)
+        read_set = _merge_read_set(read_set, query_read_set)
+        source_records = _merge_context_sources(source_records, query_sources)
         budget_view = {
             "limit_bytes": MAX_CONTEXT_BYTES,
             "used_bytes": len(render.document.encode("utf-8")),
         }
 
         with self._store.transaction():
+            self._recheck_consult_query_locked(ns, materials)
             self._recheck_consult_render_locked(ns, render)
             watermarks = self._store.context_watermarks(ns)
             snapshot = self._store.insert_context_snapshot_locked(
@@ -727,6 +849,7 @@ class ContextService:
         input_refs: Sequence[Mapping[str, Any]],
         access: ExperienceAccess,
         run_id: str,
+        query_materials: Sequence[ConsultQueryMaterial] = (),
     ) -> _ConsultRender:
         """Render the consult document outside any write transaction."""
 
@@ -773,8 +896,27 @@ class ContextService:
                 access, ref=raw, purpose=CONSULT_PURPOSE
             )
             if isinstance(view, ExperienceUnavailable):
-                omissions.append(
-                    {"ref": dict(raw), "reason": "source_unavailable"}
+                # C05c only exposes an input that at least one interaction
+                # already linked.  C11 builds the *initial* consult Context
+                # before its own interaction exists, so a just-registered input
+                # has no experience link yet.  The trusted consult assembly
+                # therefore reads the exact registered input directly, applying
+                # the same namespace/privacy/deletion checks; an input that is
+                # linked but genuinely unavailable still falls through to the
+                # omission below.
+                unlinked_body = self._read_unlinked_consult_input(access, raw)
+                if unlinked_body is None:
+                    omissions.append(
+                        {"ref": dict(raw), "reason": "source_unavailable"}
+                    )
+                    continue
+                rendered_inputs.append(dict(raw))
+                inputs.append(
+                    {
+                        "ref": dict(raw),
+                        "untrusted": True,
+                        "content": unlinked_body,
+                    }
                 )
                 continue
             if view.readability != READABILITY_AVAILABLE or view.body is None:
@@ -803,6 +945,7 @@ class ContextService:
             self_view_body=self_view_body,
             inputs=tuple(inputs),
             omissions=_unique_omissions(omissions),
+            query_materials=query_materials,
         )
         return _ConsultRender(
             document=canonical_json_text(document),
@@ -812,6 +955,33 @@ class ContextService:
             rendered_inputs=tuple(rendered_inputs),
             omissions=tuple(_unique_omissions(omissions)),
         )
+
+    def _read_unlinked_consult_input(
+        self, access: ExperienceAccess, raw: Mapping[str, Any]
+    ) -> str | None:
+        """Read one registered input that no interaction has linked yet.
+
+        This is the consult-assembly read, not the C05c experience read: an
+        unlinked input is not an ``ExperienceView`` (there is no interaction
+        metadata to show), but it is still a registered C05b input the trusted
+        host asked this Context to render.  The exact version, its deletion
+        barrier, the caller's purpose and its privacy class are all checked
+        before the body is returned.
+        """
+
+        if CONSULT_PURPOSE not in access.purposes:
+            return None
+        try:
+            row = self._store.load_input(
+                namespace=access.namespace,
+                input_id=raw["input_id"],
+                content_version=raw["content_version"],
+            )
+        except (RecordNotFound, Redacted):
+            return None
+        if row.privacy_class not in access.privacy_classes:
+            return None
+        return row.body
 
     def _render_consult_document(
         self,
@@ -825,6 +995,7 @@ class ContextService:
         self_view_body: Mapping[str, Any] | None,
         inputs: Sequence[Mapping[str, Any]],
         omissions: Sequence[Mapping[str, Any]],
+        query_materials: Sequence[ConsultQueryMaterial] = (),
     ) -> dict[str, Any]:
         if self_view_body is not None and self_view_ref is not None:
             self_view_section: dict[str, Any] = {
@@ -844,7 +1015,7 @@ class ContextService:
                     else None
                 ),
             }
-        return {
+        document: dict[str, Any] = {
             "context_kind": "consult",
             "run_id": run_id,
             "namespace": namespace,
@@ -863,6 +1034,14 @@ class ContextService:
             "inputs": [dict(item) for item in inputs],
             "omissions": [dict(item) for item in omissions],
         }
+        if query_materials:
+            # Only QueryResult.to_body() is rendered: internal revision and
+            # omission accounting stay out of every model-visible field.
+            document["query_results"] = [
+                {"origin": "deterministic_query", "result": material.body}
+                for material in query_materials
+            ]
+        return document
 
     def _consult_accounting(
         self, render: _ConsultRender
@@ -884,6 +1063,107 @@ class ContextService:
                 )
             )
         return tuple(read_set), tuple(sources)
+
+    def _consult_query_accounting(
+        self, query_materials: Sequence[ConsultQueryMaterial]
+    ) -> tuple[tuple[ReadSetEntry, ...], tuple[ContextSourceInput, ...]]:
+        """Exact read_set/source additions for deterministic query material.
+
+        Query records are exact Context sources (so the deletion barrier and
+        the C09 send gate cover them); Episode EventRefs are event sources.
+        Both are deduplicated and sorted deterministically.
+        """
+
+        read_entries: list[ReadSetEntry] = []
+        seen_records: set[tuple[str, int]] = set()
+        event_ids: set[str] = set()
+        for material in query_materials:
+            for entry in material.read_set:
+                key = (entry.ref.record_id, entry.ref.record_version)
+                if key in seen_records:
+                    continue
+                seen_records.add(key)
+                read_entries.append(entry)
+            for ref in material.event_sources:
+                if ref.event_id in event_ids:
+                    continue
+                event_ids.add(ref.event_id)
+
+        read_entries.sort(
+            key=lambda entry: (
+                entry.ref.record_id,
+                entry.ref.record_version,
+                entry.usage,
+            )
+        )
+        sources: list[ContextSourceInput] = []
+        for entry in read_entries:
+            sources.append(
+                ContextSourceInput(
+                    "record", entry.ref.record_id, entry.ref.record_version
+                )
+            )
+        for event_id in sorted(event_ids):
+            sources.append(ContextSourceInput("event", event_id))
+        return tuple(read_entries), tuple(sources)
+
+    def _recheck_consult_query_locked(
+        self, namespace: str, query_materials: Sequence[ConsultQueryMaterial]
+    ) -> None:
+        """P1: re-prove every query basis inside the Context save transaction.
+
+        The C10 ``state_revision`` is compared first, then each exact record
+        version (with the current pointer for ``usage=current``) and each
+        Episode EventRef.  Any movement is ``CONTEXT_STALE``; the caller's
+        transaction rolls back and no final Context row survives.
+        """
+
+        if not query_materials:
+            return
+        current = self._store.context_watermarks(namespace)["state_revision"]
+        for material in query_materials:
+            if material.state_revision != current:
+                raise ContextStale(
+                    "the deterministic query basis revision moved before the "
+                    "final Context was saved"
+                )
+            for entry in material.read_set:
+                ref = entry.ref
+                if self._store.record_is_deleted(namespace, ref.record_id):
+                    raise ContextStale(
+                        "a record this query result used has been deleted"
+                    )
+                try:
+                    version = self._store.get_version(
+                        namespace, ref.record_id, ref.record_version
+                    )
+                except RecordNotFound as exc:
+                    raise ContextStale(
+                        "a record version this query result used is missing"
+                    ) from exc
+                if version.kind not in (BELIEF_KIND, EPISODE_KIND):
+                    raise ContextStale(
+                        "a query result read_set record is not a belief or episode"
+                    )
+                if entry.usage == "current":
+                    pointer = self._store.record_pointer(namespace, ref.record_id)
+                    if (
+                        pointer is None
+                        or pointer.current_version != ref.record_version
+                    ):
+                        raise ContextStale(
+                            "a current query result record is no longer the "
+                            "current version"
+                        )
+            for event_ref in material.event_sources:
+                if self._store.event_is_deleted(namespace, event_ref.event_id):
+                    raise ContextStale(
+                        "an event this query result used has been deleted"
+                    )
+                if self._store.event_header(namespace, event_ref.event_id) is None:
+                    raise ContextStale(
+                        "an event this query result used is missing"
+                    )
 
     def _recheck_consult_render_locked(
         self, namespace: str, render: _ConsultRender
@@ -2010,6 +2290,72 @@ def _decode_available(snapshot: ContextSnapshot) -> list[dict[str, Any]]:
     ):
         raise CorruptStore("stored rendered input has no available reference list")
     return available
+
+
+def _normalise_query_materials(
+    namespace: str, query_materials: Sequence[ConsultQueryMaterial]
+) -> tuple[ConsultQueryMaterial, ...]:
+    """Validate the C11 query material sequence before any render."""
+
+    if isinstance(query_materials, (str, bytes)) or not isinstance(
+        query_materials, Sequence
+    ):
+        raise InvalidInput(
+            "query_materials must be a sequence of ConsultQueryMaterial values"
+        )
+    result: list[ConsultQueryMaterial] = []
+    for index, material in enumerate(query_materials):
+        if not isinstance(material, ConsultQueryMaterial):
+            raise InvalidInput(
+                f"query_materials[{index}] must be a ConsultQueryMaterial"
+            )
+        for entry in material.read_set:
+            if entry.ref.namespace != namespace:
+                raise ScopeViolation(
+                    "a query material read_set reference belongs to another "
+                    "namespace"
+                )
+        for event_ref in material.event_sources:
+            if event_ref.namespace != namespace:
+                raise ScopeViolation(
+                    "a query material event source belongs to another namespace"
+                )
+        result.append(material)
+    return tuple(result)
+
+
+def _merge_read_set(
+    base: Sequence[ReadSetEntry], extra: Sequence[ReadSetEntry]
+) -> tuple[ReadSetEntry, ...]:
+    """Merge exact read_set entries, keeping the pinned base order."""
+
+    merged = list(base)
+    seen = {(entry.ref.record_id, entry.ref.record_version) for entry in base}
+    for entry in extra:
+        key = (entry.ref.record_id, entry.ref.record_version)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    return tuple(merged)
+
+
+def _merge_context_sources(
+    base: Sequence[ContextSourceInput], extra: Sequence[ContextSourceInput]
+) -> tuple[ContextSourceInput, ...]:
+    """Merge exact Context sources, keeping the base order and de-duplicating."""
+
+    merged = list(base)
+    seen = {
+        (source.ref_kind, source.ref_id, source.ref_version) for source in base
+    }
+    for source in extra:
+        key = (source.ref_kind, source.ref_id, source.ref_version)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(source)
+    return tuple(merged)
 
 
 def _normalise_consult_input_refs(

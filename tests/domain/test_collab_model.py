@@ -24,13 +24,21 @@ if str(HERE) not in sys.path:
 from cognition_support import NS, NS_B  # noqa: E402
 from model_support import ModelPortTestCase  # noqa: E402
 
+from quintessence_pcs.domains import EpisodeService  # noqa: E402
+from quintessence_pcs.domains.cognition import (  # noqa: E402
+    BeliefCurrentQuery,
+    CognitionQueryService,
+    EpisodeQuery,
+    QueryAccess,
+)
 from quintessence_pcs.domains.cognition.views import self_view_record_id  # noqa: E402
-from quintessence_pcs.domains.refs import RecordRef  # noqa: E402
+from quintessence_pcs.domains.refs import EventRef, RecordRef  # noqa: E402
 from quintessence_pcs.foundation.errors import ContextStale, InvalidInput, Redacted  # noqa: E402
 from quintessence_pcs.foundation.jsonutil import canonical_json_text  # noqa: E402
 from quintessence_pcs.runtime import (  # noqa: E402
     COLLAB_MODEL_POLICY_VERSION,
     DIRECT_HTTP_POLICY_VERSION,
+    ConsultQueryMaterial,
     ConsultSendPolicy,
     DirectHttpModel,
     ReadSetEntry,
@@ -56,6 +64,11 @@ RECORDED_AT = "2026-10-17T00:00:00Z"
 
 class CollabModelTests(ModelPortTestCase):
     # ------------------------------------------------------------- fixtures
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.queries = CognitionQueryService(self.store, clock=self.clock)
+        self.episodes = EpisodeService(self.store)
 
     def policy(self, **overrides):
         values = {
@@ -124,6 +137,70 @@ class CollabModelTests(ModelPortTestCase):
             access=self.access() if access is None else access,
             input_refs=list(refs),
             adapter_kind=adapter_kind,
+        )
+
+    def query_access(self) -> QueryAccess:
+        return QueryAccess(
+            namespace=NS,
+            privacy_classes=frozenset({"private"}),
+            purposes=frozenset({"consult", "reasoning"}),
+        )
+
+    def propose_supported(self, *, claim: str = "capability:file-read"):
+        event = self.ingest(event_type="CapabilityObserved:file-read")
+        body = self.belief_body(
+            claim=claim,
+            evidence_links=[self.evidence_link(self.event_ref(event.event_id))],
+        )
+        return self.propose(body=body, scope=self.default_scope("capability"))
+
+    def belief_material(self) -> tuple[ConsultQueryMaterial, object]:
+        result = self.queries.query(
+            self.query_access(),
+            BeliefCurrentQuery(scope={"scene": "test.scene"}, limit=5),
+        )
+        self.assertEqual("ok", result.status)
+        read_set = tuple(
+            ReadSetEntry(item.ref, "current") for item in result.items
+        )
+        material = ConsultQueryMaterial(
+            body=result.to_body(),
+            state_revision=result.state_revision,
+            read_set=read_set,
+            event_sources=(),
+        )
+        return material, result
+
+    def episode_material(self) -> ConsultQueryMaterial:
+        event = self.ingest(event_type="ObservationRecorded")
+        self.episodes.build_episode_from_event(
+            namespace=NS,
+            event_id=event.event_id,
+            scope={"scene": "test.scene"},
+            authorization_ref="auth:c11-query-material",
+        )
+        result = self.queries.query(
+            self.query_access(),
+            EpisodeQuery(
+                query="ObservationRecorded", scope={"scene": "test.scene"}
+            ),
+        )
+        self.assertEqual("ok", result.status)
+        item = result.items[0]
+        return ConsultQueryMaterial(
+            body=result.to_body(),
+            state_revision=result.state_revision,
+            read_set=(ReadSetEntry(item.ref, "current"),),
+            event_sources=tuple(item.source_refs),
+        )
+
+    def build_consult_with_material(self, material):
+        return self.contexts.build_consult_context(
+            namespace=NS,
+            access=self.access(),
+            input_refs=[],
+            adapter_kind="direct-http",
+            query_materials=(material,),
         )
 
     def output(self, **overrides) -> str:
@@ -659,6 +736,215 @@ class CollabModelTests(ModelPortTestCase):
                     attempt.attempt_id, kind=kind
                 )
         self.assertEqual(1, len(self.store.model_attempts_for_run(context.run_id)))
+
+
+    # ------------------------------------------------ C11 evidence and gate
+
+    def test_last_attempt_evidence_tracks_the_settled_attempt(self) -> None:
+        _row, ref = self.register_consult_input()
+        context = self.build_consult([ref])
+        model = self.collab_model()
+        self.enqueue_content(self.output())
+
+        raw = self.send(model, context)
+        evidence = model.last_attempt_evidence(
+            run_id=context.run_id, context_id=context.context_id
+        )
+
+        self.assertIsNotNone(evidence)
+        self.assertEqual(raw, evidence.content)
+        self.assertEqual(
+            {"authorization_id", "attempt_id", "attempt_no", "request_hash"},
+            set(evidence.attempt_ref),
+        )
+        attempts = self.store.model_attempts_for_run(context.run_id)
+        self.assertEqual(1, len(attempts))
+        attempt = attempts[0]
+        self.assertEqual("ok", attempt.outcome)
+        self.assertTrue(attempt.finished)
+        self.assertEqual(attempt.attempt_id, evidence.attempt_ref["attempt_id"])
+        self.assertEqual(attempt.attempt_no, evidence.attempt_ref["attempt_no"])
+        self.assertEqual(
+            attempt.authorization_id,
+            evidence.attempt_ref["authorization_id"],
+        )
+        self.assertEqual(
+            attempt.request_hash, evidence.attempt_ref["request_hash"]
+        )
+        self.assertIsNone(
+            model.last_attempt_evidence(
+                run_id=str(uuid.uuid4()), context_id=context.context_id
+            )
+        )
+
+    def test_last_attempt_evidence_is_none_after_failure_and_repair(self) -> None:
+        context = self.build_consult([])
+        model = self.collab_model()
+        self.enqueue_content(self.output(reply="first reply"))
+        self.send(model, context)
+
+        # A transport failure clears the previous successful evidence.
+        self.provider.enqueue(self.response({"error": "boom"}, status=400))
+        with self.assertRaises(ModelTransportError):
+            self.send(model, context)
+        self.assertIsNone(
+            model.last_attempt_evidence(
+                run_id=context.run_id, context_id=context.context_id
+            )
+        )
+
+        # A repair that succeeds must expose the repair attempt, not the
+        # earlier one.
+        self.enqueue_content(self.output(reply="before repair"))
+        self.send(model, context)
+        first = model.last_attempt_evidence(
+            run_id=context.run_id, context_id=context.context_id
+        )
+        self.enqueue_content(self.output(reply="repaired reply"))
+        self.send(model, context, feedback="Return valid collab.v1 JSON.")
+        second = model.last_attempt_evidence(
+            run_id=context.run_id, context_id=context.context_id
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(
+            first.attempt_ref["attempt_id"], second.attempt_ref["attempt_id"]
+        )
+        self.assertEqual(self.output(reply="repaired reply"), second.content)
+
+    def test_collab_send_gate_accepts_query_material(self) -> None:
+        self.propose_supported()
+        material, _result = self.belief_material()
+        belief_context = self.build_consult_with_material(material)
+        model = self.collab_model()
+        self.enqueue_content(self.output(reply="belief query accepted"))
+        self.send(model, belief_context)
+        self.assertEqual(1, self.provider.hits)
+
+        episode_material = self.episode_material()
+        episode_context = self.build_consult_with_material(episode_material)
+        self.enqueue_content(self.output(reply="episode query accepted"))
+        self.send(model, episode_context)
+        self.assertEqual(2, self.provider.hits)
+        self.assertEqual(
+            1, len(self.store.model_attempts_for_run(episode_context.run_id))
+        )
+
+    def test_collab_send_gate_rejects_unknown_query_source(self) -> None:
+        self.propose_supported()
+        material, _result = self.belief_material()
+        context = self.build_consult_with_material(material)
+        model = self.collab_model()
+        extra_read = ReadSetEntry(
+            RecordRef(
+                namespace=NS, record_id=str(uuid.uuid4()), record_version=1
+            ),
+            "historical",
+        )
+        extra_record = ContextSource(
+            context_id=context.context_id,
+            ref_kind="record",
+            ref_id=str(uuid.uuid4()),
+            ref_version=1,
+        )
+        unknown_kind = ContextSource(
+            context_id=context.context_id,
+            ref_kind="collab_input",
+            ref_id=str(uuid.uuid4()),
+            ref_version=1,
+        )
+        tampered = (
+            dataclasses.replace(
+                context, read_set=context.read_set + (extra_read,)
+            ),
+            dataclasses.replace(
+                context, sources=context.sources + (extra_record,)
+            ),
+            dataclasses.replace(
+                context, sources=context.sources + (unknown_kind,)
+            ),
+            dataclasses.replace(
+                context, sources=context.sources + (context.sources[0],)
+            ),
+        )
+        for candidate in tampered:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ModelAdapterError):
+                    self.send(model, candidate)
+        self.assertEqual(0, self.provider.hits)
+        self.assertEqual(0, self.attempt_count())
+
+    def test_collab_send_gate_checks_query_privacy_and_events(self) -> None:
+        restricted = self.store.append_record_version(
+            namespace=NS,
+            record_id=str(uuid.uuid4()),
+            record_version=1,
+            kind="belief",
+            body=self.belief_body(claim="capability:restricted"),
+            status="supported",
+            schema_version="1",
+            privacy_class="restricted",
+            scope={"scene": "test.scene"},
+        )
+        restricted_ref = RecordRef(
+            namespace=NS,
+            record_id=restricted.record_id,
+            record_version=restricted.record_version,
+        )
+        body = canonical_json_text({"query_kind": "belief", "status": "empty"})
+        restricted_material = ConsultQueryMaterial(
+            body=body,
+            state_revision=self.revision(),
+            read_set=(ReadSetEntry(restricted_ref, "current"),),
+            event_sources=(),
+        )
+        restricted_context = self.build_consult_with_material(restricted_material)
+        model = self.collab_model()
+        with self.assertRaises(ModelNotAuthorizedError):
+            self.send(model, restricted_context)
+        self.assertEqual(0, self.provider.hits)
+        self.assertEqual(0, self.attempt_count())
+
+        restricted_event = self.store.ingest_event(
+            namespace=NS,
+            source_kind="host_observation",
+            source_instance="c11-gate-tests",
+            source_event_id=f"source-{uuid.uuid4()}",
+            event_type="ObservationRecorded",
+            observed_at=None,
+            recorded_at=RECORDED_AT,
+            payload={"text": "restricted event body"},
+            privacy_class="restricted",
+        )
+        event_material = ConsultQueryMaterial(
+            body=body,
+            state_revision=self.revision(),
+            read_set=(),
+            event_sources=(
+                EventRef(namespace=NS, event_id=restricted_event.event_id),
+            ),
+        )
+        event_context = self.build_consult_with_material(event_material)
+        with self.assertRaises(ModelNotAuthorizedError):
+            self.send(model, event_context)
+        self.assertEqual(0, self.provider.hits)
+        self.assertEqual(0, self.attempt_count())
+
+        private_event = self.ingest(event_type="ObservationRecorded")
+        deleted_material = ConsultQueryMaterial(
+            body=body,
+            state_revision=self.revision(),
+            read_set=(),
+            event_sources=(
+                EventRef(namespace=NS, event_id=private_event.event_id),
+            ),
+        )
+        deleted_context = self.build_consult_with_material(deleted_material)
+        self.delete_event(private_event.event_id)
+        with self.assertRaises(ModelAdapterError):
+            self.send(model, deleted_context)
+        self.assertEqual(0, self.provider.hits)
+        self.assertEqual(0, self.attempt_count())
 
 
 if __name__ == "__main__":  # pragma: no cover

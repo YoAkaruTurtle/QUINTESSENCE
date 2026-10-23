@@ -12,6 +12,7 @@ state revision) may not.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import unittest
@@ -25,7 +26,14 @@ if str(HERE) not in sys.path:
 
 from cognition_support import NS, NS_B, CognitionTestCase  # noqa: E402
 
-from quintessence_pcs.domains.cognition import SelfViewService  # noqa: E402
+from quintessence_pcs.domains import EpisodeService  # noqa: E402
+from quintessence_pcs.domains.cognition import (  # noqa: E402
+    BeliefCurrentQuery,
+    CognitionQueryService,
+    EpisodeQuery,
+    QueryAccess,
+    SelfViewService,
+)
 from quintessence_pcs.domains.cognition.views import (  # noqa: E402
     SELF_VIEW_STALE,
     self_view_record_id,
@@ -41,8 +49,12 @@ from quintessence_pcs.foundation.errors import (  # noqa: E402
     SnapshotNotFound,
     SourceRedacted,
 )
-from quintessence_pcs.runtime import ContextService  # noqa: E402
-from quintessence_pcs.store import CognitionStore  # noqa: E402
+from quintessence_pcs.runtime import (  # noqa: E402
+    ConsultQueryMaterial,
+    ContextService,
+    ReadSetEntry,
+)
+from quintessence_pcs.store import CognitionStore, RecordPointer  # noqa: E402
 from quintessence_pcs.store.cognition import (  # noqa: E402
     MAX_CONTEXT_BYTES,
     context_content_hash,
@@ -61,7 +73,12 @@ SECRET_BODY = "Synthetic restricted body that must never be rendered."
 
 
 class ConsultContextTests(CognitionTestCase):
-    """C08 REV-B checks 1-23."""
+    """C08 REV-B checks 1-23 plus the C11 query-material checks."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.queries = CognitionQueryService(self.store, clock=self.clock)
+        self.episodes = EpisodeService(self.store)
 
     # ------------------------------------------------------------- fixtures
 
@@ -131,13 +148,82 @@ class ConsultContextTests(CognitionTestCase):
         access: ExperienceAccess | None = None,
         namespace: str = NS,
         adapter_kind: str | None = None,
+        materials=(),
     ):
         return self.contexts.build_consult_context(
             namespace=namespace,
             access=access if access is not None else self.access(namespace=namespace),
             input_refs=list(refs),
             adapter_kind=adapter_kind,
+            query_materials=materials,
         )
+
+    def query_access(
+        self, *, privacy: tuple[str, ...] = ("private",)
+    ) -> QueryAccess:
+        return QueryAccess(
+            namespace=NS,
+            privacy_classes=frozenset(privacy),
+            purposes=frozenset({"consult", "reasoning"}),
+        )
+
+    def propose_supported(
+        self, *, strength_reason: str = "synthetic C11 query material setup"
+    ):
+        event = self.ingest(event_type="CapabilityObserved:file-read")
+        body = self.belief_body(
+            evidence_links=[self.evidence_link(self.event_ref(event.event_id))],
+            strength_reason=strength_reason,
+        )
+        return self.propose(body=body, scope=self.default_scope("capability"))
+
+    def belief_material(self):
+        result = self.queries.query(
+            self.query_access(),
+            BeliefCurrentQuery(scope={"scene": "test.scene"}, limit=5),
+        )
+        self.assertEqual("ok", result.status)
+        self.assertGreaterEqual(len(result.items), 1)
+        read_set = tuple(
+            ReadSetEntry(
+                item.ref, "current" if item.current else "historical"
+            )
+            for item in result.items
+        )
+        material = ConsultQueryMaterial(
+            body=result.to_body(),
+            state_revision=result.state_revision,
+            read_set=read_set,
+            event_sources=(),
+        )
+        return material, result
+
+    def build_episode(self, *, event_type: str = "ObservationRecorded"):
+        event = self.ingest(event_type=event_type)
+        episode = self.episodes.build_episode_from_event(
+            namespace=NS,
+            event_id=event.event_id,
+            scope={"scene": "test.scene"},
+            authorization_ref="auth:c11-query-material",
+        )
+        return event, episode
+
+    def episode_material(self):
+        _event, episode = self.build_episode()
+        result = self.queries.query(
+            self.query_access(),
+            EpisodeQuery(query="ObservationRecorded", scope={"scene": "test.scene"}),
+        )
+        self.assertEqual("ok", result.status)
+        self.assertEqual(1, len(result.items))
+        item = result.items[0]
+        material = ConsultQueryMaterial(
+            body=result.to_body(),
+            state_revision=result.state_revision,
+            read_set=(ReadSetEntry(item.ref, "current"),),
+            event_sources=tuple(item.source_refs),
+        )
+        return material, result, episode
 
     @staticmethod
     def document(envelope) -> dict:
@@ -727,6 +813,134 @@ class ConsultContextTests(CognitionTestCase):
             self.contexts.require_current_consult_context(
                 context_id=envelope.context_id, namespace=NS
             )
+
+
+    # ------------------------------------------ C11 query material (checks 33-34)
+
+    def test_query_material_renders_body_and_accounts_exact_sources(self) -> None:
+        self.propose_supported()
+        revision = self.revision()
+        material, result = self.belief_material()
+        envelope = self.build_consult([], materials=(material,))
+        document = self.document(envelope)
+        item = result.items[0]
+
+        self.assertEqual(1, len(document["query_results"]))
+        self.assertEqual(
+            "deterministic_query", document["query_results"][0]["origin"]
+        )
+        self.assertEqual(
+            material.body, document["query_results"][0]["result"]
+        )
+        self.assertNotIn("state_revision", envelope.rendered_input)
+        self.assertEqual(revision, envelope.state_revision)
+
+        read_set = {
+            (entry["ref"]["record_id"], entry["ref"]["record_version"], entry["usage"])
+            for entry in self.snapshot(envelope).read_set
+        }
+        self.assertIn((item.ref.record_id, item.ref.record_version, "current"), read_set)
+        sources = {
+            (source.ref_kind, source.ref_id, source.ref_version)
+            for source in self.snapshot(envelope).sources
+        }
+        self.assertIn(
+            ("record", item.ref.record_id, item.ref.record_version), sources
+        )
+        self.assertEqual(revision, self.revision())
+
+        # Episode material contributes its exact record *and* its EventRef.
+        episode_material, episode_result, episode = self.episode_material()
+        episode_context = self.build_consult([], materials=(episode_material,))
+        episode_document = self.document(episode_context)
+        episode_item = episode_result.items[0]
+        self.assertEqual(
+            episode_material.body,
+            episode_document["query_results"][0]["result"],
+        )
+        episode_read_set = {
+            (entry["ref"]["record_id"], entry["ref"]["record_version"], entry["usage"])
+            for entry in self.snapshot(episode_context).read_set
+        }
+        self.assertIn(
+            (
+                episode_item.ref.record_id,
+                episode_item.ref.record_version,
+                "current",
+            ),
+            episode_read_set,
+        )
+        episode_sources = {
+            (source.ref_kind, source.ref_id, source.ref_version)
+            for source in self.snapshot(episode_context).sources
+        }
+        self.assertIn(
+            ("record", episode_item.ref.record_id, episode_item.ref.record_version),
+            episode_sources,
+        )
+        for source in episode_item.source_refs:
+            self.assertIn(("event", source.event_id, 0), episode_sources)
+        self.assertNotIn(episode.record_id, {s[1] for s in read_set})
+
+    def test_query_material_deleted_before_save_is_stale(self) -> None:
+        version = self.propose_supported()
+        material, _result = self.belief_material()
+        before = self.count_rows("context_snapshots")
+
+        original_render = self.contexts._render_consult
+
+        def render_then_delete(**kwargs):
+            rendered = original_render(**kwargs)
+            self.delete_record(version.record_id)
+            return rendered
+
+        self.contexts._render_consult = render_then_delete
+        with self.assertRaises(ContextStale):
+            self.build_consult([], materials=(material,))
+        self.assertEqual(before, self.count_rows("context_snapshots"))
+
+    def test_query_material_current_pointer_moved_is_stale(self) -> None:
+        version = self.propose_supported()
+        material, _result = self.belief_material()
+        before = self.count_rows("context_snapshots")
+        real_pointer = self.store.record_pointer
+
+        def moved_pointer(namespace, record_id):
+            pointer = real_pointer(namespace, record_id)
+            if record_id == version.record_id and pointer is not None:
+                return RecordPointer(
+                    kind=pointer.kind,
+                    current_version=pointer.current_version + 1,
+                )
+            return pointer
+
+        self.store.record_pointer = moved_pointer
+        with self.assertRaises(ContextStale):
+            self.build_consult([], materials=(material,))
+        self.assertEqual(before, self.count_rows("context_snapshots"))
+
+    def test_query_material_rejects_internal_projection_fields(self) -> None:
+        forbidden = (
+            {"query_kind": "belief", "state_revision": 1},
+            {"omissions": [{"reason": "not_authorized", "count": 1}]},
+            {"omissions": [{"reason": "source_ref_not_authorized", "count": 1}]},
+            {"omissions": [{"reason": "redacted", "count": 1}]},
+        )
+        for body in forbidden:
+            with self.subTest(body=body):
+                with self.assertRaises(InvalidInput):
+                    ConsultQueryMaterial(
+                        body=json.dumps(body, separators=(",", ":")),
+                        state_revision=1,
+                        read_set=(),
+                        event_sources=(),
+                    )
+        with self.assertRaises(InvalidInput):
+            ConsultQueryMaterial(
+                body="{}", state_revision=True, read_set=(), event_sources=()
+            )
+        with self.assertRaises(InvalidInput):
+            self.build_consult([], materials=(object(),))
 
 
 if __name__ == "__main__":  # pragma: no cover
