@@ -730,6 +730,27 @@ export function reviewErrorText(error: BridgeError): string {
       return "候选版本已变化或不存在，需要刷新候选；没有提交决定。";
     case "AUTHORIZATION_REQUIRED":
       return "缺少审批权限或许可；没有读取或提交任何内容。";
+    case "MODEL_KEY_MISSING":
+      return "尚未保存 API Key；请先在设置中配置 DeepSeek。";
+    case "MODEL_KEY_INVALID":
+      return "保存的 API Key 格式无效；请重新保存。";
+    case "MODEL_NOT_AUTHORIZED":
+    case "MODEL_BUDGET_EXCEEDED":
+      return "模型调用没有通过 C09 授权或额度检查；没有提交。";
+    case "MODEL_AUTH_FAILED":
+      return "DeepSeek 鉴权失败；请检查 API Key。";
+    case "MODEL_RATE_LIMITED":
+      return "DeepSeek 限流或配额不足；请稍后再试。";
+    case "MODEL_NETWORK":
+      return "无法连接 DeepSeek；没有自动重试。";
+    case "MODEL_TIMEOUT":
+      return "DeepSeek 请求超时；结果未知，请刷新权威状态。";
+    case "MODEL_PROVIDER_ERROR":
+      return "DeepSeek 服务端错误；没有提交。";
+    case "MODEL_INVALID_RESPONSE":
+      return "模型输出未通过协议校验；没有提交。";
+    case "MODEL_REQUEST_REJECTED":
+      return "DeepSeek 拒绝了请求；请检查模型或账户状态。";
     case "CANDIDATE_EXISTS":
       return "已有待决定候选；请继续当前审查，不重复生成。";
     case "WORK_ALREADY_RESOLVED":

@@ -156,6 +156,8 @@ class HostConfig:
     destination: DestinationDescriptor
     model: ModelSpec
     lab: LabSeed | None
+    managed: bool = False
+    provision: bool = False
 
     @property
     def is_lab(self) -> bool:
@@ -202,7 +204,7 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
     _exact(
         document,
         required={"schema", "app", "store", "host", "consult", "destination"},
-        optional={"lab", "review"},
+        optional={"lab", "review", "desktop"},
         where="configuration",
     )
     if document["schema"] != CONFIG_SCHEMA:
@@ -326,6 +328,33 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
             )
         lab = _lab_seed(document["lab"], authority.namespace)
 
+    desktop = _object(
+        document.get("desktop", {}),
+        "desktop",
+        set(),
+        {"managed", "provision"},
+    )
+    managed = (
+        _boolean(desktop["managed"], "desktop.managed")
+        if "managed" in desktop
+        else False
+    )
+    provision = (
+        _boolean(desktop["provision"], "desktop.provision")
+        if "provision" in desktop
+        else False
+    )
+    if provision and not managed:
+        raise ConfigError(
+            "CONFIG_INVALID",
+            "desktop.provision requires desktop.managed=true",
+        )
+    if managed and profile != "production":
+        raise ConfigError(
+            "CONFIG_INVALID",
+            "desktop.managed is only available for the production profile",
+        )
+
     if profile == "production" and model.transport_kind == "scripted":
         raise ConfigError(
             "CONFIG_INVALID",
@@ -344,6 +373,8 @@ def _parse(document: Mapping[str, Any], path: Path) -> HostConfig:
         destination=destination,
         model=model,
         lab=lab,
+        managed=managed,
+        provision=provision,
     )
 
 

@@ -24,11 +24,18 @@ apps/desktop/
 ## Trust boundary
 
 - The WebView can call only `app_info`, `confirm_destination`,
-  `consult_interact`, `bridge_ping` and the local UI preference command
-  `set_ai_display_name`.
+  `consult_interact`, `bridge_ping`, the six `review.*` operations and the
+  local UI/model settings commands listed in `src-tauri/src/lib.rs`.
 - `set_ai_display_name` writes only `ui-preferences.json` in the app config
-  directory. It is not a `desktop.v1` method and cannot change authority,
-  namespace, Persona or destination.
+  directory. It is not a `desktop.v1` business method and cannot change
+  authority, namespace, Persona or destination.
+- `save_model_api_key`, `delete_model_api_key`, `model_status`,
+  `set_model_choice` and `test_model_connection` are trusted-host settings
+  commands. The API key is stored in Windows Credential Manager, never returned
+  to the WebView, and is injected only into the sidecar child environment.
+- `model.test_connection` is a side-effect-free, user-triggered probe against
+  the configured provider; it creates no PCS Interaction, Context, Attempt,
+  Belief or Artifact.
 - It cannot name authority fields (`input_refs`, `origin_kind`, privacy,
   purposes, authorization, provider, model, endpoint, namespace, policy,
   query plan, interaction/context ids).
@@ -44,9 +51,23 @@ apps/desktop/
 
 The host configuration is private and lives outside the checkout. Start the app
 with `QUINTESSENCE_DESKTOP_CONFIG` pointing at it (or pass
-`quintessence-desktop --config <path>`). The default path is
-`desktop-host.json` in the app-local data directory; without a configuration the
-app starts not-ready and sending stays disabled.
+`quintessence-desktop --config <path>`). A user-supplied `desktop-host.json` in
+the app-local data directory is treated as an advanced external configuration
+and is never overwritten.
+
+On a fresh public install with neither file, the Rust host creates
+`desktop-managed-host.json` and `desktop-settings.json` under the app-local data
+directory. It exposes a neutral production profile, a single DeepSeek
+destination, and the C07/C09 paths; the sidecar provisions only a generic
+profile and the matching model authorization. No private name or Persona asset
+is embedded.
+
+Settings exposes DeepSeek model choice (`deepseek-flash` or
+`deepseek-v4-pro`) and an API key stored in Windows Credential Manager. Saving,
+changing or deleting the key restarts the sidecar so `app.info` and the
+destination identity reflect the new state. “API Key saved” is intentionally
+separate from “real connection tested”. The test-connection button makes one
+explicit real API request and may incur a small charge.
 
 Schema (`desktop.host.v1`, strict; unknown keys are refused):
 
@@ -122,6 +143,12 @@ the neutral default `助手`.
 The display name is plain text and only affects UI labels. It does not alter
 PCS internal identity, namespace, source identity, authorization, Persona
 semantics or the model destination. It is not written to the PCS store.
+
+The neutral public default is always `助手`. An unmarked legacy preference
+containing only the old private fallback is treated as implicit and migrated to
+the neutral default; a custom name saved by the user is preserved. “恢复默认”
+sets an explicit neutral choice even when a private host config provides a
+different default.
 
 ## Development
 

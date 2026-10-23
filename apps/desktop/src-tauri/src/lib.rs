@@ -8,6 +8,8 @@
 //! no shell, filesystem, HTTP or process capability.
 
 mod commands;
+mod key_store;
+mod host_settings;
 mod paths;
 mod preferences;
 mod session;
@@ -34,6 +36,10 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub sidecar_paths: Option<SidecarPaths>,
     pub started: Instant,
+    pub managed_config: bool,
+    pub settings_path: PathBuf,
+    pub settings: Mutex<host_settings::HostSettings>,
+    pub api_key_env: String,
 }
 
 #[derive(Clone, Default)]
@@ -58,23 +64,6 @@ impl CliArgs {
     }
 }
 
-fn resolve_config_path(app: &tauri::AppHandle, requested: Option<PathBuf>) -> PathBuf {
-    if let Some(path) = requested {
-        return path;
-    }
-    if let Some(value) = std::env::var_os("QUINTESSENCE_DESKTOP_CONFIG") {
-        if !value.is_empty() {
-            return PathBuf::from(value);
-        }
-    }
-    let base = app
-        .path()
-        .app_local_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("quintessence-desktop"));
-    let _ = std::fs::create_dir_all(&base);
-    base.join("desktop-host.json")
-}
-
 pub fn run() {
     // A second process never reaches setup, so it can neither spawn a second
     // sidecar nor write the same data instance.
@@ -88,12 +77,44 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .setup(move |app| {
-            let config_path = resolve_config_path(app.handle(), args.config.clone());
+            let (config_path, managed_config) =
+                host_settings::resolve_config_path(app.handle(), args.config.clone());
+            let settings_path = host_settings::settings_path(app.handle());
+            let settings = host_settings::load(&settings_path);
+            if managed_config {
+                if let Err(error) = host_settings::ensure_managed_config(&config_path, &settings) {
+                    // Keep the app open: Settings can still report the failure.
+                    let paths = paths::resolve(app.handle()).ok();
+                    app.manage(AppState {
+                        manager: Mutex::new(None),
+                        startup_error: Some(error),
+                        session: Mutex::new(HostSession::default()),
+                        preferences: Mutex::new(preferences::load(&preferences::path_for(app.handle()))),
+                        preferences_path: preferences::path_for(app.handle()),
+                        config_path,
+                        sidecar_paths: paths,
+                        started,
+                        managed_config,
+                        settings_path,
+                        settings: Mutex::new(settings),
+                        api_key_env: host_settings::KEY_ENV.to_string(),
+                    });
+                    return Ok(());
+                }
+                let _ = host_settings::save(&settings_path, &settings);
+            }
+            let api_key_env = host_settings::api_key_env(&config_path);
+            let api_key = key_store::read().ok().flatten();
             let preferences_path = preferences::path_for(app.handle());
             let preferences = preferences::load(&preferences_path);
             let resolved = paths::resolve(app.handle());
             let (manager, startup_error, sidecar_paths) = match resolved {
-                Ok(paths) => match SidecarManager::spawn(&paths, &config_path) {
+                Ok(paths) => match SidecarManager::spawn_with_env(
+                    &paths,
+                    &config_path,
+                    Some(api_key_env.as_str()),
+                    api_key.as_deref(),
+                ) {
                     Ok(manager) => (Some(Arc::new(manager)), None, Some(paths)),
                     Err(error) => (None, Some(error), Some(paths)),
                 },
@@ -109,6 +130,10 @@ pub fn run() {
                 config_path,
                 sidecar_paths,
                 started,
+                managed_config,
+                settings_path,
+                settings: Mutex::new(settings),
+                api_key_env,
             });
             Ok(())
         })
@@ -123,7 +148,12 @@ pub fn run() {
             commands::review_generate,
             commands::review_resolve,
             commands::review_result,
-            commands::set_ai_display_name
+            commands::set_ai_display_name,
+            commands::model_status,
+            commands::save_model_api_key,
+            commands::delete_model_api_key,
+            commands::set_model_choice,
+            commands::test_model_connection
         ]);
 
     let application = builder

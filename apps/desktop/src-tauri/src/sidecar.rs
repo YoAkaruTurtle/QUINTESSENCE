@@ -209,6 +209,17 @@ pub struct SidecarManager {
 
 impl SidecarManager {
     pub fn spawn(paths: &SidecarPaths, config_path: &Path) -> Result<Self, HostError> {
+        Self::spawn_with_env(paths, config_path, None, None)
+    }
+
+    /// Spawn with an optional model credential in the child's environment.
+    /// The value is never placed in a file, command line or error message.
+    pub fn spawn_with_env(
+        paths: &SidecarPaths,
+        config_path: &Path,
+        api_key_env: Option<&str>,
+        api_key: Option<&str>,
+    ) -> Result<Self, HostError> {
         let info = SidecarInfo::from_paths(paths)?;
         let mut command = Command::new(match &paths.launch {
             LaunchSpec::Frozen { executable, .. } => executable,
@@ -246,6 +257,9 @@ impl SidecarManager {
                 }
                 command.env("PYTHONPATH", paths_env);
             }
+        }
+        if let (Some(name), Some(value)) = (api_key_env, api_key) {
+            command.env(name, value);
         }
         command.arg("--config").arg(config_path);
         #[cfg(windows)]

@@ -269,6 +269,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model.review_script, ())
         self.assertEqual(config.authority.review_permissions, frozenset())
 
+    def test_managed_production_section_is_optional_and_closed(self) -> None:
+        document = support.config_document(
+            self.database,
+            profile="production",
+            external=False,
+            transport_kind="http",
+            desktop={"managed": True, "provision": True},
+        )
+        config = self.load(document)
+        self.assertTrue(config.managed)
+        self.assertTrue(config.provision)
+
+        bad = copy.deepcopy(document)
+        bad["desktop"]["provision"] = True
+        bad["desktop"]["managed"] = False
+        with self.assertRaises(ConfigError):
+            self.load(bad)
+
+        unknown = copy.deepcopy(document)
+        unknown["desktop"]["root"] = True
+        with self.assertRaises(ConfigError):
+            self.load(unknown)
+
 
 if __name__ == "__main__":
     unittest.main()

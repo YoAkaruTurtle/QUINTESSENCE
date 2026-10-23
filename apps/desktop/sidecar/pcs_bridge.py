@@ -53,6 +53,14 @@ from quintessence_pcs.foundation.errors import (
     Redacted,
     StateRevisionConflict,
 )
+from quintessence_pcs.runtime import (
+    ModelAdapterError,
+    ModelBudgetExceededError,
+    ModelConfigurationError,
+    ModelNotAuthorizedError,
+    ModelResponseError,
+    ModelTransportError,
+)
 from quintessence_pcs.store.errors import CandidateTransitionDenied
 
 LOGGER = logging.getLogger("quintessence.desktop.bridge")
@@ -96,12 +104,14 @@ REVIEW_METHODS = frozenset(
         "review.result",
     }
 )
+MODEL_TEST_METHOD = "model.test_connection"
 IMPLEMENTED_METHODS = frozenset(
     {
         "app.info",
         "app.confirm_destination",
         "consult.interact",
         "bridge.ping",
+        MODEL_TEST_METHOD,
         *REVIEW_METHODS,
     }
 )
@@ -208,6 +218,7 @@ _REVIEW_RESOLVE_KEYS = frozenset(
     {"session_id", "candidate_id", "artifact_version", "decision"}
 )
 _REVIEW_RESULT_KEYS = frozenset({"session_id", "interaction_id"})
+_MODEL_TEST_KEYS = frozenset({"session_id"})
 
 _CONSULT_KEYS = frozenset({"session_id", "question", "confirmed_destination_id"})
 _CONFIRM_KEYS = frozenset({"session_id", "destination_id"})
@@ -446,7 +457,7 @@ class Bridge:
             self._send_error(
                 request_id,
                 ERROR_RESERVED,
-                f"{method} is reserved and not implemented in C12c",
+                f"{method} is reserved and not implemented in this desktop build",
             )
             return
         if method not in IMPLEMENTED_METHODS:
@@ -467,6 +478,9 @@ class Bridge:
             return
         if method in REVIEW_METHODS:
             self._dispatch_review(request_id, method, params)
+            return
+        if method == MODEL_TEST_METHOD:
+            self._dispatch_model_test(request_id, params)
             return
         self._dispatch_consult(request_id, params)
 
@@ -818,11 +832,7 @@ class Bridge:
             error = (exc.code, exc.message, False)
         except BaseException as exc:  # noqa: BLE001 - contain runtime failures
             if method == "consult.interact":
-                error = (
-                    ERROR_INTERNAL,
-                    f"consult failed inside the trusted host ({type(exc).__name__})",
-                    True,
-                )
+                error = _map_model_error(exc, default_unknown=True)
             else:
                 error = _map_review_error(exc, default_unknown=True)
         finally:
@@ -835,6 +845,92 @@ class Bridge:
             self._send_error(request_id, code, message, result_unknown=unknown)
 
     # ----------------------------------------------------------------- review
+
+    def _dispatch_model_test(
+        self, request_id: str, params: dict[str, Any]
+    ) -> None:
+        """One explicit, user-triggered DeepSeek connectivity probe.
+
+        This is not a PCS interaction.  It does not write a Context, Attempt,
+        Belief, Interaction or Artifact; it only proves that the configured
+        endpoint and saved credential work.
+        """
+
+        forbidden = sorted(AUTHORITY_FIELDS.intersection(params))
+        if forbidden:
+            self._send_error(
+                request_id,
+                ERROR_AUTHORITY_FIELD,
+                "authority, approval and grant fields are host-owned",
+            )
+            return
+        unknown = sorted(set(params) - _MODEL_TEST_KEYS)
+        if unknown:
+            self._send_error(
+                request_id,
+                ERROR_INVALID_PARAMS,
+                f"model.test_connection accepts only {', '.join(sorted(_MODEL_TEST_KEYS))}",
+            )
+            return
+        session_id = params.get("session_id")
+        if not _valid_id(session_id):
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "session_id is required")
+            return
+        if self.data_locked:
+            self._send_error(
+                request_id, ERROR_DATA_LOCKED, "another process owns this data instance"
+            )
+            return
+        if self.config is None or self.runtime is None:
+            self._send_error(
+                request_id, ERROR_HOST_NOT_READY, "the trusted host is not ready"
+            )
+            return
+        if session_id != self.session_id:
+            self._send_error(
+                request_id,
+                ERROR_SESSION_MISMATCH,
+                "the request belongs to a different host session",
+            )
+            return
+        if self.worker is None:
+            self._send_error(
+                request_id, ERROR_HOST_NOT_READY, "the trusted host is not ready"
+            )
+            return
+        if not self._model_lock.acquire(blocking=False):
+            self._send_error(
+                request_id,
+                ERROR_BUSY,
+                "a model operation is already running; the connection test was not started",
+            )
+            return
+        try:
+            self.worker.submit(lambda: self._run_model_test(request_id))
+        except BaseException:
+            self._model_lock.release()
+            raise
+
+    def _run_model_test(self, request_id: str) -> None:
+        assert self.runtime is not None
+        result = None
+        error = None
+        try:
+            result = self.runtime.test_model_connection()
+        except ReviewRequestError as exc:
+            error = (exc.code, exc.message)
+        except BaseException as exc:  # noqa: BLE001 - contain probe failures
+            error = (
+                "MODEL_TEST_FAILED",
+                f"连接测试在可信宿主内失败（{type(exc).__name__}）",
+            )
+        finally:
+            self._model_lock.release()
+        if error is None:
+            self._send_ok(request_id, result)
+        else:
+            code, message = error
+            self._send_error(request_id, code, message)
 
     def _dispatch_review(
         self, request_id: str, method: str, params: dict[str, Any]
@@ -1289,6 +1385,96 @@ def _valid_generation(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
+def _map_model_error(
+    exc: BaseException, *, default_unknown: bool
+) -> tuple[str, str, bool]:
+    """Map ModelPort failures without leaking provider bodies or credentials."""
+
+    if isinstance(exc, ModelNotAuthorizedError):
+        return (
+            "MODEL_NOT_AUTHORIZED",
+            "模型调用未获得 C09 授权；没有发送请求",
+            False,
+        )
+    if isinstance(exc, ModelBudgetExceededError):
+        return (
+            "MODEL_BUDGET_EXCEEDED",
+            "模型调用已达授权额度；没有继续发送请求",
+            False,
+        )
+    if isinstance(exc, ModelConfigurationError):
+        text = str(exc).lower()
+        if "is not set" in text:
+            return ("MODEL_KEY_MISSING", "尚未保存 API Key", False)
+        if "api key" in text or "printable ascii" in text:
+            return ("MODEL_KEY_INVALID", "API Key 格式无效", False)
+        return (
+            "MODEL_CONFIG_INVALID",
+            "模型配置无效；请检查设置",
+            False,
+        )
+    if isinstance(exc, ModelResponseError):
+        return (
+            "MODEL_INVALID_RESPONSE",
+            "模型输出不是有效的 collab.v1 结构；未提交任何内容",
+            False,
+        )
+    if isinstance(exc, ModelTransportError):
+        text = str(exc).lower()
+        if "http_401" in text or "http_403" in text:
+            return (
+                "MODEL_AUTH_FAILED",
+                "DeepSeek 鉴权失败；请检查 API Key",
+                False,
+            )
+        if "http_429" in text:
+            return (
+                "MODEL_RATE_LIMITED",
+                "DeepSeek 限流或配额不足；请稍后再试",
+                False,
+            )
+        if "http_5" in text:
+            return (
+                "MODEL_PROVIDER_ERROR",
+                "DeepSeek 服务端错误；结果未提交",
+                False,
+            )
+        if "timeout" in text or "did not answer" in text or "wall-clock" in text:
+            return (
+                "MODEL_TIMEOUT",
+                "DeepSeek 请求超时；结果未知，请刷新权威状态",
+                True,
+            )
+        if "network" in text:
+            return (
+                "MODEL_NETWORK",
+                "无法连接 DeepSeek；结果未知，请刷新权威状态",
+                True,
+            )
+        if "http_" in text:
+            return (
+                "MODEL_REQUEST_REJECTED",
+                "DeepSeek 拒绝了请求；没有提交任何内容",
+                False,
+            )
+        return (
+            "MODEL_TRANSPORT_FAILED",
+            "DeepSeek 请求失败；结果未知，请刷新权威状态",
+            default_unknown,
+        )
+    if isinstance(exc, ModelAdapterError):
+        return (
+            "MODEL_ADAPTER_FAILED",
+            "可信模型适配器失败；结果未知，请刷新权威状态",
+            default_unknown,
+        )
+    return (
+        ERROR_INTERNAL,
+        "审查或咨询操作在可信宿主内失败；结果未知，请刷新权威状态",
+        default_unknown,
+    )
+
+
 def _map_review_error(
     exc: BaseException, *, default_unknown: bool
 ) -> tuple[str, str, bool]:
@@ -1299,6 +1485,8 @@ def _map_review_error(
     write may have happened and the UI must refresh/recover, never retry.
     """
 
+    if isinstance(exc, ModelAdapterError):
+        return _map_model_error(exc, default_unknown=default_unknown)
     if isinstance(exc, AuthorizationRequired):
         return (
             ERROR_AUTHORIZATION_REQUIRED,

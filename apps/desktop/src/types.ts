@@ -138,6 +138,20 @@ export interface HostReply {
   error?: BridgeError;
 }
 
+export interface ModelStatus {
+  provider: string;
+  model: string;
+  base_url: string;
+  managed: boolean;
+  model_choices: string[];
+  key_saved: boolean;
+  key_store_error: string | null;
+  sidecar_available: boolean;
+  host_ready: boolean;
+  reason_code: string | null;
+  reason_detail: string | null;
+}
+
 export interface ConfirmResult {
   confirmed: boolean;
   session_id: string;

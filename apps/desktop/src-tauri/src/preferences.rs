@@ -16,11 +16,18 @@ use crate::sidecar::HostError;
 pub const DEFAULT_AI_DISPLAY_NAME: &str = "助手";
 const MAX_NAME_CHARS: usize = 40;
 const FILE_NAME: &str = "ui-preferences.json";
+// Kept as escaped code points so the public source never embeds the private
+// instance name as a literal. This is only a migration sentinel.
+const LEGACY_PRIVATE_NAME: &str = "\u{5343}\u{5c81}";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UiPreferences {
     #[serde(default)]
     pub ai_display_name: Option<String>,
+    /// `true` = user explicitly chose a name; `false` = user explicitly chose
+    /// the neutral default.  Missing = legacy/automatic preference.
+    #[serde(default)]
+    pub ai_display_name_explicit: Option<bool>,
 }
 
 pub fn path_for(app: &AppHandle) -> PathBuf {
@@ -36,11 +43,26 @@ pub fn load(path: &Path) -> UiPreferences {
         Err(_) => return UiPreferences::default(),
     };
     match serde_json::from_str::<UiPreferences>(&text) {
-        Ok(preferences) => UiPreferences {
-            ai_display_name: preferences.ai_display_name.and_then(|name| {
-                validate(&name).ok().flatten()
-            }),
-        },
+        Ok(preferences) => {
+            let mut preferences = UiPreferences {
+                ai_display_name: preferences.ai_display_name.and_then(|name| {
+                    validate(&name).ok().flatten()
+                }),
+                ai_display_name_explicit: preferences.ai_display_name_explicit,
+            };
+            // Old private builds auto-filled the legacy private fallback in an
+            // unmarked preference. The public default is neutral. A name other
+            // than this known legacy default, or a marked explicit choice, is
+            // preserved.
+            if preferences.ai_display_name.as_deref() == Some(LEGACY_PRIVATE_NAME)
+                && preferences.ai_display_name_explicit != Some(true)
+            {
+                preferences.ai_display_name = None;
+                preferences.ai_display_name_explicit = Some(false);
+                let _ = save(path, &preferences);
+            }
+            preferences
+        }
         Err(_) => UiPreferences::default(),
     }
 }
@@ -85,6 +107,9 @@ pub fn effective(
     preferences: &UiPreferences,
     host_default: Option<&str>,
 ) -> (String, &'static str) {
+    if preferences.ai_display_name_explicit == Some(false) {
+        return (DEFAULT_AI_DISPLAY_NAME.to_string(), "default");
+    }
     if let Some(name) = preferences
         .ai_display_name
         .as_deref()
@@ -116,7 +141,48 @@ mod tests {
         assert_eq!(effective(&preferences, Some("HostName")), ("HostName".to_string(), "host"));
         assert_eq!(effective(&preferences, None), ("助手".to_string(), "default"));
         preferences.ai_display_name = Some("Chosen".to_string());
+        preferences.ai_display_name_explicit = Some(true);
         assert_eq!(effective(&preferences, Some("HostName")), ("Chosen".to_string(), "preference"));
+    }
+
+    #[test]
+    fn explicit_reset_uses_neutral_default_even_with_a_host_default() {
+        let preferences = UiPreferences {
+            ai_display_name: None,
+            ai_display_name_explicit: Some(false),
+        };
+        assert_eq!(
+            effective(&preferences, Some(LEGACY_PRIVATE_NAME)),
+            ("助手".to_string(), "default")
+        );
+    }
+
+    #[test]
+    fn legacy_implicit_private_name_is_migrated_but_explicit_custom_is_preserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "quintessence-preferences-migrate-{}",
+            std::process::id()
+        ));
+        let path = directory.join(FILE_NAME);
+        fs::create_dir_all(&directory).unwrap();
+
+        fs::write(&path, r#"{"ai_display_name":"\u5343\u5c81"}"#).unwrap();
+        let migrated = load(&path);
+        assert_eq!(migrated.ai_display_name, None);
+        assert_eq!(effective(&migrated, None).0, "助手");
+
+        fs::write(
+            &path,
+            r#"{"ai_display_name":"\u5343\u5c81","ai_display_name_explicit":true}"#,
+        )
+        .unwrap();
+        let explicit = load(&path);
+        assert_eq!(
+            explicit.ai_display_name.as_deref(),
+            Some(LEGACY_PRIVATE_NAME)
+        );
+        assert_eq!(effective(&explicit, None).0, LEGACY_PRIVATE_NAME);
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -128,6 +194,7 @@ mod tests {
         let path = directory.join(FILE_NAME);
         let preferences = UiPreferences {
             ai_display_name: Some("Chosen".to_string()),
+            ai_display_name_explicit: Some(true),
         };
         save(&path, &preferences).unwrap();
         let loaded = load(&path);

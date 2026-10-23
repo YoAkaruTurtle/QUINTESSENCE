@@ -76,6 +76,7 @@ import type {
   ConsultResult,
   HostReply,
   LegacyWorkItem,
+  ModelStatus,
   ReviewCandidateDetail,
   ReviewCandidateList,
   ReviewCandidateSummary,
@@ -112,6 +113,26 @@ async function consultInteract(params: {
 
 async function setAiDisplayName(name: string): Promise<HostReply> {
   return (await invoke("set_ai_display_name", { name })) as HostReply;
+}
+
+async function modelStatus(): Promise<HostReply> {
+  return (await invoke("model_status", {})) as HostReply;
+}
+
+async function saveModelApiKey(apiKey: string): Promise<HostReply> {
+  return (await invoke("save_model_api_key", { apiKey })) as HostReply;
+}
+
+async function deleteModelApiKey(): Promise<HostReply> {
+  return (await invoke("delete_model_api_key", {})) as HostReply;
+}
+
+async function setModelChoice(model: string): Promise<HostReply> {
+  return (await invoke("set_model_choice", { model })) as HostReply;
+}
+
+async function testModelConnection(sessionId: string): Promise<HostReply> {
+  return (await invoke("test_model_connection", { sessionId })) as HostReply;
 }
 
 async function reviewWorkList(sessionId: string): Promise<HostReply> {
@@ -3887,6 +3908,264 @@ function renderDestinationTab(): void {
   );
 }
 
+function renderModelSettings(): HTMLElement {
+  const container = el("div", { class: "model-settings" });
+  const meta = el("dl", { class: "kv", attrs: { id: "model-meta" } });
+  const modelSelect = el("select", {
+    class: "setting-input",
+    attrs: { id: "model-choice", "aria-label": "DeepSeek 模型" },
+  });
+  const applyModel = el("button", {
+    class: "quiet-button",
+    text: "应用模型",
+    attrs: { type: "button", id: "apply-model" },
+  });
+  const keyInput = el("input", {
+    class: "setting-input",
+    attrs: {
+      id: "model-api-key",
+      type: "password",
+      maxlength: "512",
+      placeholder: "sk-…",
+      autocomplete: "new-password",
+      spellcheck: "false",
+    },
+  });
+  const keyStatus = el("p", {
+    class: "setting-status",
+    attrs: { id: "model-key-status" },
+  });
+  const connectionStatus = el("p", {
+    class: "setting-status",
+    attrs: { id: "model-connection-status" },
+  });
+  const saveKey = el("button", {
+    class: "quiet-button",
+    text: "保存 API Key",
+    attrs: { type: "button", id: "save-model-key" },
+  });
+  const deleteKey = el("button", {
+    class: "ghost-button",
+    text: "删除 API Key",
+    attrs: { type: "button", id: "delete-model-key" },
+  });
+  const testConnection = el("button", {
+    class: "quiet-button",
+    text: "测试连接",
+    attrs: { type: "button", id: "test-model-connection" },
+  });
+  let status: ModelStatus | null = null;
+
+  const errorText = (reply: HostReply): string => {
+    const error = replyError(reply);
+    switch (error.code) {
+      case "MODEL_KEY_MISSING":
+        return "尚未保存 API Key。";
+      case "MODEL_KEY_INVALID":
+        return "保存的 API Key 格式无效，请重新输入。";
+      case "MODEL_AUTH_FAILED":
+        return "DeepSeek 鉴权失败：API Key 无效或已被撤销。";
+      case "MODEL_RATE_LIMITED":
+        return "DeepSeek 限流或配额不足，请稍后再试。";
+      case "MODEL_NETWORK":
+        return "无法连接 DeepSeek，请检查网络。";
+      case "MODEL_TIMEOUT":
+        return "DeepSeek 连接超时。";
+      case "MODEL_PROVIDER_ERROR":
+        return "DeepSeek 服务端错误，请稍后再试。";
+      case "MODEL_INVALID_RESPONSE":
+        return "DeepSeek 返回了无效响应。";
+      case "MODEL_REQUEST_REJECTED":
+        return "DeepSeek 拒绝了请求；请确认模型名称和账户状态。";
+      case "KEY_STORE_UNAVAILABLE":
+      case "KEY_STORE_INVALID":
+      case "KEY_STORE_FAILED":
+        return "Windows 凭据管理器不可用，无法安全保存 API Key。";
+      case "MODEL_CONFIG_EXTERNAL":
+        return "当前宿主配置由外部管理，模型选择不能在软件内修改。";
+      default:
+        return error.message;
+    }
+  };
+
+  const renderStatus = (value: ModelStatus): void => {
+    status = value;
+    clear(meta);
+    meta.append(
+      kv("Provider", value.provider),
+      kv("模型", value.model),
+      kv("API 地址", value.base_url),
+      kv("配置来源", value.managed ? "软件托管" : "外部宿主配置"),
+      kv("宿主状态", value.host_ready ? "就绪" : value.reason_code ?? "未就绪"),
+    );
+    modelSelect.replaceChildren(
+      ...value.model_choices.map((model) => {
+        const option = el("option", { text: model });
+        option.value = model;
+        return option;
+      }),
+    );
+    modelSelect.value = value.model;
+    modelSelect.disabled = !value.managed;
+    applyModel.disabled = !value.managed;
+    keyStatus.className = "setting-status";
+    if (value.key_store_error) {
+      keyStatus.textContent = "无法读取 Windows 凭据管理器，API Key 状态未知。";
+      keyStatus.classList.add("is-error");
+    } else {
+      keyStatus.textContent = value.key_saved
+        ? "API Key 已保存（不会在界面显示，也不会写入配置文件或 PCS 数据）。"
+        : "尚未保存 API Key。";
+    }
+    deleteKey.disabled = !value.key_saved;
+    testConnection.disabled = !value.key_saved;
+  };
+
+  const load = async (): Promise<void> => {
+    connectionStatus.textContent = "";
+    connectionStatus.className = "setting-status";
+    try {
+      const reply = await modelStatus();
+      if (!reply.ok) {
+        keyStatus.textContent = errorText(reply);
+        keyStatus.classList.add("is-error");
+        return;
+      }
+      renderStatus(reply.result as ModelStatus);
+    } catch (error) {
+      keyStatus.textContent = invokeError(error).message;
+      keyStatus.classList.add("is-error");
+    }
+  };
+
+  applyModel.addEventListener("click", () => {
+    if (!status?.managed) return;
+    void (async () => {
+      connectionStatus.textContent = "";
+      try {
+        const reply = await setModelChoice(modelSelect.value);
+        if (!reply.ok) {
+          connectionStatus.textContent = errorText(reply);
+          connectionStatus.classList.add("is-error");
+          return;
+        }
+        await refreshHost();
+        openDrawer("settings");
+        showToast("DeepSeek 模型已更新，请重新确认目的地");
+      } catch (error) {
+        connectionStatus.textContent = invokeError(error).message;
+        connectionStatus.classList.add("is-error");
+      }
+    })();
+  });
+
+  saveKey.addEventListener("click", () => {
+    const value = keyInput.value;
+    if (!value) {
+      keyStatus.textContent = "请输入 API Key。";
+      keyStatus.classList.add("is-error");
+      return;
+    }
+    void (async () => {
+      keyStatus.textContent = "正在安全保存…";
+      keyStatus.className = "setting-status";
+      try {
+        const reply = await saveModelApiKey(value);
+        if (!reply.ok) {
+          keyStatus.textContent = errorText(reply);
+          keyStatus.classList.add("is-error");
+          return;
+        }
+        keyInput.value = "";
+        await refreshHost();
+        openDrawer("settings");
+        showToast("API Key 已保存到 Windows 凭据管理器");
+      } catch (error) {
+        keyStatus.textContent = invokeError(error).message;
+        keyStatus.classList.add("is-error");
+      }
+    })();
+  });
+
+  deleteKey.addEventListener("click", () => {
+    void (async () => {
+      keyStatus.textContent = "正在删除…";
+      keyStatus.className = "setting-status";
+      try {
+        const reply = await deleteModelApiKey();
+        if (!reply.ok) {
+          keyStatus.textContent = errorText(reply);
+          keyStatus.classList.add("is-error");
+          return;
+        }
+        keyInput.value = "";
+        await refreshHost();
+        openDrawer("settings");
+        showToast("API Key 已从 Windows 凭据管理器删除");
+      } catch (error) {
+        keyStatus.textContent = invokeError(error).message;
+        keyStatus.classList.add("is-error");
+      }
+    })();
+  });
+
+  testConnection.addEventListener("click", () => {
+    const sessionId = state.host?.session_id;
+    if (!sessionId) {
+      connectionStatus.textContent = "宿主会话尚未建立。";
+      connectionStatus.classList.add("is-error");
+      return;
+    }
+    if (
+      !window.confirm(
+        "这会向 DeepSeek 发起一次真实 API 请求，可能产生少量费用。继续吗？",
+      )
+    ) {
+      return;
+    }
+    void (async () => {
+      connectionStatus.className = "setting-status";
+      connectionStatus.textContent = "正在测试真实 DeepSeek 连接…";
+      try {
+        const reply = await testModelConnection(sessionId);
+        if (!reply.ok) {
+          connectionStatus.textContent = `连接失败：${errorText(reply)}`;
+          connectionStatus.classList.add("is-error");
+          return;
+        }
+        const result = reply.result as { latency_ms?: number };
+        connectionStatus.textContent = `真实连接成功${
+          typeof result.latency_ms === "number"
+            ? `（${Math.round(result.latency_ms)} ms）`
+            : ""
+        }。`;
+      } catch (error) {
+        connectionStatus.textContent = invokeError(error).message;
+        connectionStatus.classList.add("is-error");
+      }
+    })();
+  });
+
+  container.append(
+    el("p", {
+      class: "muted",
+      text: "QUINTESSENCE 目前接入 DeepSeek。API Key 只保存在 Windows 凭据管理器，不写入仓库、普通配置文件、日志或 PCS 认知数据。保存后本地 sidecar 会重启。",
+    }),
+    meta,
+    el("div", { class: "setting-row", children: [modelSelect, applyModel] }),
+    el("div", { class: "setting-row", children: [keyInput, saveKey, deleteKey] }),
+    keyStatus,
+    el("div", { class: "setting-row", children: [testConnection] }),
+    el("p", {
+      class: "muted",
+      text: "“API Key 已保存”只表示凭据已保存；只有“测试连接”成功才表示真实 DeepSeek 连接可用。测试连接由你主动发起，可能产生少量费用。",
+    }),
+    connectionStatus,
+  );
+  void load();
+  return container;
+}
+
 function renderSettingsTab(): void {
   const info = state.host;
   const name = aiDisplayName(info);
@@ -3954,6 +4233,7 @@ function renderSettingsTab(): void {
   });
 
   shell.drawerBody.append(
+    drawerSection("DeepSeek 连接", [renderModelSettings()]),
     drawerSection("对话显示名", [
       el("p", {
         class: "muted",

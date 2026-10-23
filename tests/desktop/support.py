@@ -212,6 +212,7 @@ def config_document(
     purposes: list[str] | None = None,
     review_permissions: list[str] | None = None,
     review_script: list[dict[str, Any]] | None = None,
+    desktop: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if query_plan is _UNSET:
         query_plan = {
@@ -262,6 +263,8 @@ def config_document(
     }
     if review_permissions is not None:
         document["review"] = {"permissions": list(review_permissions)}
+    if desktop is not None:
+        document["desktop"] = dict(desktop)
     if profile == "lab":
         document["lab"] = {
             "seed": True,

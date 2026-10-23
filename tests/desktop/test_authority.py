@@ -84,6 +84,7 @@ class AuthorityTests(DesktopCase):
                 "app.info",
                 "bridge.ping",
                 "consult.interact",
+                "model.test_connection",
                 "review.candidate.detail",
                 "review.candidates.list",
                 "review.generate",

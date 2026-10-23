@@ -23,9 +23,12 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -53,7 +56,12 @@ from quintessence_pcs.runtime import (
     ContextService,
     DirectHttpModel,
 )
-from quintessence_pcs.runtime.http_model import DIRECT_HTTP_LEGACY_PROTOCOL
+from quintessence_pcs.runtime.http_model import (
+    DIRECT_HTTP_LEGACY_PROTOCOL,
+    MAX_RESPONSE_BYTES,
+    _build_opener,
+    _redact,
+)
 from quintessence_pcs.store import CognitionStore
 
 from host_config import REVIEW_PURPOSE, HostConfig, ModelSpec
@@ -128,6 +136,8 @@ class DesktopRuntime:
             self.queries = CognitionQueryService(self.store)
             if config.lab is not None:
                 self._seed_lab(config)
+            if config.managed and config.provision:
+                self._provision_managed(config)
             self.model = _build_model(config, self.store)
             self.review_model = _build_model(config, self.store, review=True)
             self.facade = ConsultFacade(
@@ -253,6 +263,67 @@ class DesktopRuntime:
             self.store.grant_model_authorization(
                 namespace=namespace,
                 authorization_ref=seed.authorization_ref,
+                provider=config.model.provider,
+                model=config.model.model,
+                manifest_hash=manifest.manifest_hash,
+                max_calls=manifest.max_calls,
+                max_output_tokens_per_call=manifest.max_output_tokens_per_call,
+                max_wall_seconds=manifest.max_wall_seconds,
+            )
+
+    def _provision_managed(self, config: HostConfig) -> None:
+        """Create only the neutral resources a fresh public install needs.
+
+        This is not a Persona feature.  The existing C05 profile lifecycle
+        still owns publication/activation, and C09 still re-checks the model
+        authorization for every call.  A private/external host config never
+        takes this branch and therefore keeps its own provisioning policy.
+        """
+
+        namespace = config.authority.namespace
+        active = self.profiles.get_active_profile(namespace)
+        if active.ref is None:
+            receipt = self.store.ingest_event(
+                namespace=namespace,
+                source_kind="user_report",
+                source_instance="desktop-managed-setup",
+                source_event_id=f"desktop-managed-profile-{namespace}",
+                event_type=REVIEW_APPROVE_EVENT_TYPE,
+                observed_at=utc_now_rfc3339(),
+                payload={"decision": "approve", "provisioning": True},
+            )
+            review_ref = {
+                "ref_type": "event",
+                "namespace": namespace,
+                "event_id": receipt.event_id,
+            }
+            body = _generic_profile_body(review_ref)
+            version = self.profiles.publish_profile(
+                namespace=namespace,
+                profile_id="quintessence.desktop.general",
+                body=body,
+                review_ref=review_ref,
+                authorization_ref=config.authority.access_ref,
+            )
+            self.profiles.activate_profile(
+                namespace=namespace,
+                record_id=version.record_id,
+                record_version=version.record_version,
+                authorization_ref=config.authority.access_ref,
+            )
+            self.self_view.build_self_view(namespace=namespace)
+
+        manifest = config.model.manifest
+        authorization = self.store.active_model_authorization(
+            namespace=namespace,
+            provider=config.model.provider,
+            model=config.model.model,
+            manifest_hash=manifest.manifest_hash,
+        )
+        if authorization is None:
+            self.store.grant_model_authorization(
+                namespace=namespace,
+                authorization_ref=config.authority.access_ref,
                 provider=config.model.provider,
                 model=config.model.model,
                 manifest_hash=manifest.manifest_hash,
@@ -604,6 +675,154 @@ class DesktopRuntime:
         )
         return _review_view(view)
 
+    def test_model_connection(self) -> dict[str, Any]:
+        """Make one explicit, side-effect-free DeepSeek API probe.
+
+        This does not create a Context, Attempt, Interaction or Artifact and
+        does not write a Belief.  It is deliberately separate from the formal
+        Consult/Review ModelPort path; the latter still performs every C09,
+        context and ledger check for a real model call.
+        """
+
+        config = self.config
+        if config.model.transport_kind != "http" or config.is_lab:
+            raise ReviewRequestError(
+                "MODEL_TEST_UNAVAILABLE",
+                "当前宿主不是真实 HTTP 模型配置，不能测试真实连接",
+            )
+        manifest = config.model.manifest
+        key = os.environ.get(manifest.api_key_env, "")
+        if not key:
+            raise ReviewRequestError(
+                "MODEL_KEY_MISSING",
+                "尚未保存 API Key；请先在设置中保存",
+            )
+        if key != key.strip() or not key.isascii() or any(
+            ord(character) < 0x20
+            or ord(character) == 0x7F
+            or character.isspace()
+            for character in key
+        ):
+            raise ReviewRequestError(
+                "MODEL_KEY_INVALID",
+                "保存的 API Key 不是有效的可打印 ASCII 文本",
+            )
+        payload = json.dumps(
+            {
+                "model": manifest.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "temperature": 0,
+                "max_tokens": 1,
+                "stream": False,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            manifest.endpoint,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {key}",
+                "User-Agent": "quintessence-desktop/c13b-1 (connection-test)",
+            },
+            method="POST",
+        )
+        opener = _build_opener()
+        started = time.monotonic()
+        try:
+            with opener.open(request, timeout=min(manifest.max_wall_seconds, 30)) as response:
+                status = int(response.status)
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read(MAX_RESPONSE_BYTES + 1)
+            finally:
+                exc.close()
+            text = _redact(_decode_utf8(body), key) or ""
+            if exc.code in (401, 403):
+                raise ReviewRequestError(
+                    "MODEL_AUTH_FAILED",
+                    "DeepSeek 拒绝了 API Key（鉴权失败）",
+                ) from None
+            if exc.code == 429:
+                raise ReviewRequestError(
+                    "MODEL_RATE_LIMITED",
+                    "DeepSeek 限流或配额不足；请稍后再试",
+                ) from None
+            if 500 <= exc.code < 600:
+                raise ReviewRequestError(
+                    "MODEL_PROVIDER_ERROR",
+                    "DeepSeek 服务端返回错误；请稍后再试",
+                ) from None
+            raise ReviewRequestError(
+                "MODEL_REQUEST_REJECTED",
+                f"DeepSeek 拒绝了连接测试请求（HTTP {exc.code}）",
+            ) from None
+        except (socket.timeout, TimeoutError):
+            raise ReviewRequestError(
+                "MODEL_TIMEOUT",
+                "DeepSeek 连接测试超时",
+            ) from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+                raise ReviewRequestError(
+                    "MODEL_TIMEOUT",
+                    "DeepSeek 连接测试超时",
+                ) from None
+            raise ReviewRequestError(
+                "MODEL_NETWORK",
+                "无法连接 DeepSeek；请检查网络",
+            ) from None
+        except (OSError, ValueError):
+            raise ReviewRequestError(
+                "MODEL_NETWORK",
+                "无法连接 DeepSeek；请检查网络",
+            ) from None
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ReviewRequestError(
+                "MODEL_INVALID_RESPONSE",
+                "DeepSeek 返回了过大的响应",
+            )
+        if status != 200:
+            raise ReviewRequestError(
+                "MODEL_PROVIDER_ERROR",
+                f"DeepSeek 返回了 HTTP {status}",
+            )
+        text = _decode_utf8(raw)
+        if text is None:
+            raise ReviewRequestError(
+                "MODEL_INVALID_RESPONSE",
+                "DeepSeek 响应不是有效 UTF-8",
+            )
+        if key in text:
+            raise ReviewRequestError(
+                "MODEL_INVALID_RESPONSE",
+                "DeepSeek 响应回显了凭据；已拒绝",
+            )
+        try:
+            document = json.loads(text)
+        except ValueError:
+            raise ReviewRequestError(
+                "MODEL_INVALID_RESPONSE",
+                "DeepSeek 响应不是有效 JSON",
+            ) from None
+        choices = document.get("choices") if isinstance(document, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ReviewRequestError(
+                "MODEL_INVALID_RESPONSE",
+                "DeepSeek 响应缺少 chat completion choices",
+            )
+        return {
+            "provider": manifest.provider,
+            "model": manifest.model,
+            "base_url": manifest.base_url,
+            "latency_ms": round((time.monotonic() - started) * 1000, 3),
+            "connected": True,
+        }
+
     # -------------------------------------------------------------- readiness
 
     def _readiness(self) -> tuple[bool, str | None, str | None]:
@@ -804,6 +1023,34 @@ class ScriptedHttpModel(DirectHttpModel):
         )
 
 
+def _generic_profile_body(review_ref: dict[str, Any]) -> dict[str, Any]:
+    """A neutral profile for a fresh public install (no private identity)."""
+
+    return {
+        "profile_id": "quintessence.desktop.general",
+        "profile_version": "1",
+        "identity_summary": (
+            "QUINTESSENCE 通用桌面助手。只基于当前可披露材料作答，"
+            "不声称未发生的工具调用或未取得的证据。"
+        ),
+        "principles": [
+            "State what is unknown instead of inventing an answer.",
+            "Do not claim a tool ran without evidence.",
+            "Keep private data out of the model input unless the host authorizes it.",
+        ],
+        "style": {
+            "language": "zh-CN",
+            "tone": "plain",
+            "verbosity_by_context": {"casual": "short", "technical": "detailed"},
+        },
+        "attention_preferences": [],
+        "examples": [],
+        "asset_hash": "0" * 64,
+        "review_ref": review_ref,
+        "renderer_compatibility": "pcs.renderer.generic-v1",
+    }
+
+
 def _profile_body(seed: Any) -> dict[str, Any]:
     return {
         "profile_id": seed.profile_id,
@@ -903,6 +1150,13 @@ _REF_KEYS: dict[str, tuple[str, ...]] = {
         "artifact_version",
     ),
 }
+
+
+def _decode_utf8(raw: bytes) -> str | None:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _public_ref(ref: Any) -> dict[str, Any] | None:

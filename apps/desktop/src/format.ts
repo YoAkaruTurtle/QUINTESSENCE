@@ -71,7 +71,34 @@ export function reasonLabel(code: string | null, detail: string | null): string 
     return "没有匹配当前目的地的模型授权";
   }
   if (code === "MODEL_KEY_MISSING") {
-    return "宿主尚未提供模型凭据";
+    return "尚未保存模型 API Key";
+  }
+  if (code === "MODEL_KEY_INVALID") {
+    return "保存的模型 API Key 无效";
+  }
+  if (code === "MODEL_NOT_AUTHORIZED") {
+    return "模型调用没有通过 C09 发送门";
+  }
+  if (code === "MODEL_BUDGET_EXCEEDED") {
+    return "模型授权额度已用尽";
+  }
+  if (code === "MODEL_AUTH_FAILED") {
+    return "DeepSeek 鉴权失败，请检查 API Key";
+  }
+  if (code === "MODEL_RATE_LIMITED") {
+    return "DeepSeek 限流或配额不足";
+  }
+  if (code === "MODEL_NETWORK") {
+    return "无法连接 DeepSeek";
+  }
+  if (code === "MODEL_TIMEOUT") {
+    return "DeepSeek 请求超时";
+  }
+  if (code === "MODEL_PROVIDER_ERROR") {
+    return "DeepSeek 服务端错误";
+  }
+  if (code === "MODEL_INVALID_RESPONSE") {
+    return "模型输出未通过协议校验";
   }
   if (code === "PROFILE_MISSING") {
     return "数据实例中没有启用的宿主 Profile";

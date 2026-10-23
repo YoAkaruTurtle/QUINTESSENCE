@@ -32,6 +32,12 @@ from quintessence_pcs.foundation.errors import (  # noqa: E402
     InvalidInput,
     StateRevisionConflict,
 )
+from quintessence_pcs.runtime import (  # noqa: E402
+    ModelBudgetExceededError,
+    ModelConfigurationError,
+    ModelNotAuthorizedError,
+    ModelTransportError,
+)
 from quintessence_pcs.store import CognitionStore  # noqa: E402
 
 
@@ -787,6 +793,31 @@ class ReviewErrorMappingTests(unittest.TestCase):
         )
         self.assertEqual(code, "INVALID_PARAMS")
         self.assertFalse(unknown)
+
+    def test_model_transport_failures_are_classified(self) -> None:
+        cases = [
+            (ModelNotAuthorizedError("no grant"), "MODEL_NOT_AUTHORIZED", False),
+            (ModelBudgetExceededError("budget"), "MODEL_BUDGET_EXCEEDED", False),
+            (ModelConfigurationError("KEY is not set"), "MODEL_KEY_MISSING", False),
+            (ModelTransportError("provider call failed: HTTP_401"), "MODEL_AUTH_FAILED", False),
+            (ModelTransportError("provider call failed: HTTP_429"), "MODEL_RATE_LIMITED", False),
+            (ModelTransportError("provider call failed: HTTP_503"), "MODEL_PROVIDER_ERROR", False),
+            (ModelTransportError("provider call failed: NETWORK_ERROR"), "MODEL_NETWORK", True),
+            (ModelTransportError("provider call failed: TIMEOUT"), "MODEL_TIMEOUT", True),
+            (
+                ModelTransportError(
+                    "the provider did not answer before the wall-clock budget"
+                ),
+                "MODEL_TIMEOUT",
+                True,
+            ),
+        ]
+        for error, expected, unknown in cases:
+            code, _, actual_unknown = pcs_bridge._map_review_error(
+                error, default_unknown=True
+            )
+            self.assertEqual(code, expected)
+            self.assertEqual(actual_unknown, unknown)
 
     def test_unexpected_failures_are_unknown_only_when_a_write_is_possible(self) -> None:
         code, _, unknown = pcs_bridge._map_review_error(
