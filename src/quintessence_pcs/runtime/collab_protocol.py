@@ -51,8 +51,8 @@ from .model_port import ModelConfigurationError
 
 #: Frozen protocol / renderer / policy versions recorded in the ledger.
 COLLAB_PROTOCOL_VERSION = "collab.v1"
-COLLAB_RENDERER_VERSION = "collab.v1.renderer.1"
-COLLAB_MODEL_POLICY_VERSION = "collab.v1.direct-http.v1"
+COLLAB_RENDERER_VERSION = "collab.v1.renderer.2"
+COLLAB_MODEL_POLICY_VERSION = "collab.v1.direct-http.v2"
 
 #: The ``$id`` of the one schema contract this protocol accepts.
 COLLAB_OUTPUT_SCHEMA_ID = "model_output.json"
@@ -453,6 +453,33 @@ def _protocol_declaration() -> dict[str, Any]:
         "output_schema": output_schema,
         "allowed_actions": list(COLLAB_ACTIONS),
         "consult_forbidden_action": "propose",
+        "query_policy": {
+            "use_query_when": (
+                "The user's question may depend on facts, preferences, project "
+                "decisions or other cognition previously stored by the PCS, "
+                "and the current Context does not contain enough evidence to "
+                "answer it. Query before saying unknown or guessing."
+            ),
+            "do_not_query_when": (
+                "The question is ordinary general knowledge unrelated to "
+                "stored PCS cognition, or the current Context already contains "
+                "sufficient evidence. Do not repeat a query after its result "
+                "has been supplied in this interaction."
+            ),
+            "host_owned_plan": (
+                "A query is a request for host-owned evidence. The host "
+                "validates and executes its configured deterministic query "
+                "plan. You cannot supply, widen or invent a query plan, scope "
+                "or result. If no plan applies, the host may return an "
+                "incomplete result; do not fabricate one."
+            ),
+            "after_query": (
+                "Use only the disclosed query result. If it is empty, partial "
+                "or unavailable, answer from the disclosed material and state "
+                "the uncertainty. A query supplies evidence only; it never "
+                "creates or commits a Belief."
+            ),
+        },
         "references_policy": (
             "every references[] entry must exactly equal one reference "
             "supplied by the Context; namespace, id and version must match "

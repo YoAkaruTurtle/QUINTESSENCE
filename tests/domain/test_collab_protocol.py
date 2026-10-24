@@ -291,6 +291,22 @@ class CollabProtocolTests(CognitionTestCase):
             {"reply", "action", "references", "brief_reason"},
             set(declaration["output_schema"]["properties"]),
         )
+        policy = declaration["query_policy"]
+        self.assertEqual(
+            {
+                "use_query_when",
+                "do_not_query_when",
+                "host_owned_plan",
+                "after_query",
+            },
+            set(policy),
+        )
+        self.assertIn("preferences", policy["use_query_when"])
+        self.assertIn("ordinary general knowledge", policy["do_not_query_when"])
+        self.assertIn("host", policy["host_owned_plan"])
+        self.assertIn("empty", policy["after_query"])
+        self.assertIn("never", policy["after_query"])
+        self.assertNotIn("propose", policy["after_query"])
 
     def test_renderer_appends_assistant_and_feedback_for_repair(self) -> None:
         messages = render_collab_messages(
@@ -399,7 +415,7 @@ class CollabProtocolTests(CognitionTestCase):
         self.assertIsInstance(policy.to_experience_access(), ExperienceAccess)
         self.assertEqual(
             COLLAB_MODEL_POLICY_VERSION,
-            "collab.v1.direct-http.v1",
+            "collab.v1.direct-http.v2",
         )
 
         invalid_values = [
