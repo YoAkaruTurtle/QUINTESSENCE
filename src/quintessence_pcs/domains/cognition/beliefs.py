@@ -474,12 +474,13 @@ class BeliefService:
                     "does not implement an explicit reopen"
                 )
             old_body = parse_belief_body(current)
-            if validated["claim"] != old_body["claim"]:
+            conflict = revision_claim_conflict(old_body, validated)
+            if conflict == CLAIM_TEXT_FROZEN:
                 raise InvalidTransition(
                     "the claim text is frozen in PCS2-008; a substantive change "
                     "requires retracting this belief and proposing a new record"
                 )
-            if validated["claim_type"] != old_body["claim_type"]:
+            if conflict == CLAIM_TYPE_FROZEN:
                 raise InvalidTransition(
                     "the claim_type cannot change within one belief record"
                 )
@@ -1022,6 +1023,31 @@ def parse_belief_body(version: RecordVersion) -> dict[str, Any]:
         raise CorruptStore(
             f"belief {version.record_id} has an invalid body: {exc}"
         ) from exc
+
+
+#: Stable reasons for a revise that violates the PCS2-008 claim freeze.
+CLAIM_TEXT_FROZEN = "claim_text_frozen"
+CLAIM_TYPE_FROZEN = "claim_type_frozen"
+
+
+def revision_claim_conflict(
+    current_body: Mapping[str, Any],
+    proposed_body: Mapping[str, Any],
+) -> str | None:
+    """Return the C06 claim-freeze reason for a proposed revision, if any.
+
+    This is deliberately a pure predicate over already-validated belief bodies.
+    The C06 transaction remains the authority: this helper only decides what a
+    review projection may say before a commit is attempted.  Keeping the rule
+    here avoids C07 growing a second, divergent interpretation of
+    ``revise_belief``.
+    """
+
+    if proposed_body.get("claim") != current_body.get("claim"):
+        return CLAIM_TEXT_FROZEN
+    if proposed_body.get("claim_type") != current_body.get("claim_type"):
+        return CLAIM_TYPE_FROZEN
+    return None
 
 
 def belief_evidence_is_live(

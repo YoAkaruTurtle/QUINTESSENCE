@@ -42,6 +42,7 @@ from quintessence_pcs.foundation.errors import (  # noqa: E402
     InvalidInput,
     Redacted,
 )
+from quintessence_pcs.domains.cognition.errors import InvalidTransition  # noqa: E402
 from quintessence_pcs.store import CognitionStore  # noqa: E402
 from quintessence_pcs.store.experience import (  # noqa: E402
     READABILITY_AVAILABLE,
@@ -153,6 +154,26 @@ class ReviewFacadeTests(CognitionTestCase):
                 self.evidence_link(self.event_ref(event.event_id))
             ],
             "reason": "synthetic correction for the C07 facade",
+        }
+
+    def revision(
+        self,
+        event,
+        target: dict,
+        *,
+        claim: str = "capability:file-read",
+        strength_reason: str = "synthetic revision for the C07 facade",
+    ) -> dict:
+        body = self.belief_body(
+            claim=claim,
+            evidence_links=[self.evidence_link(self.event_ref(event.event_id))],
+            strength_reason=strength_reason,
+        )
+        return {
+            "operation": "revise_belief",
+            "target": target,
+            "body": body,
+            "scope": self.default_scope(),
         }
 
     @staticmethod
@@ -890,6 +911,114 @@ class ReviewFacadeTests(CognitionTestCase):
         self.assertEqual(event_b.event_id, controlled[0].event_id)
 
     # ------------------------------------------------------ 18. correction
+
+    def test_claim_text_change_revise_is_not_approvable(self) -> None:
+        first_event, first_work = self.pending_event()
+        first_model = ScriptedModel([self.raw(self.proposal(first_event))])
+        first_facade = self.make_facade(first_model)
+        first = self.review(first_facade, self.access(), first_event, first_work)
+        self.assertEqual("pending", first.state)
+        approved = self.approve(
+            first_facade, self.access(), first.candidate_id
+        )
+        self.assertEqual("committed", approved.state)
+        old = self.store.get_current(NS, approved.receipt.record_refs[0].record_id)
+        target = self.record_ref(old)
+
+        second_event = self.ingest(event_type="CorrectionObserved:file-read")
+        second_work = self.work_for(second_event.event_id)
+        self.assertIsNotNone(second_work)
+        model = ScriptedModel(
+            [
+                self.raw(
+                    self.revision(
+                        second_event,
+                        target,
+                        claim="capability:file-write",
+                    )
+                )
+            ]
+        )
+        facade = self.make_facade(model)
+        access = self.access()
+        second = self.review(facade, access, second_event, second_work)
+        self.assertEqual("pending", second.state)
+        self.assertIsNotNone(second.candidate_id)
+
+        detail = facade.candidate_detail(
+            access,
+            candidate_id=second.candidate_id,
+            artifact_version=1,
+        )
+        self.assertFalse(detail.can_approve)
+        self.assertTrue(detail.can_reject)
+        self.assertEqual("claim_text_frozen", detail.eligibility_reason)
+        self.assertEqual("pending", detail.candidate.status)
+
+        before = self.review_counts()
+        with self.assertRaises(InvalidTransition):
+            facade.resolve(
+                access,
+                candidate_id=second.candidate_id,
+                decision="approve",
+                decision_id="decision:illegal-claim-change",
+            )
+        self.assertEqual(before, self.review_counts())
+        self.assertEqual(
+            "pending",
+            facade.candidate_detail(
+                access,
+                candidate_id=second.candidate_id,
+                artifact_version=1,
+            ).candidate.status,
+        )
+
+    def test_same_claim_revise_remains_approvable(self) -> None:
+        first_event, first_work = self.pending_event()
+        first_model = ScriptedModel([self.raw(self.proposal(first_event))])
+        first_facade = self.make_facade(first_model)
+        first = self.review(first_facade, self.access(), first_event, first_work)
+        approved = self.approve(
+            first_facade, self.access(), first.candidate_id
+        )
+        old = self.store.get_current(NS, approved.receipt.record_refs[0].record_id)
+        target = self.record_ref(old)
+
+        second_event = self.ingest(event_type="CapabilityObserved:file-read")
+        second_work = self.work_for(second_event.event_id)
+        model = ScriptedModel(
+            [
+                self.raw(
+                    self.revision(
+                        second_event,
+                        target,
+                        strength_reason="new evidence for the same claim",
+                    )
+                )
+            ]
+        )
+        facade = self.make_facade(model)
+        access = self.access()
+        second = self.review(facade, access, second_event, second_work)
+        self.assertEqual("pending", second.state)
+        detail = facade.candidate_detail(
+            access,
+            candidate_id=second.candidate_id,
+            artifact_version=1,
+        )
+        self.assertTrue(detail.can_approve)
+        self.assertIsNone(detail.eligibility_reason)
+        resolved = facade.resolve(
+            access,
+            candidate_id=second.candidate_id,
+            decision="approve",
+            decision_id="decision:legal-same-claim",
+        )
+        self.assertEqual("committed", resolved.state)
+        updated = self.store.get_current(NS, old.record_id)
+        self.assertEqual(2, updated.record_version)
+        self.assertEqual(old.body["claim"], updated.body["claim"])
+        self.assertEqual("supported", updated.status)
 
     def test_correction_two_step_retract_then_replacement(self) -> None:
         first_event, first_work = self.pending_event()

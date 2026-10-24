@@ -296,13 +296,42 @@ PROPOSAL_CONTRACT = {
     "operations_detail": {
         "propose_belief": "operation, body, scope",
         "revise_belief": (
-            "operation, target (RecordRef of the current belief), body, scope"
+            "operation, target (RecordRef of the current belief), body, scope; "
+            "body.claim and body.claim_type must be byte-identical to the "
+            "target version. A substantive change to either field is not a "
+            "revision: use retract_belief first, then a later propose_belief "
+            "for the replacement record"
         ),
         "retract_belief": (
             "operation, target (RecordRef of the belief to withdraw), "
-            "evidence_links, reason; withdraws target and completes this step"
+            "evidence_links, reason; withdraws target and completes this step. "
+            "A replacement is a separate later propose_belief, not part of "
+            "this candidate"
         ),
         "wait": "operation, reason (non-empty string, <=512 chars)",
+    },
+    "claim_change_policy": {
+        "frozen": (
+            "For revise_belief, the target's body.claim and body.claim_type "
+            "are frozen. Do not rewrite either field, even when new evidence "
+            "supports a different conclusion."
+        ),
+        "replacement": (
+            "If new evidence changes the claim text, return retract_belief "
+            "with the exact current target and live supporting evidence. "
+            "After that retraction is committed, a separate Work/Review may "
+            "propose_belief a new record with the new claim."
+        ),
+        "non_atomic": (
+            "One candidate carries one operation. Do not encode retract plus "
+            "replacement as a single revise_belief, and do not assume one "
+            "approval can perform both steps."
+        ),
+        "insufficient": (
+            "If the target, live evidence, or a legal operation is missing, "
+            "return wait with a brief reason instead of inventing a target, "
+            "evidence link, or claim replacement."
+        ),
     },
     "note": (
         "Return exactly one JSON object using these exact fields and enums. "
@@ -328,7 +357,10 @@ def proposal_format_hint() -> str:
         "Allowed operations: propose_belief, revise_belief, retract_belief, wait. "
         "Use retract_belief to withdraw a belief when new evidence contradicts "
         "it; after retraction a new context may ask for a replacement. "
-        "Use revise_belief only for the same frozen claim. "
+        "Use revise_belief only when body.claim and body.claim_type are "
+        "byte-identical to the target; do not use it to replace a claim. "
+        "A substantive claim change requires a separate retract_belief followed "
+        "by a later propose_belief, never one revise_belief. "
         f"claim_type must be one of: {', '.join(CLAIM_TYPES)}. "
         f"inference_basis must match claim_type: {mapping}. "
         f"strength must be one of: {', '.join(STRENGTHS)}. "

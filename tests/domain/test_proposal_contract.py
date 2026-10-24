@@ -131,6 +131,17 @@ class ProposalContractSourceTests(unittest.TestCase):
         self.assertIn("namespace", scope["note"])
         for operation in ("propose_belief", "revise_belief", "retract_belief", "wait"):
             self.assertIn(operation, contract["operations_detail"])
+        policy = contract["claim_change_policy"]
+        self.assertEqual(
+            {"frozen", "replacement", "non_atomic", "insufficient"},
+            set(policy),
+        )
+        self.assertIn("byte-identical", contract["operations_detail"]["revise_belief"])
+        self.assertIn("retract_belief", policy["replacement"])
+        self.assertIn("propose_belief", policy["replacement"])
+        self.assertIn("single", policy["non_atomic"])
+        self.assertIn("wait", policy["insufficient"])
+        self.assertIn("not use it to replace a claim", proposal_format_hint())
 
     def test_format_hint_contains_all_authoritative_forms(self) -> None:
         hint = proposal_format_hint()

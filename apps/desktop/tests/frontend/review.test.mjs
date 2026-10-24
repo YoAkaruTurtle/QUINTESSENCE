@@ -18,6 +18,7 @@ const {
   buildGenerateParams,
   buildResolveParams,
   candidateStatusLabel,
+  eligibilityLabel,
   generateBlockReason,
   generateEnabled,
   receiptVisible,
@@ -348,6 +349,31 @@ test("current moved blocks only approve; current redacted still allows reject", 
   };
   assert.equal(approveEnabled(redactedCandidate, host()), false);
   assert.equal(rejectEnabled(redactedCandidate, host()), false);
+});
+
+test("claim-freeze preflight blocks approval and asks for retract then replacement", () => {
+  const frozen = {
+    ...detailState(),
+    detail: detail({
+      can_approve: false,
+      can_reject: true,
+      eligibility_reason: "claim_text_frozen",
+    }),
+  };
+  assert.equal(approveEnabled(frozen, host()), false);
+  assert.equal(rejectEnabled(frozen, host()), true);
+  const reason = resolveBlockReason(frozen, host(), "approve");
+  assert.match(reason, /冻结的认识正文/);
+  assert.match(reason, /撤回旧认识/);
+  assert.match(reason, /替代认识/);
+  assert.equal(
+    eligibilityLabel("claim_text_frozen", "fallback"),
+    "此候选试图改变已冻结的认识正文；请先撤回旧认识，再依据新证据建立替代认识",
+  );
+  assert.match(
+    eligibilityLabel("claim_type_frozen", "fallback"),
+    /冻结的认识类型/,
+  );
 });
 
 test("generate is refused for legacy, pending, committed and paused work", () => {

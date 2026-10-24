@@ -857,6 +857,12 @@ export function eligibilityLabel(
     current_missing: "当前版本不存在",
     target_moved: "目标版本已变化",
     current_terminal: "当前版本已终结",
+    claim_text_frozen: (
+      "此候选试图改变已冻结的认识正文；请先撤回旧认识，再依据新证据建立替代认识"
+    ),
+    claim_type_frozen: (
+      "此候选试图改变冻结的认识类型；请先撤回旧认识，再建立替代认识"
+    ),
     source_redacted: "有来源不可读",
     source_unavailable: "有来源不可用",
   };

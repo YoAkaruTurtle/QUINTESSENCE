@@ -48,7 +48,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..domains.cognition.beliefs import parse_belief_body, validate_belief_body
+from ..domains.cognition.beliefs import (
+    parse_belief_body,
+    revision_claim_conflict,
+    validate_belief_body,
+)
 from ..domains.cognition.context_guard import require_live_context
 from ..domains.cognition.errors import EvidenceMissing
 from ..domains.refs import EventRef, RecordRef
@@ -606,6 +610,21 @@ class ReviewFacade:
                 ):
                     can_approve = False
                     reason = "current_terminal"
+                if (
+                    proposal.operation == "revise_belief"
+                    and current.body is not None
+                    and reason is None
+                ):
+                    conflict = revision_claim_conflict(
+                        current.body,
+                        {
+                            "claim": proposal.claim,
+                            "claim_type": proposal.claim_type,
+                        },
+                    )
+                    if conflict is not None:
+                        can_approve = False
+                        reason = conflict
                 source_reason = _source_block_reason(sources)
                 if source_reason is not None:
                     can_approve = False
