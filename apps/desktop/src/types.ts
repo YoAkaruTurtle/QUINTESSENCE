@@ -208,6 +208,7 @@ export interface ReviewWorkItem {
   generation: number;
   blocked: boolean;
   rerun_registered: boolean;
+  last_candidate_status: string | null;
 }
 
 export interface LegacyWorkItem {

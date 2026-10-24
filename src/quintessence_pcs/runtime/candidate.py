@@ -112,8 +112,15 @@ def generate_candidate(
     generation_budget: GenerationBudget | None = None,
     feedback: str | None = None,
     refresh_self_view: bool = True,
+    focus_work_id: str | None = None,
+    trigger_as_fact: bool = False,
 ) -> CandidateResult:
-    """Run preflight, Context assembly and the bounded model loop, no commit."""
+    """Run preflight, Context assembly and the bounded model loop, no commit.
+
+    ``focus_work_id``/``trigger_as_fact`` are used by C07: restrict the
+    projection to the Work under review and project its own trigger Event body
+    as a fact.  Legacy C02/C05 callers keep the defaults and unchanged behavior.
+    """
 
     ns = identifiers.require_namespace(namespace)
     trigger = (
@@ -157,6 +164,8 @@ def generate_candidate(
             trigger_ref=trigger.to_dict(),
             adapter_kind=model.adapter_kind,
             refresh_self_view=refresh_self_view,
+            focus_work_id=focus_work_id,
+            trigger_as_fact=trigger_as_fact,
         )
     except StorageError as exc:
         if isinstance(exc, (CorruptStore, DbBusy)):

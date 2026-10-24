@@ -132,6 +132,7 @@ class ReviewBridgeTests(ReviewBridgeCase):
         self.assertEqual(managed_item["event_id"], managed[0]["event_id"])
         self.assertFalse(managed_item["blocked"])
         self.assertFalse(managed_item["rerun_registered"])
+        self.assertIsNone(managed_item["last_candidate_status"])
         # Only the existence of a rerun reference is public; the reference
         # value itself is never returned.
         self.assertNotIn("rerun_authorization_ref", managed_item)
@@ -233,6 +234,17 @@ class ReviewBridgeTests(ReviewBridgeCase):
         self.assertEqual(
             again["result"]["receipt"]["request_id"], receipt["request_id"]
         )
+
+        after_commit = process.request(
+            "review.work.list", {"session_id": info["session_id"]}
+        )
+        self.assertTrue(after_commit["ok"], after_commit)
+        after_item = next(
+            item
+            for item in after_commit["result"]["managed"]
+            if item["work_id"] == work["work_id"]
+        )
+        self.assertEqual(after_item["last_candidate_status"], "committed")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM processed_commands"), 1)
         self.assertEqual(
             self.scalar(

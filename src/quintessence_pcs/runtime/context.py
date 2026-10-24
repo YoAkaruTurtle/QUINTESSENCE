@@ -16,7 +16,9 @@ relations may contribute an event body, and each is proven from the store:
 * ``facts``: (a) the events of this round's processable pending batch
   (``unfinished_work`` -- not the frozen ``pending_work`` table, which also
   holds already-completed rows), and (b) the EventRefs cited by a current
-  Belief's ``evidence_links``;
+  Belief's ``evidence_links``.  C07 Review may explicitly opt in to projecting
+  the current Work's own non-question trigger as a fact, because that trigger
+  is the evidence under review; the default legacy path keeps it metadata-only.
 * anything else is metadata only and is recorded in ``omissions`` with
   ``reason:"unproven_relevance"``.
 
@@ -660,6 +662,8 @@ class ContextService:
         adapter_kind: str | None = None,
         proposal_note_addendum: str | None = None,
         refresh_self_view: bool = True,
+        focus_work_id: str | None = None,
+        trigger_as_fact: bool = False,
     ) -> ContextEnvelope:
         """Assemble and persist one Context; never advances ``state_revision``.
 
@@ -671,6 +675,11 @@ class ContextService:
         A stale or unavailable SelfView is then rendered with its own freshness
         verdict instead of being rebuilt.  Nothing else changes: the trigger,
         the pinned profile, the watermarks and the archival write are the same.
+
+        ``focus_work_id`` and ``trigger_as_fact`` are the C07 Review opt-in:
+        restrict pending material to the Work under review and project that
+        Work's own trigger body as a fact.  Legacy callers use the defaults
+        (all pending material, non-question trigger body as metadata only).
         """
 
         ns = identifiers.require_namespace(namespace)
@@ -685,6 +694,13 @@ class ContextService:
             )
         if not isinstance(refresh_self_view, bool):
             raise InvalidInput("refresh_self_view must be a boolean")
+        if focus_work_id is not None:
+            try:
+                focus_work_id = str(uuid.UUID(focus_work_id))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise InvalidInput("focus_work_id must be a canonical UUID") from exc
+        if not isinstance(trigger_as_fact, bool):
+            raise InvalidInput("trigger_as_fact must be a boolean")
         self._store.require_standalone("build_context")
         trigger_header = self._require_trusted_trigger(ns, trigger)
 
@@ -709,7 +725,9 @@ class ContextService:
         run_id = str(uuid.uuid4())
         with self._store.transaction():
             watermarks = self._store.context_watermarks(ns)
-            materials = self._read_materials_locked(ns, trigger, trigger_header)
+            materials = self._read_materials_locked(
+                ns, trigger, trigger_header, focus_work_id=focus_work_id
+            )
             envelope = self._assemble_locked(
                 ns=ns,
                 run_id=run_id,
@@ -718,6 +736,7 @@ class ContextService:
                 materials=materials,
                 adapter_kind=adapter_kind,
                 proposal_note_addendum=proposal_note_addendum,
+                trigger_as_fact=trigger_as_fact,
             )
         return envelope
 
@@ -1326,7 +1345,12 @@ class ContextService:
             return SelfViewState(namespace, None, SELF_VIEW_UNAVAILABLE)
 
     def _read_materials_locked(
-        self, namespace: str, trigger: EventRef, trigger_header: EventHeader
+        self,
+        namespace: str,
+        trigger: EventRef,
+        trigger_header: EventHeader,
+        *,
+        focus_work_id: str | None = None,
     ) -> _Materials:
         active = self._profiles.get_active_profile(namespace)
         if active.ref is None:
@@ -1388,12 +1412,21 @@ class ContextService:
 
         pending: list[tuple[PendingWork, EventHeader]] = []
         for work in self._store.unfinished_work(namespace):
+            # C07 reviews one Work.  A focused Context may use that Work's
+            # trigger/evidence, but must never silently borrow another pending
+            # Work's Event body as the current Work's evidence.
+            if focus_work_id is not None and work.work_id != focus_work_id:
+                continue
             header = self._store.event_header(namespace, work.event_id)
             if header is None:
                 raise CorruptStore(
                     f"pending work {work.work_id} names a missing event"
                 )
             pending.append((work, header))
+        if focus_work_id is not None and not pending:
+            raise InvalidInput(
+                f"focus Work {focus_work_id} is not a pending Work"
+            )
 
         # R1.1: the omission candidates are this round's trusted trigger, the
         # current pending batch, and their server-validated causation refs.
@@ -1486,6 +1519,7 @@ class ContextService:
         beliefs: Sequence[tuple[Any, dict[str, Any]]],
         selected: Sequence[_EpisodeMaterial],
         profile_body: Mapping[str, Any],
+        trigger_as_fact: bool = False,
     ) -> tuple[
         tuple[_ProjectedEvent, ...],
         tuple[_ProjectedEvent, ...],
@@ -1570,12 +1604,14 @@ class ContextService:
                 user_input.append(item)
             return True
 
-        # Category 1: this round's question.  A non-question trigger body is
-        # not projected: the trigger is the round itself, rendered as metadata,
-        # and the pre-PCS2-010-P0 invariant "a generic trigger body is not
-        # copied into the Context" stays true (tests/domain/test_context_step).
+        # Category 1: this round's question, or the explicit Review trigger
+        # fact requested by C07.  The default legacy path still keeps a
+        # non-question trigger body as metadata only; C07 opts in because the
+        # Work under review needs its own evidence body.
         if is_question_event_type(trigger_header.event_type):
             project(trigger_header, "current_question")
+        elif trigger_as_fact:
+            project(trigger_header, "fact")
         else:
             considered.add(trigger_id)
 
@@ -1650,6 +1686,7 @@ class ContextService:
         materials: _Materials,
         adapter_kind: str | None,
         proposal_note_addendum: str | None = None,
+        trigger_as_fact: bool = False,
     ) -> ContextEnvelope:
         selected = list(materials.episodes[:MAX_EPISODES])
         facts, user_input, projection_omissions = self._project_events_locked(
@@ -1659,6 +1696,7 @@ class ContextService:
             beliefs=materials.beliefs,
             selected=tuple(selected),
             profile_body=materials.profile_body,
+            trigger_as_fact=trigger_as_fact,
         )
         omissions: list[dict[str, Any]] = _unique_omissions(
             tuple(materials.omissions) + projection_omissions
@@ -1710,11 +1748,23 @@ class ContextService:
                 )
                 continue
             if retained_facts:
-                dropped_fact = retained_facts.pop()
-                omissions.append(
-                    {"ref": dropped_fact.ref.to_dict(), "reason": "budget"}
-                )
-                continue
+                # The current Review trigger is required evidence.  Trim only
+                # another projected fact; if the trigger alone does not fit,
+                # fail instead of silently sending a Context without it.
+                drop_index = None
+                for index in range(len(retained_facts) - 1, -1, -1):
+                    if (
+                        retained_facts[index].ref.event_id
+                        != materials.trigger_header.event_id
+                    ):
+                        drop_index = index
+                        break
+                if drop_index is not None:
+                    dropped_fact = retained_facts.pop(drop_index)
+                    omissions.append(
+                        {"ref": dropped_fact.ref.to_dict(), "reason": "budget"}
+                    )
+                    continue
             raise ContextTooLarge(
                 f"required context material is {used_bytes} bytes; the "
                 f"budget is {MAX_CONTEXT_BYTES}"

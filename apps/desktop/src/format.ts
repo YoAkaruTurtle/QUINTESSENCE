@@ -199,7 +199,24 @@ export function sourceCountLabel(result: ConsultResult | null): string {
   if (!result) {
     return "来源：—";
   }
-  return `来源：输入 1 · 查询 ${result.query_source_refs.length}`;
+  const query = result.query;
+  if (query === null) {
+    return "来源：输入 1 · PCS 查询未执行";
+  }
+  if (query.status === "unavailable") {
+    return "来源：输入 1 · PCS 查询结果不可用";
+  }
+  if (query.status === "empty") {
+    return "来源：输入 1 · PCS 查询完成 · 可披露认识 0";
+  }
+  if (query.status === "ok") {
+    const count = query.items.length;
+    if (query.material_status === "partial") {
+      return `来源：输入 1 · PCS 查询完成 · 可披露认识 ${count} · 材料可能不完整`;
+    }
+    return `来源：输入 1 · PCS 查询完成 · 可披露认识 ${count}`;
+  }
+  return "来源：输入 1 · PCS 查询状态不可用";
 }
 
 export interface SourceRow {

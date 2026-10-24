@@ -678,6 +678,8 @@ class ReviewFacade:
             context_service=self._contexts,
             model=self._model,
             feedback=feedback,
+            focus_work_id=work,
+            trigger_as_fact=True,
         )
         if generated.failure is not None:
             return ReviewView(

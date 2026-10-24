@@ -38,7 +38,9 @@ from quintessence_pcs.collaboration import (  # noqa: E402
 from quintessence_pcs.foundation import identifiers  # noqa: E402
 from quintessence_pcs.foundation.errors import (  # noqa: E402
     AuthorizationRequired,
+    EventNotFound,
     InvalidInput,
+    Redacted,
 )
 from quintessence_pcs.store import CognitionStore  # noqa: E402
 from quintessence_pcs.store.experience import (  # noqa: E402
@@ -68,10 +70,12 @@ class ScriptedModel:
         self._outputs = list(outputs)
         self.calls = 0
         self.feedback: list[str | None] = []
+        self.rendered_inputs: list[str] = []
 
     def propose(self, *, rendered_input, references, feedback=None):
         self.calls += 1
         self.feedback.append(feedback)
+        self.rendered_inputs.append(rendered_input)
         value = self._outputs.pop(0)
         if isinstance(value, BaseException):
             raise value
@@ -448,6 +452,133 @@ class ReviewFacadeTests(CognitionTestCase):
         self.assert_no_writes(baseline)
 
     # ---------------------------------------------------------------- 6. wait
+
+    def test_two_pending_works_review_only_their_own_trigger_fact(self) -> None:
+        first = self.ingest(
+            event_type="Gray47ProjectBrief",
+            payload={"text": "A: the coordinator prefers cyan."},
+        )
+        second = self.ingest(
+            event_type="Gray47ProjectRevision",
+            payload={"text": "B: the coordinator changes the preference to red."},
+        )
+        first_work = self.work_for(first.event_id)
+        second_work = self.work_for(second.event_id)
+        self.assertIsNotNone(first_work)
+        self.assertIsNotNone(second_work)
+        model = ScriptedModel(
+            [
+                self.raw(self.wait("first Work has no candidate")),
+                self.raw(self.wait("second Work has no candidate")),
+            ]
+        )
+        facade = self.make_facade(model)
+        access = self.access()
+
+        first_view = self.review(facade, access, first, first_work)
+        second_view = self.review(facade, access, second, second_work)
+        self.assertEqual("waiting", first_view.state)
+        self.assertEqual("waiting", second_view.state)
+
+        documents = [
+            json.loads(rendered) for rendered in model.rendered_inputs
+        ]
+        first_doc, second_doc = documents
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in first_doc["facts"]],
+            [first.event_id],
+        )
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in second_doc["facts"]],
+            [second.event_id],
+        )
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in first_doc["pending_sources"]],
+            [first.event_id],
+        )
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in second_doc["pending_sources"]],
+            [second.event_id],
+        )
+        self.assertNotIn(
+            second.event_id,
+            json.dumps(first_doc["facts"]),
+        )
+        self.assertNotIn(
+            first.event_id,
+            json.dumps(second_doc["facts"]),
+        )
+
+    def test_review_candidate_uses_only_its_own_trigger_evidence(self) -> None:
+        first = self.ingest(
+            event_type="Gray47ProjectBrief",
+            payload={"text": "A: the coordinator prefers cyan."},
+        )
+        second = self.ingest(
+            event_type="Gray47ProjectRevision",
+            payload={"text": "B: the coordinator changes the preference to red."},
+        )
+        first_work = self.work_for(first.event_id)
+        self.assertIsNotNone(first_work)
+        model = ScriptedModel([self.raw(self.proposal(first))])
+        facade = self.make_facade(model)
+
+        view = self.review(facade, self.access(), first, first_work)
+
+        self.assertEqual("pending", view.state)
+        self.assertIsNotNone(view.candidate_id)
+        document = json.loads(model.rendered_inputs[0])
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in document["facts"]],
+            [first.event_id],
+        )
+        self.assertNotIn(second.event_id, document["facts"][0]["content"])
+        detail = facade.candidate_detail(
+            self.access(),
+            candidate_id=view.candidate_id,
+            artifact_version=1,
+        )
+        self.assertIsNotNone(detail.proposal)
+        self.assertEqual(len(detail.proposal.evidence_links), 1)
+        self.assertEqual(
+            detail.proposal.evidence_links[0]["ref"]["event_id"],
+            first.event_id,
+        )
+
+    def test_deleted_trigger_is_not_replaced_by_other_pending_work(self) -> None:
+        first = self.ingest(event_type="Gray47ProjectBrief")
+        second = self.ingest(event_type="Gray47ProjectRevision")
+        first_work = self.work_for(first.event_id)
+        self.assertIsNotNone(first_work)
+        self.assertIsNotNone(self.work_for(second.event_id))
+        self.delete_event(first.event_id)
+
+        with self.assertRaises((EventNotFound, Redacted)):
+            self.contexts.build_context(
+                namespace=NS,
+                trigger_ref=self.event_ref(first.event_id),
+                focus_work_id=first_work.work_id,
+                trigger_as_fact=True,
+            )
+
+    def test_question_trigger_remains_user_input_not_fact(self) -> None:
+        question = self.ingest(
+            event_type="UserQuestion.question",
+            payload={"text": "What is the current preference?"},
+        )
+        work = self.work_for(question.event_id)
+        model = ScriptedModel([self.raw(self.wait("question review"))])
+        facade = self.make_facade(model)
+
+        view = self.review(facade, self.access(), question, work)
+
+        self.assertEqual("waiting", view.state)
+        document = json.loads(model.rendered_inputs[0])
+        self.assertEqual(
+            [item["ref"]["event_id"] for item in document["user_input"]],
+            [question.event_id],
+        )
+        self.assertEqual(document["facts"], [])
 
     def test_review_wait_commits_waiting_and_completes_work(self) -> None:
         event, work = self.pending_event()

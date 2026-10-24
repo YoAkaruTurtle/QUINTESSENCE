@@ -28,6 +28,7 @@ const {
   reviewErrorText,
   reviewReduce,
   reviewViewLabel,
+  reviewWorkState,
   resolveBlockReason,
   sourceAvailabilityLabel,
   splitDiff,
@@ -583,6 +584,29 @@ test("diff and source labels mark changed fields and three-state sources", () =>
   assert.equal(sourceAvailabilityLabel("redacted"), "已隐藏");
   assert.equal(sourceAvailabilityLabel("unavailable"), "不可用");
   assert.equal(candidateStatusLabel("pending"), "待决定");
+});
+
+test("work rows show candidate lifecycle instead of a stale pending label", () => {
+  assert.deepEqual(reviewWorkState("committed", false), {
+    label: "已提交",
+    tone: "ok",
+  });
+  assert.deepEqual(reviewWorkState("pending", false), {
+    label: "待决定",
+    tone: "pending",
+  });
+  assert.deepEqual(reviewWorkState("rejected", true), {
+    label: "已拒绝",
+    tone: "warn",
+  });
+  assert.deepEqual(reviewWorkState(null, true), {
+    label: "已暂停",
+    tone: "warn",
+  });
+  assert.deepEqual(reviewWorkState(null, false), {
+    label: "待处理",
+    tone: "pending",
+  });
 });
 
 test("error text never claims success or failure for an unknown result", () => {

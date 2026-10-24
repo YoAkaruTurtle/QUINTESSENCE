@@ -498,6 +498,55 @@ class CurrentBeliefQueryTests(QueryTestCase):
         self.assertEqual({"scope_mismatch": 1}, self.internal_omissions(result))
         self.assertNotIn(self.ref_for(other), [item.ref for item in result.items])
 
+    def test_project_scope_is_exact_and_does_not_alias_different_ids(self) -> None:
+        canonical = _append_belief(
+            self.store,
+            record_id=str(uuid.uuid4()),
+            claim="user_preference:gray47-color",
+            claim_type="user_preference",
+            status="supported",
+            privacy_class="private",
+            scope={"scene": "test.scene", "project_id": "gray47"},
+        )
+        other = _append_belief(
+            self.store,
+            record_id=str(uuid.uuid4()),
+            claim="user_preference:other-color",
+            claim_type="user_preference",
+            status="supported",
+            privacy_class="private",
+            scope={"scene": "test.scene", "project_id": "blue57"},
+        )
+
+        matching = self.current(
+            query=BeliefCurrentQuery(
+                claim_types=("user_preference",),
+                scope={"scene": "test.scene", "project_id": "gray47"},
+                limit=20,
+            )
+        )
+        missing_project = self.current(
+            query=BeliefCurrentQuery(
+                claim_types=("user_preference",),
+                scope={"scene": "test.scene"},
+                limit=20,
+            )
+        )
+        wrong_project = self.current(
+            query=BeliefCurrentQuery(
+                claim_types=("user_preference",),
+                scope={"scene": "test.scene", "project_id": "blue57"},
+                limit=20,
+            )
+        )
+
+        self.assertEqual([self.ref_for(canonical)], [item.ref for item in matching.items])
+        self.assertEqual("ok", matching.status)
+        self.assertEqual((), missing_project.items)
+        self.assertEqual({"scope_mismatch": 2}, self.internal_omissions(missing_project))
+        self.assertEqual([self.ref_for(other)], [item.ref for item in wrong_project.items])
+        self.assertNotIn(self.ref_for(other), [item.ref for item in matching.items])
+
     def test_status_filter_excludes_retracted(self) -> None:
         supported = self.propose_supported(claim="capability:kept")
         retracted = self.propose_supported(claim="capability:removed")

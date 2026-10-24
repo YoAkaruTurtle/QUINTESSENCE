@@ -58,6 +58,7 @@ import {
   reviewReasonLabel,
   reviewReduce,
   reviewViewLabel,
+  reviewWorkState,
   resolveBlockReason,
   sourceAvailabilityLabel,
   sourceKindLabel,
@@ -1836,6 +1837,7 @@ function reviewWorkPane(info: AppInfo): HTMLElement {
 
 function reviewManagedRow(work: ReviewWorkItem): HTMLElement {
   const active = review.selectedWork?.work_id === work.work_id;
+  const state = reviewWorkState(work.last_candidate_status, work.blocked);
   const row = el("button", {
     class: `review-work-row ${active ? "is-active" : ""}`,
     attrs: {
@@ -1843,6 +1845,7 @@ function reviewManagedRow(work: ReviewWorkItem): HTMLElement {
       "data-work-id": work.work_id,
       "data-blocked": work.blocked ? "true" : "false",
       "data-rerun": work.rerun_registered ? "true" : "false",
+      "data-candidate-status": work.last_candidate_status ?? "none",
       title: `generation ${work.generation}`,
     },
     children: [
@@ -1850,10 +1853,7 @@ function reviewManagedRow(work: ReviewWorkItem): HTMLElement {
         class: "review-work-top",
         children: [
           el("span", { class: "review-work-id", text: `工作 ${shortId(work.work_id)}` }),
-          reviewBadge(
-            work.blocked ? "已暂停" : "待处理",
-            work.blocked ? "warn" : "pending",
-          ),
+          reviewBadge(state.label, state.tone),
         ],
       }),
       el("div", {

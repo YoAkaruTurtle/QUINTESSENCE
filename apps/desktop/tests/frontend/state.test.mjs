@@ -464,7 +464,32 @@ test("source rows distinguish current, historical and expired refs", () => {
   assert.equal(rows.some((row) => row.kind === "查询产物"), true);
   assert.equal(rows.some((row) => row.kind === "回复产物"), true);
   assert.equal(sourceRows(null).length, 0);
-  assert.equal(sourceCountLabel(result()), "来源：输入 1 · 查询 4");
+  assert.equal(
+    sourceCountLabel(result()),
+    "来源：输入 1 · PCS 查询完成 · 可披露认识 3 · 材料可能不完整",
+  );
+  const empty = result();
+  empty.query = {
+    ...empty.query,
+    status: "empty",
+    material_status: "partial",
+    items: [],
+  };
+  assert.equal(
+    sourceCountLabel(empty),
+    "来源：输入 1 · PCS 查询完成 · 可披露认识 0",
+  );
+  const noQuery = result();
+  noQuery.query = null;
+  assert.equal(sourceCountLabel(noQuery), "来源：输入 1 · PCS 查询未执行");
+  const unavailable = result();
+  unavailable.query = {
+    ...unavailable.query,
+    status: "unavailable",
+    material_status: "partial",
+    items: [],
+  };
+  assert.equal(sourceCountLabel(unavailable), "来源：输入 1 · PCS 查询结果不可用");
 });
 
 test("formatting helpers are stable and do not leak full ids", () => {

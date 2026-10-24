@@ -432,6 +432,22 @@ class DesktopRuntime:
             return "REVIEW_PURPOSE_MISSING"
         return None
 
+    def _last_candidate_status(self, work_id: str) -> str | None:
+        """Latest visible candidate state for the Work-list projection.
+
+        C07 intentionally leaves a collaboration Work in ``pending_work``
+        after commit.  The Review list must therefore show the Candidate
+        lifecycle, not keep claiming that an already submitted Work is merely
+        "待处理".
+        """
+
+        rows = self.review_facade.candidates(
+            self._review_access, work_id=work_id
+        )
+        if not rows:
+            return None
+        return rows[-1].status
+
     def review_work_list(self) -> dict[str, Any]:
         """Managed work (with a review control) plus the read-only legacy set."""
 
@@ -448,6 +464,7 @@ class DesktopRuntime:
                     # host exposes only its existence; C12a §8.6 forbids
                     # showing the reference itself.
                     "rerun_registered": item.rerun_authorization_ref is not None,
+                    "last_candidate_status": self._last_candidate_status(item.work_id),
                 }
                 for item in managed
             ],

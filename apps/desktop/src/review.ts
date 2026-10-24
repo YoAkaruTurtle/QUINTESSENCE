@@ -777,6 +777,33 @@ export function reviewErrorText(error: BridgeError): string {
   }
 }
 
+export interface ReviewWorkStateLabel {
+  label: string;
+  tone: "ok" | "pending" | "warn" | "neutral";
+}
+
+export function reviewWorkState(
+  lastCandidateStatus: string | null | undefined,
+  blocked: boolean,
+): ReviewWorkStateLabel {
+  if (lastCandidateStatus === "committed") {
+    return { label: "已提交", tone: "ok" };
+  }
+  if (lastCandidateStatus === "pending") {
+    return { label: "待决定", tone: "pending" };
+  }
+  if (lastCandidateStatus === "rejected") {
+    return { label: "已拒绝", tone: "warn" };
+  }
+  if (lastCandidateStatus === "stale" || lastCandidateStatus === "failed") {
+    return { label: "已终止", tone: "warn" };
+  }
+  if (blocked) {
+    return { label: "已暂停", tone: "warn" };
+  }
+  return { label: "待处理", tone: "pending" };
+}
+
 export function reviewViewLabel(state: ReviewStateName): string {
   const labels: Record<ReviewStateName, string> = {
     structural_only: "仅结构校验",
