@@ -14,8 +14,8 @@ should cite the exact starting commit rather than a local directory.
 The legacy research repository, its experiment worktrees and sealed experiment
 materials are preserved separately as historical and research sources. They are
 not the authoritative source for general PCS code, and this repository does not
-absorb their private data, databases or model assets. Future P0 and PCS2-011
-work targets this repository.
+absorb their private data, databases or model assets. P0 implementation and
+future PCS2-011 work target this repository.
 
 The import namespace is `quintessence_pcs`; no legacy import alias is supplied.
 Protocol `pcs.v2`, baseline identity `PCS-2026-10-17-r3`, SQL migration names,
@@ -40,8 +40,8 @@ all reachable history. Its `--pre-upload` mode additionally requires that no
 remote is configured; the default mode also works after the private remote
 exists. Update `tools/source-files.json` only after reviewing new code paths.
 Ignore rules do not authorize adding private data and do not remove data from
-prior commits. Human privacy and license review were completed before the
-private upload; repeat them before any public release. If data enters history,
+prior commits. Human privacy and license review are completed in the P0
+pre-merge review; repeat them before any public release. If data enters history,
 stop and report it.
 
 SQL migrations are packaged once under `resources/migrations` and remain

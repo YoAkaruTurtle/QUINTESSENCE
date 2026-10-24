@@ -32,7 +32,7 @@ QUINTESSENCE is an open-source research and engineering project exploring how AI
 
 A Persistent Cognitive System keeps experiences, current beliefs, provenance, versions, and unfinished work across calls, and treats model output as a candidate subject to domain rules rather than as directly authoritative state. This differs from a conventional LLM memory layer, which mainly stores and retrieves text for prompts: PCS adds explicit evidence relationships, scoped beliefs, versioned retraction and replacement, formal Context assembly, and commit and audit boundaries. Retrieval is one part; the system also governs whether a proposed belief may become persistent state.
 
-> **Early research stage. The GitHub repository is public.** Status checked 2026-10-21. The M1–M6 phases (migration, licensing, formal mainline, and Public repository) are complete. The cognitive substrate and the controlled revision chain have implementations and real-model run records. The unified LLM–PCS collaboration layer is not implemented. Design approved; implementation pending. Human evaluation of the formal experiment is still pending.
+> **Early research stage. The GitHub repository is public.** Status checked 2026-10-24. The M1–M6 phases (migration, licensing, formal mainline, and Public repository) are complete. The cognitive substrate, the controlled revision chain, and the P0 unified LLM–PCS collaboration layer have implementations and real-model run records. The P0 integration is on the current review line, not yet merged to `main`; formal release packaging, signing, and human research evaluation remain separate steps.
 
 ## Why this matters
 
@@ -53,7 +53,8 @@ The long-term goal is a system with identity continuity, memory, cognition, eval
 | Persistent state and provenance | Implemented foundation | Events, record versions, evidence links, and controlled state updates |
 | Belief and formal Context | Implemented foundation | Scoped beliefs, retraction and supersession, and canonical model-facing context |
 | Model participation in belief revision | Real-run records exist | Candidate, validation feedback, and persistent revision in controlled cases; success rate and behavioral effect remain limited |
-| Unified consult and cognitive review | Design approved, not implemented | Organize existing capabilities into a reusable LLM–PCS collaboration layer |
+| Unified consult and cognitive review | Implemented P0, controlled real-model evidence | Reusable LLM–PCS collaboration layer: Consult, deterministic query, Review, candidate approval and recovery |
+| Windows desktop development build | Tested development build | Consult/Review client, trusted sidecar and Credential Manager key storage; unsigned and not a formal release |
 | Cognitive Workbench V0.2 | Experimental prototype | Standalone demo with bespoke orchestration; not the delivered standard chat interface of the core package |
 | Knowledge, Question / Focus, contextual persona feedback | Planned | To be integrated with unified state and the collaboration path |
 | Affect, Load & Recovery, long-term development | Research direction | No complete engineering capability yet |
@@ -72,7 +73,7 @@ Engineering tests check state updates, versions, validation, and recovery mechan
 
 The PCS2-010 engineering work is closed. The formal EXP-01 v4 study ran six times: one run completed belief formation, revision, and the later Advice stage; three did not trigger a valid initial operation; two produced invalid operations during revision. Human blind review and final research conclusions remain pending. The earlier five exploratory rounds are a different batch and are not pooled with v4.
 
-The current mainline's engineering acceptance record includes **509 regression tests passing and successful wheel / sdist builds**. This shows that the mainline passes the corresponding engineering checks; it does not prove stable cognitive transfer.
+The current P0 review line's engineering acceptance record includes **972 Python regression tests passing (3 skipped)**, frontend and Rust checks, packaged-sidecar smoke checks, and repository-gate verification. This shows that the line passes the corresponding engineering checks; it does not prove stable cognitive transfer. In the synthetic C13b run, a real DeepSeek call queried a formally committed belief, and the owner observed the revised belief being used after a client restart; the durable experiment records support the belief/query/commit path, while process-identity and human evaluation remain separately qualified.
 
 ## How the system is organized
 
@@ -108,7 +109,7 @@ Release packaging will add versioned installation instructions, dependencies, an
 
 ## Next step
 
-The next foundation is the **unified LLM–PCS collaboration layer**: connect consultation, query, belief review, candidate confirmation, and result recovery to one formal mechanism. Knowledge, Question / Focus, persona-context feedback, and host integration follow.
+The P0 collaboration layer is implemented on the review line; the next engineering step is publication preparation and merge review, followed by Knowledge, Question / Focus, persona-context feedback, and host integration.
 
 One key validation: after revising a belief, close the process, clear the chat cache, and ask a related question. Can the system still retrieve the correct version from persistent state and handle new applicability conditions appropriately? See [ROADMAP.md](ROADMAP.md).
 
@@ -122,7 +123,7 @@ Contributions are welcome around concrete problems, minimal reproductions, synth
 
 ## License and data
 
-General first-party QUINTESSENCE code is licensed under the **Apache License 2.0**; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Any future host-adapter code will be handled according to its source and license; the full DSH upstream repository is not published as first-party code here.
+General first-party QUINTESSENCE code is licensed under the **Apache License 2.0**; see [LICENSE](LICENSE), [NOTICE](NOTICE), and the [third-party dependency inventory](THIRD_PARTY_NOTICES.md). Any future host-adapter code will be handled according to its source and license; the full DSH upstream repository is not published as first-party code here.
 
 Copyright 2026 Linguist.
 

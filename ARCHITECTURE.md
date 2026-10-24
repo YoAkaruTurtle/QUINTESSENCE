@@ -4,7 +4,7 @@
 
 **English** · [简体中文](ARCHITECTURE.zh-CN.md)
 
-> Status checked 2026-10-21. This document separates implemented mechanisms from approved target design. The unified LLM–PCS collaboration layer is not implemented. Design approved; implementation pending. Target relationships in the diagrams do not describe the current deployment.
+> Status checked 2026-10-24. This document separates implemented mechanisms from future design. The P0 unified LLM–PCS collaboration layer is implemented on the current review line, with controlled real-model evidence; it is not yet merged to `main`, and formal release packaging and human research evaluation remain separate steps.
 >
 > Status terms: **Implemented** = present in the current code and covered by tests; **Approved design** = design accepted, not implemented; **Planned** = scheduled after P0; **Research direction** = long-term inquiry, not an engineering commitment.
 
@@ -71,21 +71,22 @@ A typical revision path includes retracting an earlier judgment, reading the upd
 
 Existing validation and bounded feedback constrain model operations, but they cannot guarantee that the model triggers the correct operation every time, nor prove open-world conclusions true.
 
-## 3. Three existing call paths
+## 3. Current call paths
 
 | Path | Actual situation | Boundary |
 |---|---|---|
 | PCS Core | Local closed loop of Context, model call, candidate parsing, and domain commit | Bounded cognitive operation; not a complete open-ended conversation protocol |
-| EXP-01 v4 | Q1/Q2 use formal Context and some core mechanisms, orchestrated by the experiment adapter; Advice uses a separate call branch | Controlled research implementation; not every step goes through run_step or the unified collaboration layer |
+| EXP-01 v4 | Q1/Q2 use formal Context and some core mechanisms, orchestrated by the experiment adapter; Advice uses a separate call branch | Controlled research; not every step goes through run_step or the unified collaboration layer |
+| P0 desktop collaboration | Windows Consult/Review client, trusted sidecar and the formal consult/review Facades | Implemented on the review line; controlled real-model C13b evidence; unsigned development build, not a formal release |
 | Workbench V0.2 | The prototype assembles some prompts, retrieval, and HTTP itself and reuses some PCS capabilities | Standalone demo; not unified into the core interface |
 
-The legacy Workbench is frozen and will not be reused or migrated into the new application. Its operating experience clarified the need for a unified collaboration layer, but it is not evidence that the layer has been delivered.
+The legacy Workbench is frozen and will not be reused or migrated into the new application. Its operating experience clarified the need for a unified collaboration layer; the P0 implementation is separate from that demo.
 
-Specific request formats required by the old experiments remain within the original protocol scope. A future collaboration layer may use explicit, versioned multi-message formats without silently changing historical experiment contracts.
+Specific request formats required by the old experiments remain within the original protocol scope. The P0 collaboration layer uses explicit, versioned multi-message formats without silently changing historical experiment contracts.
 
-## 4. Approved design: unified LLM–PCS collaboration layer
+## 4. Implemented P0: unified LLM–PCS collaboration layer
 
-**Status: approved design, not implemented.** The proposal uses a thin coordination entry point (Facade) inside the PCS library and extracts existing generation and commit steps for application reuse. It does not create a second authoritative cognitive state and does not add a resident cognitive server.
+**Status: implemented on the current review line; merge and release are separate decisions.** The implementation uses a thin coordination entry point (Facade) inside the PCS library and extracts existing generation and commit steps for application reuse. It does not create a second authoritative cognitive state and does not add a resident cognitive server.
 
 The target relationships are:
 
@@ -126,7 +127,7 @@ First-phase interactions have explicit call limits, and queries and repair share
 
 ## 5. Collaboration experience and future memory
 
-The approved design stores inputs, answers, candidates, and processing results as traceable interaction-experience sources and provides an exact-reference read interface. These records can become material for future Memory/Episode work, but they do not automatically become long-term memory or current belief.
+The P0 implementation stores inputs, answers, candidates, and processing results as traceable interaction-experience sources and provides an exact-reference read interface. These records can become material for future Memory/Episode work, but they do not automatically become long-term memory or current belief.
 
 Three kinds of content remain distinct: interactions that occurred, beliefs committed through domain rules, and Episodes or knowledge projections that may later be formed through selection and organization.
 
@@ -136,7 +137,7 @@ Future organization of experience must inherit exact provenance, versions, and d
 
 ## 6. Authorization, deletion, and persistence boundaries
 
-Existing core checks for evidence, versions, watermarks, and deletion remain in place; the collaboration layer will extend source registration, deletion propagation, and permission enforcement points for inputs and outputs. The new mechanisms are still part of the approved, unimplemented design.
+Existing core checks for evidence, versions, watermarks, and deletion remain in place; P0 extends source registration, deletion propagation, and permission enforcement points for inputs and outputs. Those mechanisms are implemented on the review line; their release and merge status is separate.
 
 The first-phase trust model is a **single-user trusted host**. The host establishes call identity and valid authorization; namespace is used for logical isolation, scope expresses applicability, and authorization references support audit. None of these is authentication by itself.
 
@@ -168,6 +169,6 @@ Engineering acceptance checks channels and constraints: candidates are not commi
 
 Real-model research separately checks content and behavior: whether the right material is selected, whether the actual request contains the correct version, whether the output uses the applicable scope correctly, and whether judgments in new situations are reasonably affected. Citing a record or claiming to “remember” is not a substitute for behavioral evidence.
 
-The collaboration-layer plan uses a sequence of post-revision restart and chat-cache clearing to separate the effect of persistent state from that of chat context, with controls for no revision, no relevant history, and a temporary equivalent summary. Performance similar to an equivalent summary does not negate the value of maintaining and revising long-term state.
+The P0 acceptance sequence uses post-revision restart and chat-cache clearing to separate the effect of persistent state from that of chat context, with controls for no revision, no relevant history, and a temporary equivalent summary. Performance similar to an equivalent summary does not negate the value of maintaining and revising long-term state.
 
-These are acceptance designs for the next stage and cannot be counted toward PCS2-010 results in advance. Current experiment boundaries and next steps are in [ROADMAP.md](ROADMAP.md).
+These are P0 acceptance conditions; they do not establish PCS2-010 research results or human evaluation. Current experiment boundaries and next steps are in [ROADMAP.md](ROADMAP.md).

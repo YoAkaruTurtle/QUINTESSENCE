@@ -4,7 +4,7 @@
 
 **English** · [简体中文](ROADMAP.zh-CN.md)
 
-> Status checked 2026-10-21. The roadmap describes current priorities and completion conditions; it does not promise delivery dates. The P0 collaboration layer is not implemented. Design approved; implementation pending.
+> Status checked 2026-10-24. The roadmap describes current priorities and completion conditions; it does not promise delivery dates. The P0 unified LLM–PCS collaboration layer is implemented on the current review line; merge, release packaging, and human evaluation are separate steps.
 
 [Project overview](README.md) · [Architecture](ARCHITECTURE.md)
 
@@ -19,10 +19,10 @@ QUINTESSENCE has an early cognitive substrate and a real-model revision chain. T
 | EXP-01 v4 research evaluation | Awaiting human review | Runs complete; blind review, lock, unblinding, and final research conclusion pending |
 | Migration, licensing, and formal mainline | Completed | First-party migration, Apache-2.0, tests and build acceptance; formal mainline switched to this repository |
 | M6 GitHub Public repository | Completed | Public repository is live; no formal release package or version tag yet |
-| P0 unified collaboration layer | Design approved, not implemented | Next foundation; builds on existing Cognition |
+| P0 unified collaboration layer | Implemented on review line; controlled real-model evidence | Consult, deterministic query, Review, approval, recovery, Windows desktop client; merge/release pending |
 | 011 and later | Planned / research direction | Progress by capability dependency |
 
-M1–M6 (migration, licensing, formal mainline, and Public repository preparation) are complete; P0 remains unimplemented.
+M1–M6 (migration, licensing, formal mainline, and Public repository preparation) are complete; P0 is implemented on `codex/c13b-exp-01` and awaits merge review. The Windows installer is an unsigned development build, not a formal release.
 
 “Implemented foundation” covers only the delivered scope; “engineering passed” and “real-model behavior verified” are recorded separately.
 
@@ -36,11 +36,13 @@ Direct correction and same-source duplication restraint in the old Q1–Q4 desig
 
 PCS2-010's engineering closure remains valid. Later research questions will not be endlessly added as hidden completion gates for it.
 
-## Next: P0 unified LLM–PCS collaboration layer
+## P0 delivery: unified LLM–PCS collaboration layer
 
 P0 is a new priority label; its formal task number is still to be determined. The former PCS2-011 remains Knowledge.
 
-The goal is to let applications reuse the formal Context, model-call, belief-candidate, and commit mechanisms so that state changes persist across interactions. The design uses a thin coordination entry point inside the library and preserves existing domain rules; the first phase does not build a background scheduler or a general Agent platform.
+The goal is to let applications reuse the formal Context, model-call, belief-candidate, and commit mechanisms so that state changes persist across interactions. The implementation uses a thin coordination entry point inside the library and preserves existing domain rules; the first phase does not build a background scheduler or a general Agent platform.
+
+Milestones A and B and the Windows desktop application are implemented on the review line. Engineering checks cover the review/query/commit chain, and a controlled C13b synthetic run provides real-model evidence for the formal retract/replacement and post-restart query path. This does not establish human research evaluation, release signing, or a fresh-machine distribution claim.
 
 ### Milestone A: unified cognitive review
 
@@ -71,7 +73,7 @@ Corresponds to internal implementation plan C08–C11.
 
 Corresponds to internal implementation plan C12–C13.
 
-A new application will be designed after the protocol stabilizes, providing consultation, provenance and scope display, candidate differences, confirmation or rejection, commit results, and a reauthorization entry point. Legacy Workbench V0.2 is frozen as an early demonstration demo; its bespoke calling protocol will not be migrated.
+A development Windows application is implemented on the review line, providing consultation, provenance and scope display, candidate differences, confirmation or rejection, commit results, and a reauthorization entry point. Legacy Workbench V0.2 is frozen as an early demonstration demo; its bespoke calling protocol is not migrated.
 
 Small-scale real research uses synthetic tool capabilities and synthetic persona-context preference cases. The latter tests scope understanding and does not mean Persona P1 is implemented. Raw outputs, actual requests, provenance, failures, and costs are retained and evaluated against criteria defined in advance; results belong to the behavioral acceptance of Milestone B.
 
@@ -104,7 +106,7 @@ Models, retrieval components, or external memory projects are evaluated per conc
 
 ## Publication and research proceed separately
 
-Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. A formal release package, installation examples, and versioned release still need to be arranged. Linux verification has been deferred and is not listed as a supported environment.
+Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. P0 is implemented on the review line; a formal release package, installation examples, signing, fresh-machine validation, and versioned release still need to be arranged. Linux verification has been deferred and is not listed as a supported environment.
 
 Publication preparation and capability development are recorded separately. GitHub upload is not a technical dependency of the cognitive mechanisms; execution order is set by the maintainer, and publication status is not rewritten as engineering capability or experimental results.
 

@@ -1,8 +1,10 @@
-# QUINTESSENCE — Consult (C12b)
+# QUINTESSENCE — Consult and Review (P0)
 
-The Windows desktop Consult workspace. It is a dark, conversational TypeScript
-UI over a Tauri 2 Rust trusted host and a fixed Python PCS sidecar. C12b covers
-Consult only; Review is a C12c placeholder.
+The Windows desktop Consult and Review workspace. It is a dark, conversational
+TypeScript UI over a Tauri 2 Rust trusted host and a fixed Python PCS sidecar.
+The P0 review line covers Consult, deterministic query, Review candidate
+inspection/approval/rejection, and result recovery. It is a development build,
+not a signed public release.
 
 The software brand is **QUINTESSENCE** (`QUINTESSENCE · Consult`).  The AI
 conversation display name is separate: it defaults to `助手`, can come from the
@@ -224,11 +226,13 @@ restore a previous Consult.
 
 ## Known gaps
 
-- Review (C12c) is a placeholder: no candidate enumeration, diff, approve or
-  reject.
+- Candidate detail and approval eligibility are exposed through C12c; C06
+  remains the final commit authority. A candidate that violates the claim
+  freeze is shown as not approvable, not silently mutated.
 - Attempt details and the complete Context source list have no public read
   surface; the drawer marks them unavailable rather than querying the DB.
-- L2, WebView2-missing and offline-install verification remain UNVERIFIED.
+- L2, WebView2-missing, clean-machine/offline-install verification, and release
+  signing remain UNVERIFIED or unfinished.
 - The development installer is unsigned.
 - The app is not PCS-global-exclusive: the single-instance and data locks
   coordinate one desktop instance with one data instance, and leave room for a
