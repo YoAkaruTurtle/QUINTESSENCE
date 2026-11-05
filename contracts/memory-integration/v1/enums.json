@@ -1,0 +1,288 @@
+{
+  "contract": "memory-integration/v1",
+  "upstream": {
+    "distribution": "hermes-scope-recall",
+    "version": "3.14.1",
+    "commit": "2b640260134565ac7fef3a76644e352a50866533",
+    "public_receipt_interface": false
+  },
+  "generated_at": "2026-10-25",
+  "basis": "J02 G0 evidence set and J02 D1 probes at the pinned commit",
+  "source_classes": {
+    "measured": "observed in a Lab probe at the pinned commit",
+    "declared": "stated by upstream source or protocol at the pin, not measured",
+    "pcs_contract": "defined by this contract, not an upstream value",
+    "proposed": "part of a future interface proposal; not implemented and not an upstream capability",
+    "patched": "measured against the local patch build; absent at the pinned commit"
+  },
+  "fields": {
+    "origin": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "human_direct",
+          "host_generated"
+        ],
+        "declared": [
+          "assistant_visible",
+          "tool_observation",
+          "external_document",
+          "memory_reinjection",
+          "imported",
+          "origin_unknown"
+        ]
+      },
+      "closed": true,
+      "closed_basis": "source_events CHECK constraint at the pin",
+      "evidence": [
+        "core/schema.py source_events origin CHECK",
+        "j02-evidence/ac05_ac08_ac10.json"
+      ]
+    },
+    "role": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "user"
+        ],
+        "declared": [
+          "assistant",
+          "tool",
+          "system",
+          "document",
+          "unknown"
+        ]
+      },
+      "closed": true,
+      "closed_basis": "source_events CHECK constraint at the pin",
+      "evidence": [
+        "core/schema.py source_events role CHECK"
+      ]
+    },
+    "capture_disposition": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "inserted",
+          "duplicate",
+          "conflict"
+        ],
+        "declared": [
+          "rejected",
+          "unavailable",
+          "cancelled"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "g0-deletion-recovery/evidence/s6-edges.json",
+        "core/capture.py conflict/unavailable/cancelled receipts"
+      ]
+    },
+    "capture_durability": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "persisted"
+        ],
+        "declared": [
+          "not_persisted",
+          "unknown"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "core/capture.py:213 STORAGE_UNAVAILABLE returns durability unknown"
+      ]
+    },
+    "capture_mutation": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "none",
+          "revised"
+        ],
+        "declared": []
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "g0-deletion-recovery/evidence/s6-edges.json",
+        "j02-evidence/ac05_ac08_ac10.json"
+      ]
+    },
+    "capture_lexical_state": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "ready"
+        ],
+        "declared": [
+          "not_ready",
+          "not_indexed",
+          "unknown",
+          "unchanged"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "core/capture.py receipt constructors"
+      ]
+    },
+    "capture_semantic_state": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "ready",
+          "partial"
+        ],
+        "declared": [
+          "not_indexed",
+          "not_scheduled",
+          "unknown",
+          "unchanged"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "core/capture.py receipt constructors"
+      ]
+    },
+    "deletion_layer": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "sqlite_active",
+          "sqlite_history",
+          "vector_active",
+          "vector_history",
+          "attachments",
+          "backups",
+          "host_sources",
+          "physical_media"
+        ],
+        "declared": []
+      },
+      "closed": true,
+      "closed_basis": "delete_storage.block() writes this fixed key set",
+      "evidence": [
+        "g0-deletion-recovery/evidence/s1-normal.json",
+        "s2-restart-receipt.json",
+        "s10-worker-and-receipt.json"
+      ]
+    },
+    "deletion_layer_state": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "pending",
+          "inventory_pending",
+          "removed",
+          "unknown",
+          "unverifiable",
+          "outside_plugin_scope"
+        ],
+        "declared": [
+          "retained"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "g0-deletion-recovery/evidence/s1-normal.json",
+        "s2-restart-receipt.json",
+        "s10-worker-and-receipt.json",
+        "core/delete_storage.py retained branch"
+      ]
+    },
+    "contract_error_code": {
+      "owner": "upstream",
+      "sources": {
+        "measured": [
+          "ACCESS_DENIED",
+          "SOURCE_MISSING",
+          "VERSION_CONFLICT",
+          "INPUT_INVALID"
+        ],
+        "declared": [
+          "IDENTITY_UNBOUND"
+        ],
+        "patched": [
+          "INCOMPLETE_LINK"
+        ]
+      },
+      "closed": false,
+      "closed_basis": null,
+      "evidence": [
+        "g0-deletion-recovery/evidence/s3-reapply.json",
+        "s6-edges.json",
+        "j02-evidence/ac05_ac08_ac10.json",
+        "contracts.py raise sites"
+      ]
+    },
+    "receipt_result": {
+      "owner": "pcs",
+      "sources": {
+        "measured": [],
+        "declared": [],
+        "pcs_contract": [],
+        "proposed": [],
+        "patched": [
+          "found",
+          "no_record",
+          "incomplete_link",
+          "authority_mismatch",
+          "query_failed"
+        ]
+      },
+      "value_evidence": {
+        "found": "test_found_returns_the_action_and_its_operations; test_a_non_deletion_action_without_operations_is_found",
+        "no_record": "test_unknown_preview_is_no_record",
+        "incomplete_link": "test_old_broken_and_missing_links_are_incomplete; test_delete_action_with_an_empty_link_is_incomplete; test_duplicate_operation_ids_are_incomplete; test_a_truncated_multi_operation_link_is_incomplete",
+        "authority_mismatch": "test_instance_mismatch_and_no_record_are_distinguishable; test_foreign_target_with_a_broken_link_is_access_denied; test_foreign_operation_scope_with_broken_progress_is_access_denied",
+        "query_failed": "test_a_failed_read_is_query_failed_not_no_record"
+      },
+      "closed": true,
+      "closed_basis": "PCS contract decision; measured only against local patch 629f4294, absent at 2b64026 and not accepted upstream",
+      "evidence": [
+        "06-deletion.md section 4",
+        "09-error-mapping.md receipt results",
+        "patch tests/contract/test_receipt_interface.py (19 tests)"
+      ]
+    },
+    "pcs_delivery_state": {
+      "owner": "pcs",
+      "sources": {
+        "measured": [],
+        "declared": [],
+        "pcs_contract": [
+          "pending",
+          "applied",
+          "verified",
+          "needs_review",
+          "blocked",
+          "obsolete"
+        ],
+        "proposed": []
+      },
+      "closed": true,
+      "closed_basis": "PCS contract decision in 02-source-mapping.md and 06-deletion.md",
+      "evidence": [
+        "02-source-mapping.md",
+        "06-deletion.md"
+      ]
+    }
+  },
+  "local_patch": {
+    "branch": "pcs/receipt-v1",
+    "commit": "446bfef886df14bcb25d0e4f73b264e90cf47097",
+    "base": "2b640260134565ac7fef3a76644e352a50866533",
+    "public_receipt_interface": true,
+    "upstream_accepted": false,
+    "first_commit": "629f4294c8b48e42e079b8778ad76fc60eed7a53"
+  }
+}

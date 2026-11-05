@@ -215,6 +215,78 @@ class DomainStateMixin:
         ).fetchall()
         return tuple(self._version_from_row(row) for row in rows)
 
+    def versions_of_record(
+        self, namespace: str, record_id: str, *, limit: int = 50
+    ) -> tuple[RecordVersion, ...]:
+        """Every readable version of one record, newest first (bounded).
+
+        The record's own history read, distinct from ``current_versions_of_kind``
+        (which deliberately exposes only the current version of every record).
+        A record under a deletion barrier is excluded entirely: its bodies may
+        already be cleared and the PCS2-006 barrier must govern this read
+        exactly like ``get_current``.  Version rows are immutable and carry
+        their own ``recorded_at``/``status``; nothing is inferred from the
+        ``records`` pointer.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        rid = identifiers.require_record_id(record_id)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise InvalidInput("limit must be 1..200")
+        if self.record_is_deleted(ns, rid):
+            return ()
+        rows = self._require_connection().execute(
+            f"SELECT {_VERSION_COLUMNS} FROM record_versions "
+            "WHERE namespace = ? AND record_id = ? "
+            "ORDER BY record_version DESC LIMIT ?",
+            (ns, rid, limit),
+        ).fetchall()
+        return tuple(self._version_from_row(row) for row in rows)
+
+    def count_versions_of_record(
+        self, namespace: str, record_id: str
+    ) -> int:
+        """How many versions one readable record has (no payload is loaded).
+
+        A record under a deletion barrier reads as zero for the same reason
+        ``versions_of_record`` returns nothing: the barrier governs the read.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        rid = identifiers.require_record_id(record_id)
+        if self.record_is_deleted(ns, rid):
+            return 0
+        row = self._require_connection().execute(
+            "SELECT COUNT(*) AS total FROM record_versions "
+            "WHERE namespace = ? AND record_id = ?",
+            (ns, rid),
+        ).fetchone()
+        return 0 if row is None else int(row["total"])
+
+    def event_payload_digest(self, namespace: str, event_id: str) -> str | None:
+        """The stored payload digest of one event, without touching its body.
+
+        A directive binding names a specific user report; comparing the digest
+        the binding carries against this column is what makes "the statement you
+        quoted" a checkable claim instead of a reference to *some* user report.
+        Returns ``None`` when the event or its payload row is missing -- the
+        caller decides whether that is a refusal, never this read.
+        """
+
+        identifiers.require_namespace(namespace)
+        identifiers.require_event_id(event_id)
+        row = self._require_connection().execute(
+            "SELECT pp.sha256 AS payload_sha256 "
+            "FROM event_journal ej "
+            "LEFT JOIN private_payloads pp ON pp.payload_ref = ej.payload_ref "
+            "WHERE ej.namespace = ? AND ej.event_id = ?",
+            (namespace, event_id),
+        ).fetchone()
+        if row is None:
+            return None
+        digest = row["payload_sha256"]
+        return None if digest is None else str(digest)
+
     def event_header(self, namespace: str, event_id: str) -> EventHeader | None:
         """Read event envelope metadata without loading its private payload."""
 

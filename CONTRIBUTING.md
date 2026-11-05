@@ -49,5 +49,36 @@ Submit only code you wrote or are authorized to submit.
 ## 5. Review
 
 Maintainers check provenance, license compatibility, and test evidence before
-merging. A contribution that cannot be relicensed under Apache 2.0 will not be
-merged.
+merging. First-party contributions must follow the project Apache-2.0 terms. Separately
+reviewed third-party components retain their original licenses and notices;
+they are not automatically relicensed as Apache-2.0.
+
+
+## 6. One development mainline; local archives are reference only
+
+After the approved clean publication is adopted, GitHub `main`, local `main`
+and every new feature/fix/experiment baseline must share that clean history.
+Before starting work, fetch `origin/main`, verify local `main` is aligned, and
+create the new branch from it. Do not start work from an old worktree merely
+because it is already open.
+
+Old J/RG/development tips are preserved as clearly named **local-only archives**
+under `archive/`. Never push archive refs (`--all`/`--mirror` are forbidden), use
+them as new development bases, or merge/cherry-pick old unreviewed history into
+the public line. When old code is useful, review and extract only the necessary
+implementation or synthetic examples, then test it on a clean-main branch.
+Keep the archive history intact; do not delete it as part of routine cleanup.
+
+Initial adoption uses a reviewed snapshot rooted at the already-public
+`origin/main`; old development commits are not parents of that snapshot.
+The maintainer's explicit approval is required before pushing it. The remote
+update is a normal fast-forward; local `main` is aligned only after the old tip
+has an archive ref and the approved remote update succeeds. Do not force-push or
+rewrite already-public history. Before switching any worktree, inspect its
+status and preserve unrelated edits; never force checkout to make it clean.
+
+Build/test/automation entry points must resolve the intended clean checkout,
+not a hardcoded legacy branch or old Lab worktree. Check branch/base before
+committing or building a release candidate. Scripts must not silently switch
+back to archived development history. Recheck the complete incoming reachable
+history and artifacts for personal data before every publication.

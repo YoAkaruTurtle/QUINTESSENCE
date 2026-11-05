@@ -52,8 +52,11 @@ from __future__ import annotations
 
 import http.client
 import os
+import queue
 import socket
 import ssl
+import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -67,7 +70,13 @@ from ..domains.cognition.context_guard import (
     require_live_context,
 )
 from ..domains.memory.episode_shape import EPISODE_KIND
+from ..domains.persona.policy import POLICY_KINDS
 from ..domains.refs import RecordRef
+
+#: RG05-F02: a tentative expression preference is a real Context source and is
+#: rendered under ``expression``.  The send gate must accept that exact record
+#: kind, with the same privacy/current-version checks as a query read.
+_EXPRESSION_PREFERENCE_KIND = "expression_preference"
 from ..foundation.errors import RecordNotFound, StorageError
 from ..foundation.jsonutil import canonical_json_text, strict_json_loads
 from ..store.cognition import CognitionStore
@@ -81,21 +90,40 @@ from ..store.model import (
     ModelAttemptConflict,
     ModelAttemptReservation,
     ModelAuthorization,
+    ModelAuthorizationExpired,
+    ModelAuthorizationMismatch,
     ModelBudgetExceeded,
     ModelLedgerError,
     ModelNotAuthorized,
 )
 from .collab_protocol import (
     COLLAB_MODEL_POLICY_VERSION,
+    COLLAB_V2_MODEL_POLICY_VERSION,
     ConsultSendPolicy,
     build_collab_request_body,
     render_collab_messages,
 )
+from .budget import (
+    INJECTION_BUDGET_UNITS,
+    SAFETY_MARGIN_UNITS,
+    available_injection_units,
+    estimate_units,
+    fits_request,
+    request_units,
+)
 from .context import ConsultContextEnvelope
-from .manifest import ModelManifest, build_request_body
+from .agent_protocol import (
+    from_wire_name,
+    StepOutcome,
+    ToolCall,
+    build_agent_request_body,
+    validate_messages,
+)
+from .manifest import TOOL_MODE_AGENT, ModelManifest, build_request_body
 from .model_port import (
     ModelAdapterError,
     ModelBudgetExceededError,
+    ModelCancelled,
     ModelConfigurationError,
     ModelNotAuthorizedError,
     ModelResponseError,
@@ -106,13 +134,24 @@ DIRECT_HTTP_ADAPTER_KIND = "direct-http"
 DIRECT_HTTP_POLICY_VERSION = "pcs2-009.direct-http.v1"
 DIRECT_HTTP_LEGACY_PROTOCOL = "pcs2-008"
 DIRECT_HTTP_COLLAB_PROTOCOL = "collab.v1"
+DIRECT_HTTP_COLLAB_V2_PROTOCOL = "collab.v2"
+DIRECT_HTTP_COLLAB_PROTOCOLS = (
+    DIRECT_HTTP_COLLAB_PROTOCOL,
+    DIRECT_HTTP_COLLAB_V2_PROTOCOL,
+)
 DIRECT_HTTP_PROTOCOLS = (
     DIRECT_HTTP_LEGACY_PROTOCOL,
-    DIRECT_HTTP_COLLAB_PROTOCOL,
+    *DIRECT_HTTP_COLLAB_PROTOCOLS,
 )
 
 #: One retry for 429/5xx/timeout only.  4xx (except 429) is not retried.
 MAX_RETRIES = 1
+
+#: Transient failures (408 / 429 / 5xx / timeout) get more patience on the
+#: agent path than on the proposal path: a tool round is already a multi-call
+#: conversation, and losing it to one 503 wastes the whole round.  Still
+#: bounded -- an unbounded retry is an outage generator.
+AGENT_MAX_RETRIES = 3
 
 #: Bound on one provider response body, matching the store's attempt-payload
 #: limit.  A larger body is a failure, not an unbounded read.
@@ -228,6 +267,10 @@ class DirectHttpModel:
         consult_policy: ConsultSendPolicy | None = None,
         opener: Any | None = None,
         send_scope: Callable[[ModelAttempt, str], Any] | None = None,
+        request_budget_units: int | None = None,
+        output_reserve_units: int = 0,
+        transport_timeout_cap: float | None = None,
+        max_retries: int | None = None,
     ) -> None:
         if not isinstance(manifest, ModelManifest):
             raise ModelConfigurationError("manifest must be a ModelManifest")
@@ -235,25 +278,60 @@ class DirectHttpModel:
             raise ModelConfigurationError(
                 "protocol must be one of: " + ", ".join(DIRECT_HTTP_PROTOCOLS)
             )
-        if protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+        if request_budget_units is not None and (
+            type(request_budget_units) is not int or request_budget_units < 1
+        ):
+            raise ModelConfigurationError(
+                "request_budget_units must be a positive integer or None"
+            )
+        if type(output_reserve_units) is not int or output_reserve_units < 0:
+            raise ModelConfigurationError(
+                "output_reserve_units must be a non-negative integer"
+            )
+        if transport_timeout_cap is not None and (
+            type(transport_timeout_cap) not in (int, float)
+            or isinstance(transport_timeout_cap, bool)
+            or transport_timeout_cap <= 0
+        ):
+            raise ModelConfigurationError(
+                "transport_timeout_cap must be a positive number or None"
+            )
+        if max_retries is not None and (
+            type(max_retries) is not int or max_retries < 0
+        ):
+            raise ModelConfigurationError(
+                "max_retries must be a non-negative integer or None"
+            )
+        if protocol in DIRECT_HTTP_COLLAB_PROTOCOLS:
             if not isinstance(consult_policy, ConsultSendPolicy):
                 raise ModelConfigurationError(
-                    "the collab.v1 protocol requires a ConsultSendPolicy"
+                    "a collab protocol requires a ConsultSendPolicy"
                 )
         self._store = store
         self._manifest = manifest
         self.protocol = protocol
-        self.policy_version = (
-            COLLAB_MODEL_POLICY_VERSION
-            if protocol == DIRECT_HTTP_COLLAB_PROTOCOL
-            else DIRECT_HTTP_POLICY_VERSION
-        )
+        if protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+            self.policy_version = COLLAB_MODEL_POLICY_VERSION
+        elif protocol == DIRECT_HTTP_COLLAB_V2_PROTOCOL:
+            self.policy_version = COLLAB_V2_MODEL_POLICY_VERSION
+        else:
+            self.policy_version = DIRECT_HTTP_POLICY_VERSION
         self._consult_policy = consult_policy
         self.model_ref = (
             f"{DIRECT_HTTP_ADAPTER_KIND}:{manifest.provider}:{manifest.model}"
         )
         self._opener = opener if opener is not None else _build_opener()
         self._send_scope = send_scope
+        #: J03: the host-configured whole-request cap in PCS ``U`` units.  None
+        #: means "not configured"; the production runtime always configures it.
+        self._request_budget_units = request_budget_units
+        self._output_reserve_units = output_reserve_units
+        self._transport_timeout_cap = (
+            None if transport_timeout_cap is None else float(transport_timeout_cap)
+        )
+        self._max_retries = MAX_RETRIES if max_retries is None else max_retries
+        #: J03 AC-11: the estimate attached to the attempt's usage_json.
+        self._pcs_estimate: dict[str, Any] | None = None
         self._active: tuple[str, Any] | None = None
         #: Last successful assistant text plus its exact Context, used only to
         #: make a format-repair request explicit (assistant turn + feedback).
@@ -264,6 +342,12 @@ class DirectHttpModel:
         #: successful HTTP 200 / stop / non-empty / ok-attempt completion.
         self._evidence: ModelCallEvidence | None = None
         self._evidence_binding: tuple[str, str] | None = None
+        #: Maintenance-only cooperative cancellation.  The event is bound for
+        #: one logical call; a cancelled transport may still drain in a helper
+        #: thread (bounded by the call timeout), but the worker stops waiting.
+        self._cancel_event: threading.Event | None = None
+        self._inflight = threading.Event()
+        self._inflight_lock = threading.Lock()
 
     # ------------------------------------------------------------- preflight
 
@@ -286,7 +370,73 @@ class DirectHttpModel:
                 )
             raise ModelBudgetExceededError(
                 f"model authorization has used {used} of {effective_calls} "
-                "allowed call(s)"
+                "allowed call(s)",
+                reason="calls_exhausted",
+            )
+
+    # ------------------------------------------------------- request budget
+
+    def _require_request_budget(
+        self,
+        rendered_input: str,
+        body_text: str,
+        *,
+        context: Any | None = None,
+    ) -> None:
+        """Refuse before any HTTP send when the PCS request budget is exceeded.
+
+        A caps only the optional injected material, read from
+        ``context.budget_view["injection_units"]``.  A legacy Context without
+        that key is marked ``injection_units_known = False`` and gets only the
+        R check.  The gate runs before ``reserve_model_attempt`` and ``_send``,
+        so a refusal sends no HTTP request and leaves no attempt reservation.
+        """
+
+        view = getattr(context, "budget_view", None) if context is not None else None
+        raw_injection = view.get("injection_units") if isinstance(view, dict) else None
+        known = isinstance(raw_injection, int) and not isinstance(raw_injection, bool)
+        if isinstance(view, dict) and not known:
+            view["injection_units_known"] = False
+        if not known and self._request_budget_units is None:
+            return
+        body = estimate_units(body_text)
+        injected = raw_injection if known else estimate_units(rendered_input)
+        available = (
+            INJECTION_BUDGET_UNITS
+            if self._request_budget_units is None
+            else available_injection_units(
+                self._request_budget_units,
+                output_reserve_units=self._output_reserve_units,
+            )
+        )
+        if known and injected > available:
+            raise ModelBudgetExceededError(
+                f"injected material is {injected} U; {max(0, available)} U fit "
+                "the PCS injection budget",
+                reason="injection_budget",
+            )
+        if self._request_budget_units is None:
+            # No host request budget: the A check still runs above, but the
+            # attempt keeps its previous usage shape (no estimate recorded).
+            return
+        self._pcs_estimate = {
+            "body_units": body,
+            "injected_units": injected,
+            "request_units": request_units(body, self._output_reserve_units),
+            "request_budget_units": self._request_budget_units,
+            "output_reserve_units": self._output_reserve_units,
+            "safety_margin_units": SAFETY_MARGIN_UNITS,
+        }
+        required = request_units(body, self._output_reserve_units)
+        if not fits_request(
+            body,
+            self._request_budget_units,
+            output_reserve_units=self._output_reserve_units,
+        ):
+            raise ModelBudgetExceededError(
+                f"request body needs {required} U; the budget is "
+                f"{self._request_budget_units} U",
+                reason="request_budget",
             )
 
     # ---------------------------------------------------------------- binding
@@ -327,6 +477,38 @@ class DirectHttpModel:
         finally:
             self._active = None
 
+    @contextmanager
+    def bind_cancel(self, event: threading.Event | None):
+        """Bind one maintenance attempt's cancellation event.
+
+        The ModelPort signature stays frozen; the worker binds this only for a
+        maintenance call.  ``None`` is accepted so callers can use one code path
+        for chat and maintenance.
+        """
+
+        if event is None:
+            yield
+            return
+        if not isinstance(event, threading.Event):
+            raise ModelConfigurationError("cancel event must be a threading.Event")
+        if self._cancel_event is not None:
+            raise ModelConfigurationError("a cancel event is already bound")
+        self._cancel_event = event
+        try:
+            yield
+        finally:
+            self._cancel_event = None
+
+    @property
+    def in_flight(self) -> bool:
+        """Whether a cancelled transport helper is still draining.
+
+        Only the maintenance worker consults this; the chat model is a separate
+        adapter instance and is never gated by it.
+        """
+
+        return self._inflight.is_set()
+
     # ---------------------------------------------------------------- propose
 
     def propose(
@@ -342,6 +524,7 @@ class DirectHttpModel:
         # an attempt is settled.
         self._evidence = None
         self._evidence_binding = None
+        self._pcs_estimate = None
         if self._active is None:
             raise ModelConfigurationError(
                 "DirectHttpModel.propose requires bind_run(context)"
@@ -369,11 +552,12 @@ class DirectHttpModel:
                 )
             previous_output = recorded[1]
 
-        if self.protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+        if self.protocol in DIRECT_HTTP_COLLAB_PROTOCOLS:
             messages = render_collab_messages(
                 context,
                 previous_output=previous_output,
                 feedback=feedback,
+                protocol_version=self.protocol,
             )
             body_text = build_collab_request_body(
                 self._manifest, messages=messages, max_tokens=max_tokens
@@ -387,8 +571,13 @@ class DirectHttpModel:
                 feedback=feedback,
             )
 
+        # J03: the whole-request gate.  It runs after the body is rendered so it
+        # measures the exact bytes that would be sent, and before the retry loop
+        # so a refusal is 0 HTTP and 0 attempt reservation.
+        self._require_request_budget(rendered_input, body_text, context=context)
+
         last_failure: _HttpFailure | None = None
-        for retry_index in range(MAX_RETRIES + 1):
+        for retry_index in range(self._max_retries + 1):
             # PCS2-010-P0 C: prove the Context basis again before *every* HTTP
             # try (first request, transport retry, format repair).  The check
             # is before the reservation, so a refusal is 0 HTTP / 0 attempt.
@@ -436,10 +625,11 @@ class DirectHttpModel:
                     outcome=MODEL_ATTEMPT_TIMEOUT,
                     error_label="TIMEOUT",
                 )
-                if retry_index < MAX_RETRIES:
+                if retry_index < self._max_retries:
                     continue
                 raise ModelTransportError(
-                    "the provider did not answer before the wall-clock budget"
+                    "the provider did not answer before the wall-clock budget",
+                    label="TIMEOUT",
                 ) from exc
             except _HttpFailure as exc:
                 self._finish(
@@ -448,12 +638,23 @@ class DirectHttpModel:
                     response_body=exc.response_body,
                     error_label=exc.label,
                 )
-                if exc.retryable and retry_index < MAX_RETRIES:
+                if exc.retryable and retry_index < self._max_retries:
                     last_failure = exc
                     continue
                 raise ModelTransportError(
-                    f"provider call failed: {exc.label}"
+                    f"provider call failed: {exc.label}",
+                    label=exc.label,
                 ) from exc
+            except ModelCancelled as exc:
+                # The host abandoned this wait.  Record a local cancellation,
+                # not a timeout and not a provider failure; the provider may
+                # still finish (and bill) the request in the draining helper.
+                self._finish(
+                    reservation.attempt,
+                    outcome=MODEL_ATTEMPT_FAILED,
+                    error_label="CANCELLED",
+                )
+                raise exc
 
             try:
                 validated = _validate_response(response_text)
@@ -515,6 +716,164 @@ class DirectHttpModel:
         label = last_failure.label if last_failure is not None else "UNKNOWN"
         raise ModelTransportError(f"provider call failed: {label}")
 
+    def step(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> StepOutcome:
+        """One agent round: messages in, a validated round out.
+
+        This is a second port, not a widened ``propose``.  It shares the same
+        attempt ledger, authorization, send-basis proof and budget gate as the
+        proposal path -- an agent round is a real model call and must be
+        counted like one -- but it does not touch ``propose``'s contract.
+        """
+
+        if getattr(self._manifest, "tool_mode", "") != TOOL_MODE_AGENT:
+            raise ModelConfigurationError(
+                "step() requires a manifest with tool_mode='agent'"
+            )
+        self._evidence = None
+        self._evidence_binding = None
+        self._pcs_estimate = None
+        if self._active is None:
+            raise ModelConfigurationError(
+                "DirectHttpModel.step requires bind_run(context)"
+            )
+        namespace, context = self._active
+        prepared = validate_messages(messages)
+        if not tools:
+            raise ModelConfigurationError("agent mode requires at least one tool")
+
+        authorization = self._authorization(namespace)
+        api_key = self._api_key()
+        max_tokens = min(
+            self._manifest.max_output_tokens_per_call,
+            authorization.max_output_tokens_per_call,
+        )
+        body_text = build_agent_request_body(
+            self._manifest,
+            messages=prepared,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        basis = "\n".join(
+            str(item.get("content") or "")
+            for item in prepared
+            if item.get("role") == "user"
+        )
+        self._require_request_budget(basis, body_text, context=context)
+
+        last_failure: _HttpFailure | None = None
+        for retry_index in range(AGENT_MAX_RETRIES + 1):
+            self._require_send_basis(namespace, context)
+            try:
+                reservation = self._store.reserve_model_attempt(
+                    run_id=context.run_id,
+                    namespace=namespace,
+                    context_id=context.context_id,
+                    authorization_id=authorization.authorization_id,
+                    provider=self._manifest.provider,
+                    model_requested=self._manifest.model,
+                    manifest_hash=self._manifest.manifest_hash,
+                    adapter_kind=self.adapter_kind,
+                    policy_version=self.policy_version,
+                    request_body=body_text,
+                    manifest_max_calls=self._manifest.max_calls,
+                    manifest_max_output_tokens_per_call=(
+                        self._manifest.max_output_tokens_per_call
+                    ),
+                    manifest_max_wall_seconds=self._manifest.max_wall_seconds,
+                )
+            except ModelLedgerError as exc:
+                raise _translate_store_error(exc) from exc
+
+            timeout = max(
+                MIN_SOCKET_TIMEOUT, float(reservation.remaining_wall_seconds)
+            )
+            scope = (
+                self._send_scope(reservation.attempt, "agent")
+                if self._send_scope is not None
+                else nullcontext()
+            )
+            try:
+                with scope:
+                    response_text = self._send(
+                        body_text, timeout=timeout, api_key=api_key
+                    )
+            except _Timeout as exc:
+                self._finish(
+                    reservation.attempt,
+                    outcome=MODEL_ATTEMPT_TIMEOUT,
+                    error_label="TIMEOUT",
+                )
+                if retry_index < AGENT_MAX_RETRIES:
+                    continue
+                raise ModelTransportError(
+                    "the provider did not answer before the wall-clock budget",
+                    label="TIMEOUT",
+                ) from exc
+            except _HttpFailure as exc:
+                self._finish(
+                    reservation.attempt,
+                    outcome=exc.outcome,
+                    response_body=exc.response_body,
+                    error_label=exc.label,
+                )
+                if exc.retryable and retry_index < AGENT_MAX_RETRIES:
+                    last_failure = exc
+                    continue
+                raise ModelTransportError(
+                    f"provider call failed: {exc.label}",
+                    label=exc.label,
+                ) from exc
+
+            try:
+                validated = _validate_agent_response(response_text)
+            except _ResponseFailure as exc:
+                metadata = exc.metadata
+                self._finish(
+                    reservation.attempt,
+                    outcome=MODEL_ATTEMPT_MALFORMED,
+                    response_body=response_text,
+                    finish_reason=exc.finish_reason,
+                    error_label=exc.label,
+                    model_returned=metadata.get("model_returned"),
+                    system_fingerprint=metadata.get("system_fingerprint"),
+                    usage=metadata.get("usage"),
+                    usage_known=metadata.get("usage_known", False),
+                    cost_known=False,
+                    cost_estimate=None,
+                )
+                raise ModelResponseError(
+                    f"provider response is not a usable agent round: {exc.label}"
+                ) from exc
+
+            self._finish(
+                reservation.attempt,
+                outcome=MODEL_ATTEMPT_OK,
+                response_body=response_text,
+                model_returned=validated.model_returned,
+                system_fingerprint=validated.system_fingerprint,
+                finish_reason=validated.finish_reason,
+                usage=validated.usage,
+                usage_known=validated.usage_known,
+                cost_known=False,
+                cost_estimate=None,
+                error_label=None,
+            )
+            return StepOutcome(
+                finish_reason=validated.finish_reason,
+                content=validated.content,
+                reasoning_content=validated.reasoning_content,
+                tool_calls=validated.tool_calls,
+                usage=validated.usage or {},
+            )
+
+        label = last_failure.label if last_failure is not None else "UNKNOWN"
+        raise ModelTransportError(f"provider call failed: {label}")
+
     def last_attempt_evidence(
         self, *, run_id: str, context_id: str
     ) -> ModelCallEvidence | None:
@@ -549,7 +908,7 @@ class DirectHttpModel:
         deleted-after-check may.
         """
 
-        if self.protocol == DIRECT_HTTP_COLLAB_PROTOCOL:
+        if self.protocol in DIRECT_HTTP_COLLAB_PROTOCOLS:
             self._require_collab_send_basis(namespace, context)
             return
         self._require_legacy_send_basis(namespace, context)
@@ -639,6 +998,20 @@ class DirectHttpModel:
             raise ModelAdapterError(
                 "pre-send check refused: the consult Context is no longer "
                 f"current ({type(exc).__name__})"
+            ) from exc
+        # RG02 C09 extension: the history ledger is not a material source, so
+        # it must be re-proved here (existence, barrier, payload and privacy)
+        # before any reservation or HTTP try.
+        try:
+            self._store.require_context_history_live(
+                namespace=namespace,
+                context_id=context.context_id,
+                access=policy.to_experience_access(),
+            )
+        except StorageError as exc:
+            raise ModelAdapterError(
+                "pre-send check refused: a history source this consult Context "
+                f"rendered is no longer readable ({type(exc).__name__})"
             ) from exc
         profile_value = (
             context.profile_ref.to_dict()
@@ -769,7 +1142,28 @@ class DirectHttpModel:
             if entry.ref == profile_ref or entry in self_view_entries:
                 continue
             version = versions[(entry.ref.record_id, entry.ref.record_version)]
-            if version.kind not in (BELIEF_KIND, EPISODE_KIND):
+            if version.kind in POLICY_KINDS:
+                # RG08 T3: a Persona expression policy is a pinned asset exactly
+                # like the profile, so it takes the same branch: usage must be
+                # ``pinned_asset`` and its privacy class must be allowed.  It is
+                # deliberately not a query record (those are ``current`` /
+                # ``historical`` and are re-pointed at the current version).
+                if entry.usage != "pinned_asset":
+                    raise ModelAdapterError(
+                        "pre-send check refused: a policy read_set record must "
+                        "be pinned_asset"
+                    )
+                if version.privacy_class not in policy.privacy_classes:
+                    raise ModelNotAuthorizedError(
+                        "pre-send check refused: the policy record privacy "
+                        "class is not allowed by the send policy"
+                    )
+                continue
+            if version.kind not in (
+                BELIEF_KIND,
+                EPISODE_KIND,
+                _EXPRESSION_PREFERENCE_KIND,
+            ):
                 raise ModelAdapterError(
                     "pre-send check refused: read_set contains a record this "
                     "Context did not render"
@@ -940,6 +1334,95 @@ class DirectHttpModel:
         return value
 
     def _send(self, body_text: str, *, timeout: float, api_key: str) -> str:
+        """One transport call, optionally cancellable for maintenance.
+
+        Chat/review calls have no bound cancel event and keep the exact previous
+        blocking path.  A maintenance call binds one event; its blocking
+        ``open+read`` runs in one daemon helper while this worker polls every
+        100 ms.  On cancellation the worker stops waiting immediately; the
+        helper owns no store/DB/Review/commit state and its late result is
+        discarded.  The helper is bounded by the same socket timeout.
+        """
+
+        if self._transport_timeout_cap is not None:
+            timeout = min(float(timeout), self._transport_timeout_cap)
+        event = self._cancel_event
+        if event is None:
+            return self._send_blocking(body_text, timeout=timeout, api_key=api_key)
+        if event.is_set():
+            raise ModelCancelled("the maintenance wait was cancelled before send")
+        return self._send_cancellable(
+            body_text, timeout=timeout, api_key=api_key, event=event
+        )
+
+    def _send_cancellable(
+        self,
+        body_text: str,
+        *,
+        timeout: float,
+        api_key: str,
+        event: threading.Event,
+    ) -> str:
+        if not self._inflight_lock.acquire(blocking=False):
+            raise ModelConfigurationError(
+                "the previous maintenance transport is still draining"
+            )
+        self._inflight.set()
+        outcome: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result = self._send_blocking(
+                    body_text, timeout=timeout, api_key=api_key
+                )
+                kind, value = "ok", result
+            except BaseException as exc:  # noqa: BLE001 - handed to the worker
+                kind, value = "error", exc
+            try:
+                outcome.put((kind, value), timeout=1.0)
+            except queue.Full:  # pragma: no cover - one slot, one writer
+                pass
+            finally:
+                self._inflight.clear()
+                self._inflight_lock.release()
+
+        try:
+            threading.Thread(
+                target=runner,
+                name="pcs-maintenance-transport",
+                daemon=True,
+            ).start()
+        except BaseException:
+            self._inflight.clear()
+            self._inflight_lock.release()
+            raise
+
+        deadline = time.monotonic() + max(float(timeout), 0.0)
+        while True:
+            try:
+                kind, value = outcome.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                if kind == "error":
+                    raise value
+                return value
+            if event.is_set():
+                raise ModelCancelled("the maintenance wait was cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _Timeout()
+            try:
+                kind, value = outcome.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                continue
+            if kind == "error":
+                raise value
+            return value
+
+    def _send_blocking(
+        self, body_text: str, *, timeout: float, api_key: str
+    ) -> str:
         payload = body_text.encode("utf-8")
         request = urllib.request.Request(
             self._manifest.endpoint,
@@ -1038,6 +1521,8 @@ class DirectHttpModel:
         return text
 
     def _finish(self, attempt: ModelAttempt, **kwargs: Any) -> ModelAttempt:
+        if self._pcs_estimate is not None:
+            kwargs.setdefault("pcs_estimated", self._pcs_estimate)
         try:
             return self._store.finish_model_attempt(
                 attempt_id=attempt.attempt_id, **kwargs
@@ -1155,6 +1640,100 @@ def _bound_reason(value: Any) -> str | None:
     return value[:64]
 
 
+@dataclass(frozen=True)
+class _ValidatedAgentResponse:
+    """One agent round, validated in agent mode only."""
+
+    finish_reason: str
+    content: str
+    reasoning_content: str
+    tool_calls: tuple[ToolCall, ...]
+    model_returned: str | None
+    system_fingerprint: str | None
+    usage: dict[str, Any] | None
+    usage_known: bool
+
+
+def _validate_agent_response(text: str) -> _ValidatedAgentResponse:
+    """Parse a response that is allowed to carry ``tool_calls``.
+
+    In agent mode a tool-call round normally has empty ``content``, so the
+    proposal validator's ``EMPTY_CONTENT`` rule cannot apply here.  What still
+    holds: the envelope must be usable, and a ``tool_calls`` entry must be
+    well-formed enough to execute or it is refused rather than half-run.
+    """
+
+    try:
+        document = strict_json_loads(text)
+    except ValueError as exc:
+        raise _ResponseFailure("INVALID_JSON", None) from exc
+    if not isinstance(document, dict):
+        raise _ResponseFailure("INVALID_RESPONSE_SHAPE", None)
+    metadata = _supplier_metadata(document)
+    choices = document.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise _ResponseFailure("MISSING_CHOICES", None, metadata=metadata)
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise _ResponseFailure("INVALID_RESPONSE_SHAPE", None, metadata=metadata)
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise _ResponseFailure("MISSING_MESSAGE", None, metadata=metadata)
+    finish_reason = _bound_reason(choice.get("finish_reason"))
+    if finish_reason is None:
+        raise _ResponseFailure("MISSING_FINISH_REASON", None, metadata=metadata)
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise _ResponseFailure("INVALID_RESPONSE_SHAPE", None, metadata=metadata)
+    reasoning = message.get("reasoning_content")
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise _ResponseFailure("INVALID_RESPONSE_SHAPE", None, metadata=metadata)
+    raw_calls = message.get("tool_calls") or []
+    if not isinstance(raw_calls, list):
+        raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+    calls: list[ToolCall] = []
+    for index, raw in enumerate(raw_calls):
+        if not isinstance(raw, dict):
+            raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+        call_id = raw.get("id")
+        function = raw.get("function")
+        if not isinstance(call_id, str) or not call_id:
+            raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+        if not isinstance(function, dict):
+            raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(name, str) or not name:
+            raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+        if arguments is None:
+            arguments = "{}"
+        if not isinstance(arguments, str):
+            raise _ResponseFailure("INVALID_TOOL_CALLS", finish_reason, metadata=metadata)
+        calls.append(
+            ToolCall(call_id=call_id, name=from_wire_name(name), arguments=arguments)
+        )
+        if index + 1 >= 64:
+            raise _ResponseFailure("TOO_MANY_TOOL_CALLS", finish_reason, metadata=metadata)
+    if not calls and finish_reason != "stop":
+        # A non-final reason with nothing to run would spin the loop.
+        label = "FINISH_REASON_" + "".join(
+            char if char.isalnum() else "_" for char in finish_reason.upper()
+        )[:100]
+        raise _ResponseFailure(label, finish_reason, metadata=metadata)
+    if not calls and not (content or ""):
+        raise _ResponseFailure("EMPTY_CONTENT", finish_reason, metadata=metadata)
+    return _ValidatedAgentResponse(
+        finish_reason=finish_reason,
+        content=content or "",
+        reasoning_content=reasoning or "",
+        tool_calls=tuple(calls),
+        model_returned=metadata["model_returned"],
+        system_fingerprint=metadata["system_fingerprint"],
+        usage=metadata["usage"],
+        usage_known=metadata["usage_known"],
+    )
+
+
 def _optional_text(value: Any, max_length: int) -> str | None:
     if not isinstance(value, str) or value == "":
         return None
@@ -1178,9 +1757,13 @@ def _redact(text: str | None, api_key: str) -> str | None:
 
 def _translate_store_error(exc: ModelLedgerError) -> ModelAdapterError:
     if isinstance(exc, ModelBudgetExceeded):
-        return ModelBudgetExceededError(str(exc))
+        return ModelBudgetExceededError(str(exc), reason="calls_or_walltime")
+    if isinstance(exc, ModelAuthorizationExpired):
+        return ModelNotAuthorizedError(str(exc), reason="authorization_expired")
+    if isinstance(exc, ModelAuthorizationMismatch):
+        return ModelNotAuthorizedError(str(exc), reason="authorization_mismatch")
     if isinstance(exc, ModelNotAuthorized):
-        return ModelNotAuthorizedError(str(exc))
+        return ModelNotAuthorizedError(str(exc), reason="not_authorized")
     if isinstance(exc, ModelAttemptConflict):
         return ModelAdapterError(str(exc))
     return ModelAdapterError(str(exc))

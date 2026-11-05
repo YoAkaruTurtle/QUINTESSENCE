@@ -41,6 +41,7 @@ from ..foundation.errors import (
 )
 from ..foundation.jsonutil import canonical_json_text, strict_json_loads
 from ..foundation.timeutil import utc_now_rfc3339
+from ..reply_bubbles import decode_reply_body
 from .collaboration import COLLAB_ARTIFACT, COLLAB_INPUT, MAX_CLOSURE_DEPTH
 
 DEFAULT_LIST_LIMIT = 20
@@ -82,6 +83,19 @@ VIEW_ORIGIN_KINDS = (
 
 REF_TYPES = (COLLAB_INPUT, COLLAB_ARTIFACT)
 READ_AUDIT_TABLE = "collab_experience_reads"
+
+#: RG04: a turn is a memory source only after it reached a frozen terminal
+#: state.  ``waiting`` is terminal for its own turn (the user continues as a
+#: new turn); ``interrupted`` covers a host restart.  The same tuple is used by
+#: the global enumeration and by ``turn_experience_refs``.
+TERMINAL_TURN_STATES = (
+    "completed",
+    "waiting",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
+_TERMINAL_TURN_SQL = "('completed','waiting','failed','cancelled','interrupted')"
 
 #: A ref dictionary is the only shape returned by the listing; it never
 #: carries body text.
@@ -332,6 +346,85 @@ def _decode_stored_json(text: str | None, field_name: str) -> Any:
         raise CorruptStore(f"stored {field_name} is not strict JSON") from exc
 
 
+def _input_eligibility_sql(turn_id: str | None) -> tuple[str, list[Any]]:
+    """RG04 eligibility for a ``collab_input`` (assumes alias ``i``).
+
+    The general form keeps the pre-RG04 rows untouched: an input with no
+    ``kind='user'`` message is enumerated exactly as before.  A turn input is
+    eligible only from a terminal turn and through a published user message.
+    """
+
+    if turn_id is not None:
+        return (
+            "AND EXISTS (SELECT 1 FROM collab_turn_messages AS m "
+            "JOIN collab_turns AS t ON t.namespace = m.namespace "
+            "AND t.turn_id = m.turn_id "
+            "WHERE m.namespace = i.namespace AND m.kind = 'user' "
+            "AND m.status = 'published' AND m.turn_id = ? "
+            "AND json_extract(m.input_ref_json, '$.input_id') = i.input_id "
+            "AND json_extract(m.input_ref_json, '$.content_version') = "
+            "i.content_version "
+            f"AND t.state IN {_TERMINAL_TURN_SQL})",
+            [turn_id],
+        )
+    return (
+        "AND (NOT EXISTS (SELECT 1 FROM collab_turn_messages AS m "
+        "WHERE m.namespace = i.namespace AND m.kind = 'user' "
+        "AND json_extract(m.input_ref_json, '$.input_id') = i.input_id "
+        "AND json_extract(m.input_ref_json, '$.content_version') = "
+        "i.content_version) "
+        "OR EXISTS (SELECT 1 FROM collab_turn_messages AS m "
+        "JOIN collab_turns AS t ON t.namespace = m.namespace "
+        "AND t.turn_id = m.turn_id "
+        "WHERE m.namespace = i.namespace AND m.kind = 'user' "
+        "AND m.status = 'published' "
+        "AND json_extract(m.input_ref_json, '$.input_id') = i.input_id "
+        "AND json_extract(m.input_ref_json, '$.content_version') = "
+        "i.content_version "
+        f"AND t.state IN {_TERMINAL_TURN_SQL}))",
+        [],
+    )
+
+
+def _artifact_eligibility_sql(turn_id: str | None) -> tuple[str, list[Any]]:
+    """RG04 eligibility for a ``collab_artifact`` (assumes alias ``a``).
+
+    Legacy branch: an artifact that no turn message and no step references is
+    enumerated exactly as before (this keeps the 0017-pre rows, including the
+    legacy ``query_result`` artifact, byte-for-byte compatible).  Turn branch:
+    only a published ``final``/``wait_question`` of a terminal turn is an
+    independent experience; commentary and tool results stay transcript/process
+    material.
+    """
+
+    turn_branch = (
+        "EXISTS (SELECT 1 FROM collab_turn_messages AS m "
+        "JOIN collab_turns AS t ON t.namespace = m.namespace "
+        "AND t.turn_id = m.turn_id "
+        "WHERE m.namespace = a.namespace AND m.artifact_id = a.artifact_id "
+        "AND m.artifact_version = a.artifact_version "
+        "AND m.status = 'published' "
+        "AND m.kind IN ('final','wait_question') "
+    )
+    if turn_id is not None:
+        return (
+            "AND " + turn_branch + "AND m.turn_id = ? "
+            f"AND t.state IN {_TERMINAL_TURN_SQL})",
+            [turn_id],
+        )
+    return (
+        "AND ((NOT EXISTS (SELECT 1 FROM collab_turn_messages AS m "
+        "WHERE m.namespace = a.namespace AND m.artifact_id = a.artifact_id "
+        "AND m.artifact_version = a.artifact_version) "
+        "AND NOT EXISTS (SELECT 1 FROM collab_turn_steps AS s "
+        "WHERE s.namespace = a.namespace "
+        "AND s.result_artifact_id = a.artifact_id "
+        "AND s.result_artifact_version = a.artifact_version)) "
+        "OR " + turn_branch + f"AND t.state IN {_TERMINAL_TURN_SQL}))",
+        [],
+    )
+
+
 # --------------------------------------------------------------------------
 # mixin
 # --------------------------------------------------------------------------
@@ -349,6 +442,7 @@ class ExperienceMixin:
         namespace: str,
         after_cursor: str | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
+        turn_id: str | None = None,
     ) -> ExperiencePage:
         """List visible experience refs in stable ``(created_at, ref)`` order.
 
@@ -363,6 +457,14 @@ class ExperienceMixin:
         ordering/creation value.  A hidden artifact must have every source
         privacy class inside ``access.privacy_classes`` (see
         :meth:`_artifact_privacy_classes`).
+
+        RG04: a source that belongs to a turn is eligible only when the turn is
+        terminal (``TERMINAL_TURN_STATES``) and the message is a published
+        public one.  Rows that predate 0017 carry no turn message at all and
+        keep the pre-RG04 behaviour, which is why the artifact branch is an
+        ``old branch OR turn branch``.  ``turn_id`` narrows the page to one
+        turn and uses only the turn branch; it is the same predicate the global
+        enumeration uses (no Python-side post-filter).
         """
 
         _require_access(access)
@@ -375,8 +477,11 @@ class ExperienceMixin:
             raise InvalidInput(
                 f"limit must be an integer between 1 and {MAX_LIST_LIMIT}"
             )
+        tid = None if turn_id is None else _require_uuid(turn_id, "turn_id")
         cursor = None if after_cursor is None else _decode_cursor(after_cursor)
 
+        input_clause, input_parameters = _input_eligibility_sql(tid)
+        artifact_clause, artifact_parameters = _artifact_eligibility_sql(tid)
         connection = self._require_connection()
         query = (
             "SELECT ref_type, ref_id, ref_version, created_at FROM ("
@@ -386,13 +491,15 @@ class ExperienceMixin:
             "AND EXISTS (SELECT 1 FROM collab_interaction_inputs AS l "
             "WHERE l.namespace = i.namespace AND l.input_id = i.input_id "
             "AND l.content_version = i.content_version) "
-            "UNION ALL "
-            "SELECT 'collab_artifact' AS ref_type, artifact_id AS ref_id, "
-            "artifact_version AS ref_version, created_at AS created_at "
-            "FROM collab_artifacts WHERE namespace = ?"
-            ") "
+            + input_clause
+            + " UNION ALL "
+            "SELECT 'collab_artifact' AS ref_type, a.artifact_id AS ref_id, "
+            "a.artifact_version AS ref_version, a.created_at AS created_at "
+            "FROM collab_artifacts AS a WHERE a.namespace = ? "
+            + artifact_clause
+            + ") "
         )
-        parameters: list[Any] = [ns, ns]
+        parameters: list[Any] = [ns, *input_parameters, ns, *artifact_parameters]
         if cursor is not None:
             query += (
                 "WHERE (created_at, ref_type, ref_id, ref_version) "
@@ -429,6 +536,35 @@ class ExperienceMixin:
             refs.append(ref)
             last_returned = (ref, str(row["created_at"]))
         return ExperiencePage(refs=tuple(refs), next_cursor=next_cursor)
+
+    def turn_experience_refs(
+        self,
+        access: ExperienceAccess,
+        *,
+        namespace: str,
+        turn_id: str,
+    ) -> tuple[CollaborationRef, ...]:
+        """RG04: the eligible independent sources of one terminal turn.
+
+        This is the same SQL predicate as :meth:`list_experience_refs` with
+        ``turn_id`` set, not a second hand-written filter.  A running turn
+        returns an empty tuple; a terminal turn returns its published user
+        input plus its published ``final``/``wait_question`` artifact.
+        """
+
+        _require_access(access)
+        ns = identifiers.require_namespace(namespace)
+        if ns != access.namespace:
+            raise ScopeViolation(
+                f"namespace {ns!r} is outside the access namespace {access.namespace!r}"
+            )
+        page = self.list_experience_refs(
+            access,
+            namespace=ns,
+            turn_id=_require_uuid(turn_id, "turn_id"),
+            limit=MAX_LIST_LIMIT,
+        )
+        return page.refs
 
     # ---------------------------------------------------------------- read
 
@@ -656,7 +792,7 @@ class ExperienceMixin:
             return ExperienceUnavailable(ref)
         else:
             readability = READABILITY_AVAILABLE
-            body = loaded.body
+            _, body = decode_reply_body(loaded.body)
             source_refs = loaded.source_refs
             attempt_ref = loaded.attempt_ref
 
@@ -813,6 +949,111 @@ class ExperienceMixin:
         if result not in PROCESSING_RESULTS:
             raise CorruptStore(f"stored interaction result {result!r} is not frozen")
         return result
+
+    # --------------------------------------------------- projection metadata
+
+    def _projection_metadata_locked(
+        self, access: ExperienceAccess, ref: Any
+    ) -> dict[str, Any] | None:
+        """Private bridge metadata for one exact Experience version.
+
+        Called inside the bridge's write transaction so the privacy closure,
+        retention, interaction binding and deletion state are read from the
+        same snapshot as the projection.  The public ``ExperienceView`` is not
+        changed; ``None`` means the ref is missing or outside the namespace.
+        """
+
+        _require_access(access)
+        normalized, ref_type, ref_id, ref_version = _normalize_ref(ref)
+        if normalized["namespace"] != access.namespace:
+            return None
+        connection = self._require_connection()
+        observed_at: str | None = None
+        if ref_type == COLLAB_INPUT:
+            row = connection.execute(
+                "SELECT origin_kind, privacy_class, retention_policy, recorded_at, "
+                "observed_at FROM collab_inputs WHERE namespace = ? AND input_id = ? "
+                "AND content_version = ?",
+                (access.namespace, ref_id, ref_version),
+            ).fetchone()
+            if row is None:
+                return None
+            interaction = connection.execute(
+                "SELECT i.host_instance, i.access_ref "
+                "FROM collab_interaction_inputs AS l "
+                "JOIN collab_interactions AS i "
+                "ON i.namespace = l.namespace AND i.interaction_id = l.interaction_id "
+                "WHERE l.namespace = ? AND l.input_id = ? AND l.content_version = ? "
+                "ORDER BY i.created_at, i.interaction_id LIMIT 1",
+                (access.namespace, ref_id, ref_version),
+            ).fetchone()
+            privacy = frozenset({row["privacy_class"]})
+            source_refs: tuple[dict[str, Any], ...] = ()
+            created_at = row["recorded_at"]
+            observed_at = row["observed_at"]
+        else:
+            row = connection.execute(
+                "SELECT origin_kind, retention_policy, created_at, interaction_id "
+                "FROM collab_artifacts WHERE namespace = ? AND artifact_id = ? "
+                "AND artifact_version = ?",
+                (access.namespace, ref_id, ref_version),
+            ).fetchone()
+            if row is None:
+                return None
+            interaction = connection.execute(
+                "SELECT host_instance, access_ref FROM collab_interactions "
+                "WHERE namespace = ? AND interaction_id = ?",
+                (access.namespace, row["interaction_id"]),
+            ).fetchone()
+            privacy = self._artifact_privacy_classes(
+                namespace=access.namespace,
+                artifact_id=ref_id,
+                artifact_version=ref_version,
+                depth=0,
+                seen=set(),
+            )
+            if privacy is None:
+                return {
+                    "ref_type": ref_type,
+                    "ref_id": ref_id,
+                    "ref_version": ref_version,
+                    "privacy_classes": None,
+                    "retention": None,
+                    "origin_kind": row["origin_kind"],
+                    "host_instance": None,
+                    "access_ref": None,
+                    "source_refs": (),
+                    "created_at": row["created_at"],
+                    "observed_at": None,
+                    "deleted": False,
+                    "unresolvable": True,
+                }
+            source_refs = self._artifact_source_refs(
+                namespace=access.namespace,
+                artifact_id=ref_id,
+                artifact_version=ref_version,
+            )
+            created_at = row["created_at"]
+        return {
+            "ref_type": ref_type,
+            "ref_id": ref_id,
+            "ref_version": ref_version,
+            "privacy_classes": privacy,
+            "retention": row["retention_policy"],
+            "origin_kind": row["origin_kind"],
+            "host_instance": None if interaction is None else interaction["host_instance"],
+            "access_ref": None if interaction is None else interaction["access_ref"],
+            "source_refs": source_refs,
+            "created_at": created_at,
+            "observed_at": observed_at,
+            "deleted": self._is_deletion_target(
+                namespace=access.namespace,
+                ref_type=ref_type,
+                ref_id=ref_id,
+                ref_version=ref_version,
+            ),
+            "unresolvable": False,
+        }
 
     def _is_deletion_target(
         self,

@@ -195,6 +195,8 @@ def _erroneous_field(message: str, exc: BaseException) -> str | None:
         return None
     if isinstance(exc, ScopeViolation) or message.startswith("scope"):
         return "scope"
+    if message.startswith("premise_refs"):
+        return "premise_refs"
     if message.startswith("claim_type"):
         return "claim_type"
     if message.startswith("inference_basis"):
@@ -212,6 +214,9 @@ def _erroneous_field(message: str, exc: BaseException) -> str | None:
     if message.startswith("alternative_group_id"):
         return "alternative_group_id"
     if "belief body is missing required field(s)" in message:
+        missing = message.split(":", 1)[-1].strip()
+        if missing == "premise_refs":
+            return "premise_refs"
         return "body"
     if "belief body has unknown field(s)" in message:
         return "body"
@@ -250,6 +255,14 @@ def repair_feedback(exc: BaseException) -> str:
         )
     if isinstance(exc, ScopeViolation) and "must be a scope object" in message:
         parts.append("scope must be a JSON object, not a string.")
+    if "premise_refs" in message:
+        parts.append(
+            "premise_refs is a required body field: send [] when no premise "
+            "belief applies. Each item must be an exact RecordRef "
+            '(ref_type="record", namespace, record_id, record_version) of a '
+            "live supported belief; an EventRef belongs only in "
+            "evidence_links[].ref."
+        )
     evidence_note = (
         "The proposal shape may be valid, but the evidence reference is not "
         "usable; use an EventRef from available_references with "

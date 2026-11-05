@@ -35,15 +35,34 @@ class ModelConfigurationError(ModelAdapterError):
 
 
 class ModelNotAuthorizedError(ModelAdapterError):
-    """No active grant covers this provider/model/manifest, or no key is set."""
+    """No active grant covers this provider/model/manifest, or no key is set.
+
+    ``reason`` is an optional machine token (``authorization_expired``,
+    ``authorization_mismatch``, ``purpose_not_allowed``, ...).  It only refines
+    the diagnosis; it never changes whether the call is refused.
+    """
 
     error_label = "NOT_AUTHORIZED"
 
+    def __init__(self, message: str = "", *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 class ModelBudgetExceededError(ModelAdapterError):
-    """The call would exceed the authorization's call or wall-time budget."""
+    """The call would exceed the authorization's call or wall-time budget.
+
+    ``reason`` distinguishes the three budgets a caller can hit — call count,
+    injected Context material, and the whole request — because the recovery
+    differs for each (re-authorise vs. shrink the Context vs. shrink the
+    request).  It is diagnosis only; the refusal itself is unchanged.
+    """
 
     error_label = "BUDGET_EXCEEDED"
+
+    def __init__(self, message: str = "", *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ModelTransportError(ModelAdapterError):
@@ -51,11 +70,26 @@ class ModelTransportError(ModelAdapterError):
 
     error_label = "TRANSPORT_ERROR"
 
+    def __init__(self, message: str = "", *, label: str | None = None) -> None:
+        super().__init__(message)
+        self.error_label = label or type(self).error_label
+
 
 class ModelResponseError(ModelAdapterError):
     """HTTP 200 arrived, but the response envelope is not a usable proposal."""
 
     error_label = "RESPONSE_ERROR"
+
+
+class ModelCancelled(ModelAdapterError):
+    """The host abandoned this model wait on purpose.
+
+    This is not a timeout and not a provider rate limit: the local worker was
+    asked to yield to the foreground.  The transport may still be running, so a
+    cancelled call is recorded as a local cancellation, never as success.
+    """
+
+    error_label = "CANCELLED"
 
 
 @runtime_checkable
@@ -99,6 +133,7 @@ class RunBoundModelPort(ModelPort, Protocol):
 __all__ = [
     "ModelAdapterError",
     "ModelBudgetExceededError",
+    "ModelCancelled",
     "ModelConfigurationError",
     "ModelNotAuthorizedError",
     "ModelPort",

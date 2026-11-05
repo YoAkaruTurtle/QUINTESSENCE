@@ -24,6 +24,7 @@ rewritten and no guard trigger is added.
 from __future__ import annotations
 
 import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,24 +136,28 @@ class DeletionMixin:
     # ------------------------------------------------------------ read barrier
 
     def get_version(self, namespace: str, record_id: str, record_version: int) -> Any:
+        self.require_ready("record_read")
         identifiers.require_namespace(namespace)
         identifiers.require_record_id(record_id)
         self._raise_if_record_redacted(namespace, record_id)
         return super().get_version(namespace, record_id, record_version)
 
     def get_current(self, namespace: str, record_id: str) -> Any:
+        self.require_ready("record_read")
         identifiers.require_namespace(namespace)
         identifiers.require_record_id(record_id)
         self._raise_if_record_redacted(namespace, record_id)
         return super().get_current(namespace, record_id)
 
     def get_event(self, namespace: str, event_id: str) -> Any:
+        self.require_ready("record_read")
         identifiers.require_namespace(namespace)
         identifiers.require_event_id(event_id)
         self._raise_if_event_redacted(namespace, event_id)
         return super().get_event(namespace, event_id)
 
     def causes_of(self, namespace: str, event_id: str) -> Any:
+        self.require_ready("record_read")
         identifiers.require_namespace(namespace)
         identifiers.require_event_id(event_id)
         self._raise_if_event_redacted(namespace, event_id)
@@ -207,6 +212,15 @@ class DeletionMixin:
         """
 
         self._require_standalone("request_deletion")
+        self.require_ready("request_deletion")
+        decision = getattr(self, "restore_decision", None)
+        safety = getattr(decision, "deletion_safety", None) if decision is not None else None
+        if safety is not None and safety != "enforced":
+            raise InvalidInput(
+                "deletion requires an enforced deletion ledger "
+                f"(deletion_safety={safety}); an unprotected run cannot record "
+                "what it deletes, so it must not delete at all"
+            )
         kind = _require_target_kind(target_kind)
         ns = identifiers.require_namespace(namespace)
         if kind == DELETION_RECORD:
@@ -215,32 +229,175 @@ class DeletionMixin:
             target = identifiers.require_event_id(target_id)
         authorization = _require_authorization_ref(authorization_ref)
 
+        ledger = self._deletion_ledger_or_none()
+        if ledger is None:
+            with self.transaction():
+                self._require_target_present(ns, kind, target)
+                return self._commit_barrier_locked(
+                    namespace=ns,
+                    target_kind=kind,
+                    target_id=target,
+                    target_version=0,
+                    authorization_ref=authorization,
+                )
+
+        # A repeat request for an already-barriered target must not prewrite:
+        # the retry moves no watermark, so a prewrite here would leave an
+        # orphan entry above the database epoch and block recovery forever.
+        existing = self._load_target_locked(ns, kind, target, 0)
+        if existing is not None:
+            return _target_from_row(existing)
+
+        # Authorization and target identity are validated before the ledger
+        # sees anything: the ledger records authorized deletions only.
+        self._require_target_present(ns, kind, target)
+        current_epoch = self._current_privacy_epoch(ns)
+        try:
+            ledger.ensure_ready(ns, current_epoch)
+        except Exception as error:  # noqa: BLE001 - fail closed, never delete
+            raise InvalidInput(f"deletion ledger is unavailable: {error}") from error
+
+        operation_id = uuid.uuid4().hex
+        try:
+            ledger.prewrite(
+                operation_id=operation_id,
+                namespace=ns,
+                target_kind=kind,
+                target_id=target,
+                target_version=0,
+                authorization_ref=authorization,
+                privacy_epoch=current_epoch + 1,
+            )
+        except Exception as error:  # noqa: BLE001 - fail closed, never delete
+            raise InvalidInput(f"deletion ledger prewrite failed: {error}") from error
+
         with self.transaction():
-            if kind == DELETION_RECORD:
-                exists = self._require_connection().execute(
-                    "SELECT 1 FROM records WHERE namespace = ? AND record_id = ?",
-                    (ns, target),
-                ).fetchone()
-                if exists is None:
-                    raise RecordNotFound(
-                        f"record {target} does not exist in namespace {ns!r}"
-                    )
-            else:
-                exists = self._require_connection().execute(
-                    "SELECT 1 FROM event_journal WHERE namespace = ? AND event_id = ?",
-                    (ns, target),
-                ).fetchone()
-                if exists is None:
-                    raise EventNotFound(
-                        f"event {target} does not exist in namespace {ns!r}"
-                    )
-            return self._commit_barrier_locked(
+            target_row = self._commit_barrier_locked(
                 namespace=ns,
                 target_kind=kind,
                 target_id=target,
                 target_version=0,
                 authorization_ref=authorization,
             )
+        # The database commit is durable; confirm the ledger entry.  A crash
+        # here leaves a `prewritten` entry that startup reconciliation replays.
+        ledger.confirm(operation_id)
+        from . import recovery
+
+        recovery.record_anchor(self, ns, self._current_privacy_epoch(ns))
+        return target_row
+
+    # --------------------------------------------------------------- ledger
+
+    def _deletion_ledger_or_none(self):
+        directory = getattr(self, "deletion_ledger_dir", None)
+        if directory is None:
+            return None
+        ledger = getattr(self, "_deletion_ledger", None)
+        if ledger is None:
+            from .deletion_ledger import DeletionLedger
+
+            ledger = DeletionLedger(directory, clock=getattr(self, "_ledger_clock", None))
+            self._deletion_ledger = ledger
+        return ledger
+
+    def _require_target_present(self, namespace: str, kind: str, target: str) -> None:
+        connection = self._require_connection()
+        if kind == DELETION_RECORD:
+            row = connection.execute(
+                "SELECT 1 FROM records WHERE namespace = ? AND record_id = ?",
+                (namespace, target),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound(
+                    f"record {target} does not exist in namespace {namespace!r}"
+                )
+        else:
+            row = connection.execute(
+                "SELECT 1 FROM event_journal WHERE namespace = ? AND event_id = ?",
+                (namespace, target),
+            ).fetchone()
+            if row is None:
+                raise EventNotFound(
+                    f"event {target} does not exist in namespace {namespace!r}"
+                )
+
+    def _current_privacy_epoch(self, namespace: str) -> int:
+        row = self._require_connection().execute(
+            "SELECT privacy_epoch FROM namespace_state WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def replay_deletion(
+        self,
+        *,
+        namespace: str,
+        target_kind: str,
+        target_id: str,
+        target_version: int,
+        authorization_ref: str,
+        privacy_epoch: int,
+    ) -> str:
+        """Re-apply one ledger prewrite while the gate is closed (recovery only).
+
+        Returns ``"applied"`` when a barrier row was inserted, ``"present"``
+        when it was already there and ``"absent"`` when the target no longer
+        exists -- an orphan prewrite must not block the restore.
+        """
+
+        with self.transaction():
+            connection = self._require_connection()
+            existing = self._load_target_locked(namespace, target_kind, target_id, target_version)
+            outcome = "present" if existing is not None else "applied"
+            if existing is None:
+                if self._target_exists(namespace, target_kind, target_id):
+                    now = utc_now_rfc3339()
+                    connection.execute(
+                        "INSERT INTO deletion_targets ("
+                        "target_kind, namespace, target_id, target_version, status, "
+                        "authorization_ref, created_at, updated_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            target_kind,
+                            namespace,
+                            target_id,
+                            target_version,
+                            DELETION_PENDING_CLEANUP,
+                            authorization_ref,
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    outcome = "absent"
+            connection.execute(
+                "INSERT INTO namespace_state (namespace, state_revision, privacy_epoch) "
+                "VALUES (?, 1, ?) "
+                "ON CONFLICT(namespace) DO UPDATE SET "
+                "state_revision = namespace_state.state_revision + 1, "
+                "privacy_epoch = MAX(namespace_state.privacy_epoch, ?)",
+                (namespace, max(1, privacy_epoch), privacy_epoch),
+            )
+        self.cleanup_deletions(namespace=namespace)
+        from . import recovery
+
+        recovery.record_anchor(self, namespace, privacy_epoch)
+        return outcome
+
+    def _target_exists(self, namespace: str, target_kind: str, target_id: str) -> bool:
+        connection = self._require_connection()
+        if target_kind == DELETION_RECORD:
+            sql = "SELECT 1 FROM records WHERE namespace = ? AND record_id = ?"
+        elif target_kind == DELETION_EVENT:
+            sql = "SELECT 1 FROM event_journal WHERE namespace = ? AND event_id = ?"
+        elif target_kind == "collab_input":
+            sql = "SELECT 1 FROM collab_inputs WHERE namespace = ? AND input_id = ?"
+        elif target_kind == "collab_artifact":
+            sql = "SELECT 1 FROM collab_artifacts WHERE namespace = ? AND artifact_id = ?"
+        else:
+            return False
+        return connection.execute(sql, (namespace, target_id)).fetchone() is not None
 
     def _commit_barrier_locked(
         self,

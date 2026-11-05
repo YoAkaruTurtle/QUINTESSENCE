@@ -38,13 +38,20 @@ from cognition_support import NS, NS_B, CognitionTestCase  # noqa: E402
 from quintessence_pcs.collaboration import (  # noqa: E402
     FACADE_PERMISSIONS,
     HostAccess,
+    ReviewCandidateDetail,
     ReviewCandidateSummary,
     ReviewFacade,
 )
+from quintessence_pcs.collaboration import facade as facade_module  # noqa: E402
 from quintessence_pcs.collaboration.service import CollaborationService  # noqa: E402
+from quintessence_pcs.domains.cognition import (  # noqa: E402
+    belief_evidence_is_live,
+)
+from quintessence_pcs.domains.refs import RecordRef  # noqa: E402
 from quintessence_pcs.foundation import identifiers  # noqa: E402
 from quintessence_pcs.foundation.errors import (  # noqa: E402
     AuthorizationRequired,
+    CorruptStore,
     RecordNotFound,
 )
 
@@ -1067,3 +1074,242 @@ class ReviewCandidateReadTests(CognitionTestCase):
         self.assertEqual(
             (), self.facade.candidates(access, work_id=work.work_id)
         )
+
+    # --------------------------- 7. J01b source-liveness gate on the detail
+
+    def _evidence_belief(self):
+        """One supported Belief plus the exact Event it cites as evidence.
+
+        The review Context is built *before* the Belief so the new record is
+        not itself a Context source; otherwise deleting its evidence would
+        redact the candidate before the current-version read runs.
+        """
+
+        self._j01b_context = self.build_context()
+        self._j01b_work = self.work_for(
+            self._j01b_context.trigger_ref.event_id
+        )
+        evidence = self.ingest_event()
+        version = self.propose(
+            body=self.belief_body(
+                evidence_links=[
+                    self.evidence_link(self.event_ref(evidence.event_id))
+                ]
+            ),
+            scope=self.default_scope("capability"),
+        )
+        return evidence, version
+
+    def _revise_candidate(self, version):
+        proposal = self.proposal_revise(
+            self.record_ref(version),
+            self.ingest_event(privacy_class="public-example"),
+        )
+        return self.register_candidate(
+            self._j01b_context,
+            proposal,
+            work=self._j01b_work,
+            artifact_id=CAND_A,
+        )
+
+    def _detail(self, candidate, *, access=None):
+        return self.facade.candidate_detail(
+            access if access is not None else self.access(),
+            candidate_id=candidate.artifact_id,
+            artifact_version=1,
+        )
+
+    def _gate_spy(self):
+        original = facade_module.belief_evidence_is_live
+        return mock.patch.object(
+            facade_module, "belief_evidence_is_live", wraps=original
+        )
+
+    def test_j01b_ac01_deleted_evidence_blanks_the_current_view(self) -> None:
+        evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+        self.delete_event(evidence.event_id)
+
+        detail = self._detail(candidate)
+
+        self.assertIsNone(detail.current)
+        self.assertEqual("redacted", detail.current_state)
+        self.assertEqual((), detail.diff)
+        self.assertFalse(detail.can_approve)
+        self.assertTrue(detail.can_reject)
+        self.assertEqual("current_redacted", detail.eligibility_reason)
+
+    def test_j01b_ac02_blocked_current_projects_no_body_fields(self) -> None:
+        evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+        self.delete_event(evidence.event_id)
+
+        detail = self._detail(candidate)
+
+        self.assertIsNone(detail.current)
+        self.assertEqual("redacted", detail.current_state)
+        self.assertEqual((), detail.diff)
+        self.assertIsNone(detail.detail)
+        # No current projection exists, so the stored claim/status/strength
+        # cannot be read from the detail; only the candidate's own proposal
+        # remains, which is a different object.
+        self.assertNotEqual("available", detail.current_state)
+
+    def test_j01b_ac03_live_evidence_keeps_the_current_view(self) -> None:
+        _evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+
+        with self._gate_spy() as spy:
+            detail = self._detail(candidate)
+
+        self.assertEqual(1, spy.call_count)
+        self.assertIsNotNone(detail.current)
+        self.assertEqual("available", detail.current_state)
+        self.assertEqual("capability:file-read", detail.current.claim)
+        self.assertEqual("supported", detail.current.status)
+        self.assertIn(
+            detail.current.strength,
+            ("insufficient", "limited", "moderate", "strong"),
+        )
+        self.assertTrue(detail.can_approve)
+
+    def test_j01b_ac04_deleted_record_stays_current_redacted(self) -> None:
+        _evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+        self.delete_record(version.record_id)
+
+        detail = self._detail(candidate)
+
+        self.assertIsNone(detail.current)
+        self.assertEqual("redacted", detail.current_state)
+        self.assertFalse(detail.can_approve)
+        self.assertEqual("current_redacted", detail.eligibility_reason)
+
+    def test_j01b_ac05_missing_target_stays_current_missing(self) -> None:
+        missing = {
+            "ref_type": "record",
+            "namespace": NS,
+            "record_id": str(uuid.uuid4()),
+            "record_version": 1,
+        }
+        context = self.build_context()
+        work = self.work_for(context.trigger_ref.event_id)
+        proposal = self.proposal_revise(
+            missing, self.ingest_event(privacy_class="public-example")
+        )
+        candidate = self.register_candidate(
+            context, proposal, work=work, artifact_id=CAND_A
+        )
+
+        with self._gate_spy() as spy:
+            detail = self._detail(candidate)
+
+        self.assertEqual(0, spy.call_count)
+        self.assertIsNone(detail.current)
+        self.assertEqual("missing", detail.current_state)
+        self.assertFalse(detail.can_approve)
+        self.assertEqual("current_missing", detail.eligibility_reason)
+
+    def test_j01b_ac06a_privacy_failure_never_reaches_the_gate(self) -> None:
+        context = self.build_context()
+        work = self.work_for(context.trigger_ref.event_id)
+        restricted = self.store.append_record_version(
+            namespace=NS,
+            record_id=str(uuid.uuid4()),
+            record_version=1,
+            kind="belief",
+            body=self.belief_body(claim="capability:restricted"),
+            status="supported",
+            schema_version="1",
+            privacy_class="restricted",
+            scope={"scene": "test.scene"},
+        )
+        proposal = self.proposal_revise(
+            self.record_ref(restricted),
+            self.ingest_event(privacy_class="public-example"),
+        )
+        candidate = self.register_candidate(
+            context, proposal, work=work, artifact_id=CAND_A
+        )
+
+        with self._gate_spy() as spy:
+            detail = self._detail(candidate)
+
+        self.assertEqual(0, spy.call_count)
+        self.assertIsNone(detail.current)
+        self.assertEqual("redacted", detail.current_state)
+
+    def test_j01b_ac06b_namespace_mismatch_never_reaches_the_gate(self) -> None:
+        other = RecordRef(
+            namespace=NS_B, record_id=str(uuid.uuid4()), record_version=1
+        )
+        with self._gate_spy() as spy:
+            with self.assertRaises(CorruptStore):
+                self.facade._read_current(NS, other, self.access())
+        self.assertEqual(0, spy.call_count)
+
+    def test_j01b_ac06c_missing_permission_never_reaches_the_gate(self) -> None:
+        _evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+        denied = self.access(permissions=frozenset({"work.scan"}))
+
+        with self._gate_spy() as spy:
+            with self.assertRaises(AuthorizationRequired):
+                self._detail(candidate, access=denied)
+
+        self.assertEqual(0, spy.call_count)
+
+    def test_j01b_ac07_no_public_semantics_were_added(self) -> None:
+        self.assertEqual(
+            (
+                "candidate",
+                "proposal",
+                "structural_validation",
+                "current",
+                "current_state",
+                "diff",
+                "sources",
+                "can_approve",
+                "can_reject",
+                "eligibility_reason",
+                "redacted",
+                "detail",
+            ),
+            tuple(field.name for field in fields(ReviewCandidateDetail)),
+        )
+        evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+        self.delete_event(evidence.event_id)
+        detail = self._detail(candidate)
+        self.assertIn(detail.current_state, ("not_applicable", "redacted", "missing", "available"))
+        self.assertEqual("current_redacted", detail.eligibility_reason)
+
+    def test_j01b_ac12a_criterion_raises_on_a_missing_source(self) -> None:
+        class _MissingEventStore:
+            def event_is_deleted(self, namespace, event_id):
+                return False
+
+            def event_header(self, namespace, event_id):
+                return None
+
+        body = self.belief_body(
+            evidence_links=[
+                self.evidence_link(self.event_ref(str(uuid.uuid4())))
+            ]
+        )
+        with self.assertRaises(CorruptStore):
+            belief_evidence_is_live(
+                _MissingEventStore(), namespace=NS, body=body
+            )
+
+    def test_j01b_ac12b_corruption_is_not_downgraded_by_the_facade(self) -> None:
+        _evidence, version = self._evidence_belief()
+        candidate = self._revise_candidate(version)
+
+        with mock.patch.object(
+            facade_module,
+            "belief_evidence_is_live",
+            side_effect=CorruptStore("synthetic missing source"),
+        ):
+            with self.assertRaises(CorruptStore):
+                self._detail(candidate)

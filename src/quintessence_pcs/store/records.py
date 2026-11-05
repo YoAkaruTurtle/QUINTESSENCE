@@ -34,7 +34,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Union
+from typing import Any, Iterator, Mapping, Union
 
 from ..foundation import identifiers
 from ..foundation.errors import (
@@ -105,6 +105,17 @@ class RecordStore:
         self._tx_depth = 0
         # namespace -> revision reserved by the current transaction
         self._tx_revisions: dict[str, int] = {}
+        # J10 W1: recovery bookkeeping.  A store opened with ``None`` for the
+        # ledger has no independent proof of what it deleted, so the gate stays
+        # closed unless the operator declares an explicitly unprotected run.
+        self._db_path: Path | None = None
+        self.deletion_ledger_dir: Path | None = None
+        self.deletion_anchor_dir: Path | None = None
+        self.deletion_adopt: dict[str, str] | None = None
+        self.ps06_unprotected: dict[str, str] | None = None
+        self.restore_decision = None
+        self._deletion_ledger = None
+        self._ledger_clock = None
 
     # ------------------------------------------------------------------ open
 
@@ -115,8 +126,20 @@ class RecordStore:
         *,
         migrations_dir: Union[str, Path, None] = None,
         apply_migrations: bool = True,
+        deletion_ledger_dir: Union[str, Path, None] = "auto",
+        deletion_anchor_dir: Union[str, Path, None] = "auto",
+        deletion_adopt: Mapping[str, str] | None = None,
+        ps06_unprotected: Mapping[str, str] | None = None,
+        ledger_clock: object | None = None,
     ) -> "RecordStore":
-        """Open (and by default migrate) a PCS database file."""
+        """Open (and by default migrate) a PCS database file.
+
+        ``"auto"`` (the default) keeps a new store protected: the ledger and the
+        anchor sit next to the database.  The desktop host always passes the
+        configured directories, which is where the production layout comes
+        from; ``None`` means "deliberately not configured" and closes the gate
+        unless ``ps06_unprotected`` says otherwise.
+        """
 
         directory = Path(migrations_dir) if migrations_dir is not None else default_migrations_dir()
         connection = connect(db_path)
@@ -133,7 +156,29 @@ class RecordStore:
         except BaseException:
             connection.close()
             raise
-        return cls(connection, directory)
+        store = cls(connection, directory)
+        store._db_path = Path(db_path)
+        base = Path(db_path).parent
+        if isinstance(deletion_ledger_dir, str) and deletion_ledger_dir == "auto":
+            store.deletion_ledger_dir = base / "ledger"
+        elif deletion_ledger_dir is not None:
+            store.deletion_ledger_dir = Path(deletion_ledger_dir)
+        if isinstance(deletion_anchor_dir, str) and deletion_anchor_dir == "auto":
+            store.deletion_anchor_dir = base / "anchor"
+        elif deletion_anchor_dir is not None:
+            store.deletion_anchor_dir = Path(deletion_anchor_dir)
+        if deletion_adopt is not None:
+            store.deletion_adopt = dict(deletion_adopt)
+        if ps06_unprotected is not None:
+            store.ps06_unprotected = dict(ps06_unprotected)
+        store._ledger_clock = ledger_clock
+        # Always evaluate the restore gate. Explicitly disabling the ledger
+        # closes the gate unless a valid unprotected experiment is requested;
+        # an empty database is not proof that no deletion ever happened.
+        from . import recovery
+
+        recovery.bootstrap(store)
+        return store
 
     # ------------------------------------------------------------ lifecycle
 
@@ -150,6 +195,34 @@ class RecordStore:
     @property
     def migrations_dir(self) -> Path:
         return self._migrations_dir
+
+    @property
+    def db_path(self) -> Path:
+        if self._db_path is None:
+            raise RuntimeError("this store was not opened through open()")
+        return self._db_path
+
+    @property
+    def deletion_ledger(self):
+        return self._deletion_ledger
+
+    def require_ready(self, operation: str = "read") -> None:
+        """Refuse business work while the restore gate is closed.
+
+        ``restore_decision`` is ``None`` for stores opened without a ledger:
+        those keep the legacy behaviour, and recovery refuses them instead.
+        """
+
+        decision = self.restore_decision
+        if decision is None or decision.is_open:
+            return
+        from .recovery import RestoreBlocked
+
+        raise RestoreBlocked(
+            decision.reason or "restore_gate_closed",
+            f"{operation} is blocked while the restore gate is closed "
+            f"({decision.reason})",
+        )
 
     def close(self) -> None:
         if self._connection is None:

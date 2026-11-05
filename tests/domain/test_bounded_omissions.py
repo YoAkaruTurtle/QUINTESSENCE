@@ -42,10 +42,32 @@ from quintessence_pcs.foundation.errors import (  # noqa: E402
     SourceRedacted,
 )
 from quintessence_pcs.foundation.jsonutil import canonical_json_text  # noqa: E402
-from quintessence_pcs.store.cognition import MAX_CONTEXT_BYTES  # noqa: E402
+from quintessence_pcs.runtime import ContextService  # noqa: E402
+from quintessence_pcs.runtime.step import CognitionRuntime  # noqa: E402
+
+#: This card was written against the 24 KiB brief.  The product default is
+#: now 64 KiB, so the premise (230 historical omissions overflow *this*
+#: brief) is pinned explicitly instead of tracking the default.
+BRIEF_BYTES = 24 * 1024
 
 
 class BoundedOmissionTests(CognitionTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.contexts = ContextService(
+            self.store,
+            self_view_service=self.self_view,
+            profile_service=self.profiles,
+            pcs_context_max_bytes=BRIEF_BYTES,
+        )
+        self.runtime = CognitionRuntime(
+            self.store,
+            belief_service=self.beliefs,
+            context_service=self.contexts,
+            self_view_service=self.self_view,
+            clock=self.clock,
+        )
+
     # ------------------------------------------------------------- helpers
 
     def _make_deleted_events(self, count: int, prefix: str) -> list[str]:
@@ -140,7 +162,7 @@ class BoundedOmissionTests(CognitionTestCase):
         old_bytes, old_ids = self._historical_omission_bytes()
         self.assertEqual(set(historical), old_ids)
         # The old R1 algorithm would have put all of these into the Context.
-        self.assertGreater(old_bytes, MAX_CONTEXT_BYTES)
+        self.assertGreater(old_bytes, BRIEF_BYTES)
 
         # The terminal state is already durable via Tx1; reconciliation is a
         # no-op and must not move watermarks.
@@ -156,7 +178,7 @@ class BoundedOmissionTests(CognitionTestCase):
         self.assertEqual(set(), self._omitted_event_ids(context))
         self.assertFalse(old_ids & self._omitted_event_ids(context))
         self.assertLessEqual(
-            len(context.rendered_input.encode("utf-8")), MAX_CONTEXT_BYTES
+            len(context.rendered_input.encode("utf-8")), BRIEF_BYTES
         )
         self.assertIn(new.event_id, self._pending_event_ids(context))
         # The audit is still there; only the unrelated Context stopped copying it.
@@ -328,7 +350,7 @@ class BoundedOmissionTests(CognitionTestCase):
         context = self.build_context(trigger.event_id)
         self.assertEqual(set(related), self._omitted_event_ids(context))
         self.assertLessEqual(
-            len(context.rendered_input.encode("utf-8")), MAX_CONTEXT_BYTES
+            len(context.rendered_input.encode("utf-8")), BRIEF_BYTES
         )
         result = self.run_step(trigger.event_id)
         self.assertEqual("committed", result.outcome)

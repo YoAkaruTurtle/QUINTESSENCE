@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 import unittest
 from pathlib import Path
@@ -37,6 +38,34 @@ class DataLockTests(DesktopCase):
         self.assertEqual(reply["error"]["code"], "DATA_LOCKED")
         self.assertEqual(before, self.counts())
         self.assertTrue(first.request("bridge.ping")["ok"])
+
+    def test_read_only_inspection_is_possible_while_the_owner_writes(self) -> None:
+        """Diagnostic SELECTs may run with the writer alive; writes still fail.
+
+        This is the acceptance recipe in ``RG09-BRIDGE-CONTRACT.md``: an
+        explicit read-only connection (``mode=ro`` outside the test guard,
+        ``PRAGMA query_only`` here), a short timeout and a prompt close.  It is
+        not a second writer and it is not a substitute for stopping the GUI
+        before authoritative write checks.
+        """
+
+        first = self.start()
+        self.assertTrue(self._info(first)["host"]["ready"])
+
+        connection = sqlite3.connect(str(self.db_path), timeout=2.0)
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            count = connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertGreater(int(count), 0)
+
+        second = self.start()
+        self.assertEqual(
+            self._info(second)["host"]["reason_code"], "DATA_LOCKED"
+        )
 
     def test_lock_is_released_when_the_owner_exits(self) -> None:
         first = self.start()

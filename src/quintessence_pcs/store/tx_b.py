@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -61,6 +61,7 @@ from ..foundation.errors import (
 from ..foundation.jsonutil import canonical_json_text, sha256_hex, strict_json_loads
 from ..foundation.timeutil import utc_now_rfc3339
 from .errors import ConsultContextNotCommittable, InvalidWorkCompletion
+from .governance import IMPACT_LEVELS
 
 OUTCOME_COMMITTED = "committed"
 OUTCOME_NOOP = "noop"
@@ -82,6 +83,215 @@ _RECEIPT_KEYS = frozenset(
         "committed_at",
     }
 )
+
+#: Canonical insert order for ``cognition_review_decisions``.  The scope method
+#: accepts a mapping, validates it against this whitelist and then inserts the
+#: declared columns in this exact order: column names never come from the
+#: caller, only from this tuple.
+_DECISION_ORDER = (
+    "decision_id",
+    "decision_seq",
+    "candidate_id",
+    "artifact_version",
+    "interaction_id",
+    "decision",
+    "reason_code",
+    "impact",
+    "derived_status",
+    "support_basis",
+    "requires_human",
+    "evidence_linkage",
+    "policy_id",
+    "policy_version",
+    "impact_policy_id",
+    "impact_policy_version",
+    "authority_kind",
+    "authorization_id",
+    "directive_digest",
+    "approval_id",
+    "change_digest",
+    "change_fingerprint",
+    "target_refs_json",
+    "evidence_refs_json",
+    "scope_json",
+    "verification_result",
+    "approval_scope_json",
+    "targets_expected_json",
+    "approval_expires_at",
+    "decision_request_id",
+    "commit_request_id",
+    "review_after",
+    "decided_at",
+)
+_DECISION_FIELDS = frozenset(_DECISION_ORDER)
+_DECISION_REQUIRED = frozenset(
+    {
+        "decision_id",
+        "decision_seq",
+        "candidate_id",
+        "artifact_version",
+        "decision",
+        "reason_code",
+        "impact",
+        "derived_status",
+        "support_basis",
+        "requires_human",
+        "evidence_linkage",
+        "policy_id",
+        "policy_version",
+        "impact_policy_id",
+        "impact_policy_version",
+        "authority_kind",
+        "change_digest",
+        "decision_request_id",
+        "decided_at",
+    }
+)
+
+#: Fixed-width text columns: the value must have exactly this many characters.
+_DECISION_EXACT_LENGTH = {
+    "decision_id": 36,
+    "candidate_id": 36,
+    "interaction_id": 36,
+    "authorization_id": 36,
+    "approval_id": 36,
+    "decision_request_id": 36,
+    "commit_request_id": 36,
+    "change_digest": 71,
+    "directive_digest": 71,
+    "change_fingerprint": 64,
+}
+
+#: Bounded text columns: minimum and maximum length.
+_DECISION_TEXT_BOUNDS = {
+    "reason_code": (1, 64),
+    "support_basis": (1, 64),
+    "policy_id": (1, 128),
+    "policy_version": (1, 64),
+    "impact_policy_id": (1, 128),
+    "impact_policy_version": (1, 64),
+    "target_refs_json": (2, 16384),
+    "evidence_refs_json": (2, 16384),
+    "scope_json": (2, 16384),
+    "approval_scope_json": (2, 16384),
+    "targets_expected_json": (2, 16384),
+    "approval_expires_at": (20, 27),
+    "review_after": (20, 27),
+    "decided_at": (20, 27),
+}
+
+_DECISION_VALUES = frozenset(
+    {
+        "awaiting_human",
+        "deferred",
+        "escalated",
+        "not_authorized",
+        "rejected",
+        "committed",
+        "conflict",
+        "approval_expired",
+        "approval_revoked",
+    }
+)
+#: Single source of truth: the decision table's column vocabulary.
+_IMPACT_VALUES = IMPACT_LEVELS
+_DERIVED_STATUS_VALUES = (
+    "proposed",
+    "supported",
+    "contested",
+    "contradicted",
+    "stale",
+    "none",
+)
+_AUTHORITY_KIND_VALUES = (
+    "manual_approval",
+    "auto_authorization",
+    "user_directive",
+    "none",
+)
+_EVIDENCE_LINKAGE_VALUES = ("verified", "unverified", "not_applicable")
+_VERIFICATION_VALUES = ("unavailable", "supported", "contradicted")
+
+
+def _validate_decision_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one review-decision mapping before it reaches SQL.
+
+    Only the whitelist in :data:`_DECISION_ORDER` is accepted.  Errors are
+    domain errors (``InvalidInput``) rather than ``sqlite3.IntegrityError`` so
+    the caller sees *which* field is wrong.
+    """
+
+    if not isinstance(fields, Mapping):
+        raise InvalidInput("review decision fields must be a mapping")
+    unknown = sorted(str(key) for key in fields if key not in _DECISION_FIELDS)
+    if unknown:
+        raise InvalidInput(
+            "unknown review decision field(s): " + ", ".join(unknown)
+        )
+    missing = sorted(_DECISION_REQUIRED - set(fields))
+    if missing:
+        raise InvalidInput(
+            "review decision is missing field(s): " + ", ".join(missing)
+        )
+
+    checked: dict[str, Any] = {}
+    for name in _DECISION_ORDER:
+        if name not in fields:
+            continue
+        value = fields[name]
+        if name in ("decision_seq", "artifact_version"):
+            if type(value) is not int or value < 1:
+                raise InvalidInput(f"{name} must be a positive integer")
+        elif name == "requires_human":
+            if value not in (0, 1) or type(value) is not int:
+                raise InvalidInput("requires_human must be 0 or 1")
+        elif name == "decision":
+            if value not in _DECISION_VALUES:
+                raise InvalidInput(f"unknown decision {value!r}")
+        elif name == "impact":
+            if value not in _IMPACT_VALUES:
+                raise InvalidInput(f"impact must be one of {', '.join(_IMPACT_VALUES)}")
+        elif name == "derived_status":
+            if value not in _DERIVED_STATUS_VALUES:
+                raise InvalidInput(
+                    "derived_status must be one of "
+                    + ", ".join(_DERIVED_STATUS_VALUES)
+                )
+        elif name == "authority_kind":
+            if value not in _AUTHORITY_KIND_VALUES:
+                raise InvalidInput(
+                    "authority_kind must be one of "
+                    + ", ".join(_AUTHORITY_KIND_VALUES)
+                )
+        elif name == "evidence_linkage":
+            if value not in _EVIDENCE_LINKAGE_VALUES:
+                raise InvalidInput(
+                    "evidence_linkage must be one of "
+                    + ", ".join(_EVIDENCE_LINKAGE_VALUES)
+                )
+        elif name == "verification_result":
+            if value not in _VERIFICATION_VALUES:
+                raise InvalidInput(
+                    "verification_result must be one of "
+                    + ", ".join(_VERIFICATION_VALUES)
+                )
+        else:
+            if not isinstance(value, str):
+                raise InvalidInput(f"{name} must be a string")
+            exact = _DECISION_EXACT_LENGTH.get(name)
+            if exact is not None:
+                if len(value) != exact:
+                    raise InvalidInput(
+                        f"{name} must be exactly {exact} characters"
+                    )
+            else:
+                low, high = _DECISION_TEXT_BOUNDS.get(name, (1, 4096))
+                if not low <= len(value) <= high:
+                    raise InvalidInput(
+                        f"{name} must be between {low} and {high} characters"
+                    )
+        checked[name] = value
+    return checked
 
 
 @dataclass(frozen=True)
@@ -170,10 +380,13 @@ class CommitGuard(Protocol):
 class TxScope:
     """Restricted transaction view handed to ``apply``.
 
-    It exposes exactly two write paths, both bound to the snapshot:
+    It exposes exactly four write paths, all bound to the snapshot:
 
     * ``append_record_version`` in the snapshot's namespace;
-    * ``complete_work`` for one pending-work row of that namespace (PCS2-008).
+    * ``complete_work`` for one pending-work row of that namespace (PCS2-008);
+    * ``record_review_decision`` for one append-only J06 decision row;
+    * ``link_record_decision`` for the provenance edge of a version this same
+      command appended.
 
     It deliberately has no ``connection`` / ``execute`` / ``delete_*`` member,
     so the ordinary proposal path cannot reach SQL or the deletion API.  Python
@@ -336,6 +549,94 @@ class TxScope:
         self._completed_work = work_id
         return progress
 
+    def record_review_decision(
+        self, *, namespace: str, fields: Mapping[str, Any]
+    ) -> None:
+        """Insert one append-only review decision row inside this transaction.
+
+        This is the J06 governance seam.  It writes exactly one row of
+        ``cognition_review_decisions`` and nothing else: no record version has
+        to be appended, so a command that only records a decision commits as a
+        legal no-op (``outcome="noop"``, unchanged ``state_revision``) while
+        still storing a receipt.
+
+        ``fields`` must name only whitelisted columns; the insert is built from
+        :data:`_DECISION_ORDER`, never from caller-supplied column names.  Any
+        failure marks the scope as failed so a caller cannot swallow the error
+        and commit a half-finished command.
+        """
+
+        try:
+            if self._completed_work is not None:
+                raise InvalidWorkCompletion(
+                    "complete_work() must be the last write of a step; a review "
+                    "decision cannot be recorded after it"
+                )
+            if namespace != self._namespace:
+                raise ScopeViolation(
+                    f"review decision namespace {namespace!r} is not the "
+                    f"snapshot namespace {self._namespace!r}"
+                )
+            checked = _validate_decision_fields(fields)
+            self._store._insert_review_decision_locked(
+                namespace=self._namespace, fields=checked
+            )
+        except BaseException:
+            self._write_failed = True
+            raise
+
+    def link_record_decision(
+        self,
+        *,
+        namespace: str,
+        record_id: str,
+        record_version: int,
+        decision_id: str,
+        decided_at: str,
+    ) -> None:
+        """Record the provenance edge from one version this command appended.
+
+        ``(record_id, record_version)`` must already be in :attr:`appended`, so
+        a command cannot claim provenance for a version it did not write in the
+        same transaction.
+        """
+
+        try:
+            if self._completed_work is not None:
+                raise InvalidWorkCompletion(
+                    "complete_work() must be the last write of a step; a "
+                    "provenance row cannot be recorded after it"
+                )
+            if namespace != self._namespace:
+                raise ScopeViolation(
+                    f"provenance namespace {namespace!r} is not the snapshot "
+                    f"namespace {self._namespace!r}"
+                )
+            appended = {
+                (ref.record_id, ref.record_version) for ref in self._appended
+            }
+            if (record_id, record_version) not in appended:
+                raise InvalidInput(
+                    "link_record_decision must name a record version this "
+                    "command appended"
+                )
+            if type(record_version) is not int or record_version < 1:
+                raise InvalidInput("record_version must be a positive integer")
+            if not isinstance(decision_id, str) or len(decision_id) != 36:
+                raise InvalidInput("decision_id must be a 36-character string")
+            if not isinstance(decided_at, str) or not 20 <= len(decided_at) <= 27:
+                raise InvalidInput("decided_at must be a UTC timestamp string")
+            self._store._insert_record_decision_locked(
+                namespace=self._namespace,
+                record_id=record_id,
+                record_version=record_version,
+                decision_id=decision_id,
+                decided_at=decided_at,
+            )
+        except BaseException:
+            self._write_failed = True
+            raise
+
     def __getattr__(self, name: str) -> Any:
         if name in self._FORBIDDEN or name.startswith("delete_"):
             raise AttributeError(
@@ -403,6 +704,8 @@ class TxBMixin:
         apply: Callable[[TxScope], None],
         namespace: str | None = None,
         guard: CommitGuard | None = None,
+        appended_events: Collection[str] = (),
+        allow_consult_context: bool = False,
     ) -> CommitReceipt:
         """Commit one command on top of a persisted snapshot.
 
@@ -411,6 +714,13 @@ class TxBMixin:
         ``SCOPE_VIOLATION``.  The digest is always computed here from
         ``(namespace, operation, context_id, canonical payload)``; callers
         cannot pass one in.
+
+        ``allow_consult_context`` is the one explicit exception to the
+        "consult Contexts have no commit basis" rule.  RG05 decision 01 needs a
+        chat turn's consult Context as the cognition candidate basis; the caller
+        that sets it (the change-bundle commit only) still runs the ordinary
+        watermark checks and its guard re-proves ``require_live_context`` and
+        every exact source.  Every other commit path keeps the default refusal.
 
         ``guard`` is the optional C06a in-transaction hook.  See
         :class:`CommitGuard` for exactly when its methods run and what they
@@ -442,7 +752,7 @@ class TxBMixin:
                     f"snapshot {context_id} belongs to namespace "
                     f"{snapshot.namespace!r}, not {expected_namespace!r}"
                 )
-            if snapshot.context_kind == "consult":
+            if snapshot.context_kind == "consult" and not allow_consult_context:
                 raise ConsultContextNotCommittable(
                     f"context {context_id} is a consult Context; it has no commit basis"
                 )
@@ -467,9 +777,12 @@ class TxBMixin:
                     f"{current['privacy_epoch']}; the proposal basis is stale"
                 )
             if snapshot.context_event_seq != current["last_event_seq"]:
-                raise ContextStale(
-                    f"last_event_seq moved from {snapshot.context_event_seq} to "
-                    f"{current['last_event_seq']}; the proposal basis is stale"
+                _require_only_own_events(
+                    self,
+                    ns,
+                    snapshot.context_event_seq,
+                    current["last_event_seq"],
+                    appended_events,
                 )
             if snapshot.state_revision != current["state_revision"]:
                 raise StateRevisionConflict(
@@ -644,6 +957,48 @@ class TxBMixin:
             "privacy_epoch": int(row["privacy_epoch"]),
         }
 
+    # ------------------------------------------------------- J06 governance
+
+    def _insert_review_decision_locked(
+        self, *, namespace: str, fields: Mapping[str, Any]
+    ) -> None:
+        """Insert one validated decision row; caller owns the transaction.
+
+        Column names come from :data:`_DECISION_ORDER` only, so this helper
+        cannot be used to write arbitrary SQL.
+        """
+
+        names = tuple(name for name in _DECISION_ORDER if name in fields)
+        columns = ("namespace",) + names
+        values = (namespace,) + tuple(fields[name] for name in names)
+        placeholders = ", ".join("?" for _ in columns)
+        self._require_connection().execute(
+            "INSERT INTO cognition_review_decisions ("
+            + ", ".join(columns)
+            + ") VALUES ("
+            + placeholders
+            + ")",
+            values,
+        )
+
+    def _insert_record_decision_locked(
+        self,
+        *,
+        namespace: str,
+        record_id: str,
+        record_version: int,
+        decision_id: str,
+        decided_at: str,
+    ) -> None:
+        """Insert one provenance edge; caller owns the transaction."""
+
+        self._require_connection().execute(
+            "INSERT INTO cognition_record_decisions ("
+            "namespace, record_id, record_version, decision_id, decided_at"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (namespace, record_id, record_version, decision_id, decided_at),
+        )
+
 
 def _request_digest(
     namespace: str, operation: str, context_id: str, payload: Mapping[str, Any]
@@ -740,3 +1095,52 @@ __all__ = [
     "TxBMixin",
     "TxScope",
 ]
+
+
+def _require_only_own_events(
+    store: Any,
+    namespace: str,
+    before: int,
+    now: int,
+    appended_events: Collection[str],
+) -> None:
+    """Allow the event watermark to move only for events this turn produced.
+
+    A fetch in the same turn ingests a fetch event, which advances
+    ``last_event_seq``; without this the commit that cites that very event could
+    never succeed.  The exception is deliberately narrow and has to prove two
+    things, not one:
+
+    * every event in ``(before, now]`` is on the host's whitelist -- so an
+      injected foreign event still fails;
+    * the number of events in that range equals ``now - before`` -- so a hole
+      (an event that is missing from the range) or an extra row cannot slip
+      through just because the surviving ids happen to be whitelisted.
+
+    The whitelist itself is host state: handlers record the id of an event they
+    just created, and nothing else can add to it.  A collection naming a kind or
+    a prefix would hand the gate to string matching.
+    """
+
+    if not appended_events:
+        raise ContextStale(
+            f"last_event_seq moved from {before} to {now}; the proposal basis is stale"
+        )
+    rows = store._require_connection().execute(  # noqa: SLF001 - same store
+        "SELECT event_id FROM event_journal "
+        "WHERE namespace = ? AND event_seq > ? AND event_seq <= ? "
+        "ORDER BY event_seq",
+        (namespace, before, now),
+    ).fetchall()
+    ids = [row[0] for row in rows]
+    if len(ids) != now - before:
+        raise ContextStale(
+            "the event range this turn produced is not contiguous; "
+            "the proposal basis is stale"
+        )
+    allowed = set(appended_events)
+    if any(event_id not in allowed for event_id in ids):
+        raise ContextStale(
+            "an event this context did not produce appeared while it was open; "
+            "the proposal basis is stale"
+        )

@@ -84,6 +84,13 @@ from ..store.collaboration import (
     ArtifactRow,
 )
 from ..store.experience import ExperienceAccess
+from .generation import (
+    GenerationFailure,
+    allowed_references as _allowed_references,
+    artifact_sources as _artifact_sources,
+    generate_once,
+    phase_label,
+)
 
 #: One interaction may make at most two logical generations and one query.
 #: A format repair consumes a generation; a query consumes the query budget.
@@ -112,9 +119,6 @@ _MAX_HOST_INSTANCE = 256
 _MAX_ACCESS_REF = 512
 _MAX_POLICY_REF = 512
 _MAX_PURPOSE = 64
-_ATTEMPT_REF_KEYS = frozenset(
-    {"authorization_id", "attempt_id", "attempt_no", "request_hash"}
-)
 
 
 # --------------------------------------------------------------------------
@@ -498,99 +502,39 @@ class ConsultFacade:
         run.generations += 1
         allowed = _allowed_references(context)
         try:
-            binder = self._model.bind_run(
-                namespace=access.namespace, context=context
+            result = generate_once(
+                self._store,
+                self._model,
+                context=context,
+                allowed_references=allowed,
+                feedback=feedback,
             )
-            with binder:
-                raw = self._model.propose(
-                    rendered_input=context.rendered_input,
-                    references=allowed,
-                    feedback=feedback,
-                )
-        except (CorruptStore, DbBusy):
-            raise
-        except Exception as exc:  # noqa: BLE001 - model refusal is a result
-            raise _ConsultAbort("failed", _phase_label("model", exc)) from exc
-
-        try:
-            evidence = self._model.last_attempt_evidence(
-                run_id=context.run_id, context_id=context.context_id
+        except GenerationFailure as exc:
+            # Compatibility: the legacy facade reported the attempt-evidence
+            # labels without a phase prefix.
+            detail = (
+                exc.detail
+                if exc.phase == "attempt_evidence"
+                else f"{exc.phase}:{exc.detail}"
             )
-        except (CorruptStore, DbBusy):
-            raise
-        except Exception as exc:  # noqa: BLE001 - a broken adapter is a result
-            raise _ConsultAbort(
-                "failed", _phase_label("attempt_evidence", exc)
-            ) from exc
-        if evidence is None:
-            raise _ConsultAbort("failed", "attempt_evidence_missing")
-        if evidence.content != raw:
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
-        self._require_exact_attempt(context, evidence)
-        run.evidence = evidence
-
-        try:
-            output = parse_collab_output(
-                raw, mode="consult", allowed_references=allowed
-            )
-        except InvalidInput as exc:
-            if _declared_action(raw) == "propose":
-                # A propose is a semantic refusal, not a format slip: C11 never
-                # commits cognition and never repairs this into an answer.
-                raise _ConsultAbort("failed", "propose") from exc
+            raise _ConsultAbort("failed", detail) from exc
+        if result.parse_error is not None:
+            if _declared_action(result.raw) == "propose":
+                raise _ConsultAbort("failed", "propose",)
             if run.generations < MAX_GENERATIONS:
                 return self._generate(
                     run,
                     access,
                     request,
                     context,
-                    feedback=repair_feedback(exc),
+                    feedback=repair_feedback(result.parse_error),
                 )
             raise _ConsultAbort(
-                "failed", _phase_label("format", exc)
-            ) from exc
-        return output, evidence
-
-    def _require_exact_attempt(
-        self, context: ConsultContextEnvelope, evidence: Any
-    ) -> None:
-        """Prove the evidence is the settled attempt of this exact generation."""
-
-        ref = evidence.attempt_ref
-        if not isinstance(ref, Mapping) or set(ref) != _ATTEMPT_REF_KEYS:
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
-        attempt_id = ref.get("attempt_id")
-        if not isinstance(attempt_id, str):
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
-        try:
-            _require_uuid_text(attempt_id, "attempt_id")
-        except StorageError as exc:
-            raise _ConsultAbort(
-                "failed", "attempt_evidence_mismatch"
-            ) from exc
-        attempts = self._store.model_attempts_for_run(context.run_id)
-        matches = [
-            attempt
-            for attempt in attempts
-            if attempt.attempt_id == attempt_id
-        ]
-        if len(matches) != 1:
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
-        attempt = matches[0]
-        if (
-            attempt.namespace != context.namespace
-            or attempt.context_id != context.context_id
-            or attempt.authorization_id != ref.get("authorization_id")
-            or attempt.attempt_no != ref.get("attempt_no")
-            or attempt.request_hash != ref.get("request_hash")
-            or attempt.outcome != "ok"
-            or not attempt.finished
-        ):
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
-        # The evidence must be the attempt this generation just produced, not
-        # an older successful attempt of the same run/Context.
-        if not attempts or attempts[-1].attempt_no != attempt.attempt_no:
-            raise _ConsultAbort("failed", "attempt_evidence_mismatch")
+                "failed", _phase_label("format", result.parse_error)
+            )
+        run.evidence = result.evidence
+        assert result.output is not None
+        return result.output, result.evidence
 
     def _require_current_final_context(
         self, context: ConsultContextEnvelope, access: ConsultHostAccess
@@ -803,68 +747,6 @@ def _query_material(result: QueryResult) -> ConsultQueryMaterial:
         raise _ConsultAbort("failed", _phase_label("query_material", exc)) from exc
 
 
-def _allowed_references(
-    context: ConsultContextEnvelope,
-) -> tuple[dict[str, Any], ...]:
-    """The parser's closed reference vocabulary, from the formal Context only."""
-
-    refs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(reference: Mapping[str, Any]) -> None:
-        value = dict(reference)
-        key = canonical_json_text(value)
-        if key not in seen:
-            seen.add(key)
-            refs.append(value)
-
-    for reference in context.collab_source_refs:
-        add(reference)
-    for entry in context.read_set:
-        add(entry.ref.to_dict())
-    for source in context.sources:
-        if source.ref_kind == "event":
-            add(
-                EventRef(
-                    namespace=context.namespace, event_id=source.ref_id
-                ).to_dict()
-            )
-    return tuple(refs)
-
-
-def _artifact_sources(context: ConsultContextEnvelope) -> list[dict[str, Any]]:
-    """Every exact source the final Context actually used, including inputs."""
-
-    refs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(reference: Mapping[str, Any]) -> None:
-        value = dict(reference)
-        key = canonical_json_text(value)
-        if key not in seen:
-            seen.add(key)
-            refs.append(value)
-
-    for reference in context.collab_source_refs:
-        add(reference)
-    for source in context.sources:
-        if source.ref_kind == "event":
-            add(
-                EventRef(
-                    namespace=context.namespace, event_id=source.ref_id
-                ).to_dict()
-            )
-        else:
-            add(
-                RecordRef(
-                    namespace=context.namespace,
-                    record_id=source.ref_id,
-                    record_version=int(source.ref_version),
-                ).to_dict()
-            )
-    return refs
-
-
 def _declared_action(raw: Any) -> str | None:
     """The action a rejected JSON object declared, if it is one object."""
 
@@ -922,9 +804,9 @@ def _result(run: _ConsultRun, state: str, detail: str | None) -> ConsultResult:
 
 
 def _phase_label(phase: str, exc: BaseException) -> str:
-    code = getattr(exc, "code", None)
-    label = code if isinstance(code, str) and code else type(exc).__name__
-    return f"{phase}:{label}"
+    """Legacy two-argument label (the shared helper is one-argument)."""
+
+    return f"{phase}:{phase_label(exc)}"
 
 
 def _require_text(value: Any, field: str, max_length: int) -> str:

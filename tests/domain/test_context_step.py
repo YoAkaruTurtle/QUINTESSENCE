@@ -388,13 +388,16 @@ class ReadSetTests(CognitionTestCase):
                 scope={},
                 authorization_ref="auth:episode-test",
             )
-        limit = 6500
-        with mock.patch(
-            "quintessence_pcs.runtime.context.MAX_CONTEXT_BYTES", limit
-        ), mock.patch(
-            "quintessence_pcs.store.cognition.MAX_CONTEXT_BYTES", limit
-        ):
-            context = self.build_context()
+        trigger = self.ingest()
+        full = self.build_context(trigger.event_id)
+        limit = full.budget_view["used_bytes"] - 256
+        # J07 exposes the bound on the service; monkeypatching a module
+        # constant no longer changes an already-constructed service.
+        from quintessence_pcs.runtime.context import ContextService
+        with mock.patch.object(self, "contexts", ContextService(
+            self.store, pcs_context_max_bytes=limit
+        )):
+            context = self.build_context(trigger.event_id)
         self.assertTrue(context.omissions)
         self.assertLessEqual(
             context.budget_view["used_bytes"], limit
@@ -460,6 +463,32 @@ class ReadSetTests(CognitionTestCase):
                 ref.record_id for ref in parse_self_view_body(version)["belief_refs"]
             }
             self.assertNotIn(belief.record_id, referenced)
+
+    def test_expression_preference_is_not_review_cognition_material(self) -> None:
+        marker_claim = "用户在聊天中希望回答更详细。"
+        marker = self.propose(
+            body=self.belief_body(
+                claim=marker_claim,
+                claim_type="user_preference",
+                review_condition="expression_preference:length=detailed",
+            )
+        )
+        normal = self.propose(
+            body=self.belief_body(
+                claim="用户喜欢红色。",
+                claim_type="user_preference",
+            )
+        )
+        trigger = self.ingest()
+        context = self.build_context(trigger.event_id)
+        refs = {ref.record_id for ref in context.belief_refs}
+        self.assertNotIn(marker.record_id, refs)
+        self.assertIn(normal.record_id, refs)
+        self.assertNotIn(marker_claim, context.rendered_input)
+        self.assertIn("用户喜欢红色。", context.rendered_input)
+        self.assertNotIn(
+            marker.record_id, {entry.ref.record_id for entry in context.read_set}
+        )
 
     def test_event_body_text_is_not_copied_into_the_context(self) -> None:
         secret = f"UNIQUE-EVENT-BODY-{uuid.uuid4().hex}"

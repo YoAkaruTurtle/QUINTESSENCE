@@ -8,6 +8,7 @@ reference is trusted by provenance and the active version does not drift.
 
 from __future__ import annotations
 
+import copy
 import sqlite3
 import sys
 import unittest
@@ -581,6 +582,85 @@ class ActiveProfileSchemaTests(DomainTestCase):
         ).fetchone()
         self.assertIsNone(pointer["active_profile_record_id"])
         self.assertIsNone(pointer["active_profile_version"])
+
+
+class ProfileBodySchemaVersionTests(DomainTestCase):
+    """RG06: schema "2" adds only the optional pre-tool commentary on examples."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.review_ref = self.approve_review()
+        self.body = self.profile_body(review_ref=self.review_ref)
+
+    def _publish(self, body: dict, *, schema_version: str | None = None):
+        kwargs = {} if schema_version is None else {"schema_version": schema_version}
+        return self.persona.publish_profile(
+            namespace=NS,
+            profile_id=PROFILE_ID,
+            body=body,
+            review_ref=self.review_ref,
+            authorization_ref="auth:profile-publish",
+            **kwargs,
+        )
+
+    def test_schema_two_accepts_the_optional_pre_tool_commentary(self) -> None:
+        body = copy.deepcopy(self.body)
+        body["examples"][0]["pre_tool_commentary"] = "Synthetic pre-tool line."
+        version = self._publish(body, schema_version="2")
+        self.assertEqual("2", version.schema_version)
+        stored = self.store.get_version(NS, version.record_id, version.record_version)
+        self.assertEqual(
+            "Synthetic pre-tool line.",
+            stored.body["examples"][0]["pre_tool_commentary"],
+        )
+
+    def test_schema_three_accepts_ordered_assistant_messages(self) -> None:
+        body = copy.deepcopy(self.body)
+        del body["examples"][0]["assistant"]
+        body["examples"][0]["assistant_messages"] = ["First bubble.", "Second bubble."]
+        version = self._publish(body)
+        self.assertEqual("3", version.schema_version)
+        stored = self.store.get_version(NS, version.record_id, version.record_version)
+        self.assertEqual(
+            ["First bubble.", "Second bubble."],
+            stored.body["examples"][0]["assistant_messages"],
+        )
+
+    def test_schema_three_rejects_assistant_and_messages_together(self) -> None:
+        body = copy.deepcopy(self.body)
+        body["examples"][0]["assistant_messages"] = ["First bubble.", "Second bubble."]
+        with self.assertRaises(InvalidInput):
+            self._publish(body)
+
+    def test_schema_three_requires_at_least_two_messages(self) -> None:
+        body = copy.deepcopy(self.body)
+        del body["examples"][0]["assistant"]
+        body["examples"][0]["assistant_messages"] = ["Only bubble."]
+        with self.assertRaises(InvalidInput):
+            self._publish(body)
+
+    def test_schema_two_rejects_assistant_messages(self) -> None:
+        body = copy.deepcopy(self.body)
+        del body["examples"][0]["assistant"]
+        body["examples"][0]["assistant_messages"] = ["First bubble.", "Second bubble."]
+        with self.assertRaises(InvalidInput):
+            self._publish(body, schema_version="2")
+
+    def test_schema_one_still_accepts_the_old_body_exactly(self) -> None:
+        version = self._publish(self.body, schema_version="1")
+        self.assertEqual("1", version.schema_version)
+
+    def test_schema_one_rejects_pre_tool_commentary(self) -> None:
+        body = copy.deepcopy(self.body)
+        body["examples"][0]["pre_tool_commentary"] = "Synthetic pre-tool line."
+        with self.assertRaises(InvalidInput):
+            self._publish(body, schema_version="1")
+
+    def test_unknown_example_field_is_still_rejected(self) -> None:
+        body = copy.deepcopy(self.body)
+        body["examples"][0]["approved_by"] = "model"
+        with self.assertRaises(InvalidInput):
+            self._publish(body)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -92,9 +92,28 @@ class ManifestValidationTests(unittest.TestCase):
         with self.assertRaises(ManifestError):
             ModelManifest.from_mapping(mapping)
 
-    def test_thinking_must_be_explicitly_disabled(self) -> None:
+    def test_thinking_enabled_requires_effort_and_protocol(self) -> None:
         with self.assertRaises(ManifestError):
             ModelManifest.from_mapping(manifest_mapping(thinking="enabled"))
+
+    def test_thinking_enabled_is_allowed_with_high_effort_and_protocol(self) -> None:
+        mapping = manifest_mapping(thinking="enabled")
+        del mapping["temperature"]
+        mapping["reasoning_effort"] = "high"
+        mapping["protocol_version"] = "EXP-01-THINKING-CANDIDATE-v1"
+        manifest = ModelManifest.from_mapping(mapping)
+        self.assertEqual("enabled", manifest.thinking)
+        self.assertEqual("high", manifest.reasoning_effort)
+        self.assertEqual(
+            "EXP-01-THINKING-CANDIDATE-v1", manifest.protocol_version
+        )
+
+    def test_thinking_enabled_rejects_temperature(self) -> None:
+        mapping = manifest_mapping(thinking="enabled")
+        mapping["reasoning_effort"] = "high"
+        mapping["protocol_version"] = "EXP-01-THINKING-CANDIDATE-v1"
+        with self.assertRaises(ManifestError):
+            ModelManifest.from_mapping(mapping)
 
     def test_temperature_must_be_zero(self) -> None:
         with self.assertRaises(ManifestError):
@@ -190,6 +209,34 @@ class RequestBodyTests(unittest.TestCase):
             "max_tokens",
             "stream",
         })
+
+    def test_enabled_body_has_thinking_and_no_temperature(self) -> None:
+        mapping = manifest_mapping(thinking="enabled")
+        del mapping["temperature"]
+        mapping["reasoning_effort"] = "high"
+        mapping["protocol_version"] = "EXP-01-THINKING-CANDIDATE-v1"
+        manifest = ModelManifest.from_mapping(mapping)
+        document = json.loads(
+            build_request_body(
+                manifest, rendered_input=self.rendered, max_tokens=512
+            )
+        )
+        self.assertEqual({"type": "enabled"}, document["thinking"])
+        self.assertEqual("high", document["reasoning_effort"])
+        self.assertNotIn("temperature", document)
+        self.assertEqual(512, document["max_tokens"])
+        self.assertIs(False, document["stream"])
+        self.assertEqual(
+            {
+                "model",
+                "messages",
+                "thinking",
+                "reasoning_effort",
+                "max_tokens",
+                "stream",
+            },
+            set(document),
+        )
 
     def test_repair_adds_the_previous_assistant_and_feedback_only(self) -> None:
         text = build_request_body(

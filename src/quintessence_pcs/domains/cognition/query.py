@@ -26,6 +26,15 @@ Three properties drive the implementation:
   EventRefs and unavailable exact refs only feed the *internal* omission
   counts.
 
+* **A Belief is only readable while its sources are.**  Both the current and
+  the exact read apply the deletion barrier to the evidence and premise links
+  of the version they are about to return.  A version whose sources are gone
+  is not delivered: the current query records the internal
+  ``evidence_not_live`` omission and skips it, the exact query answers
+  ``unavailable`` like a missing ref, and the stored status is never
+  rewritten.  The gate runs *after* the identity, privacy, scope and status
+  checks, so it can never be used to probe whether a hidden record exists.
+
 Model-visible text is limited to :meth:`QueryResult.to_body`.  That projection
 drops every sensitive omission reason (``not_authorized``,
 ``source_ref_not_authorized``, ``source_ref_redacted``, ``redacted``,
@@ -67,6 +76,7 @@ from ...foundation.errors import (
 from ...foundation.jsonutil import canonical_json_text
 from ...store.cognition import CognitionStore
 from ...store.records import RecordVersion
+from ..aliases import expand_query_entity_ids
 from ..memory.search import (
     MAX_LIMIT as MAX_QUERY_LIMIT,
     MAX_QUERY_LENGTH,
@@ -79,11 +89,13 @@ from .beliefs import (
     BELIEF_KIND,
     BELIEF_SCHEMA_VERSION,
     CLAIM_TYPES,
+    belief_evidence_is_live,
     parse_belief_body,
 )
+from .epistemic import is_expression_preference_body
 
 #: Version label carried by every result for C11 and the audit trail.
-QUERY_POLICY_VERSION = "collab.v1.query.v1"
+QUERY_POLICY_VERSION = "collab.v1.query.v2"
 
 #: The purposes C10 understands.  ``access.purposes`` may carry other C09
 #: labels (for example ``"review"``); only these three change query behaviour.
@@ -125,6 +137,7 @@ INTERNAL_OMISSION_REASONS = (
     "source_ref_redacted",
     "redacted",
     "unavailable",
+    "evidence_not_live",
 )
 
 #: Deterministic order used for both the internal tuple and the public subset.
@@ -266,7 +279,12 @@ class QueryResult:
     source_refs: tuple[RecordRef | EventRef, ...]
 
     def _projection(self, *, include_revision: bool) -> dict[str, Any]:
-        """The one field set both serializations share."""
+        """The one field set both serializations share.
+
+        Internal omission reasons never leave this object: both serializations
+        keep only the public reason set, so neither a prompt nor a persisted
+        artifact can be used to count hidden records.
+        """
 
         body: dict[str, Any] = {
             "query_kind": self.query_kind,
@@ -300,7 +318,9 @@ class QueryResult:
 
         Only C11's ``register_artifact`` persistence and audit may use this
         string.  It must never be sent to a model or copied into a
-        model-visible Context or Experience field.
+        model-visible Context or Experience field.  Like ``to_body`` it keeps
+        only the public omission reasons; the internal counts stay on the
+        in-memory :class:`QueryResult`.
         """
 
         return canonical_json_text(self._projection(include_revision=True))
@@ -403,7 +423,9 @@ class CognitionQueryService:
                 f"query ref belongs to namespace {ref.namespace!r}, "
                 f"not {access.namespace!r}"
             )
-        query_scope = _normalize_query_scope(query.scope)
+        query_scope = expand_query_entity_ids(
+            self._store, access.namespace, _normalize_query_scope(query.scope)
+        )
         _require_consult(access, what="Belief queries")
 
         ns = access.namespace
@@ -443,6 +465,11 @@ class CognitionQueryService:
             )
 
         body = parse_belief_body(version)
+        if not belief_evidence_is_live(self._store, namespace=ns, body=body):
+            # A deleted source must not keep this judgement readable.  The
+            # answer is the same ``unavailable`` shape as a missing ref, so the
+            # caller cannot tell "does not exist" from "its evidence is gone".
+            return _unavailable(revision)
         pointer = self._store.record_pointer(ns, ref.record_id)
         if pointer is None:  # pragma: no cover - a version exists without a record
             raise CorruptStore(
@@ -476,7 +503,9 @@ class CognitionQueryService:
     ) -> QueryResult:
         claim_types = _require_claim_types(query.claim_types)
         statuses = _require_statuses(query.statuses)
-        query_scope = _normalize_query_scope(query.scope)
+        query_scope = expand_query_entity_ids(
+            self._store, access.namespace, _normalize_query_scope(query.scope)
+        )
         include_expired = _require_include_expired(query.include_expired)
         limit = _require_limit(query.limit)
         _require_consult(access, what="Belief queries")
@@ -498,6 +527,12 @@ class CognitionQueryService:
                 continue
 
             body = parse_belief_body(version)
+            if is_expression_preference_body(body):
+                # F02's expression preferences live in the Belief table but are
+                # not cognition; keep them out of every current-belief
+                # projection.  The expression layer reads the same record
+                # through its own path.
+                continue
             if claim_types and body["claim_type"] not in claim_types:
                 continue
             if version.status not in statuses:
@@ -506,6 +541,13 @@ class CognitionQueryService:
             expired = _is_expired(body["valid_until"], now)
             if expired and not include_expired:
                 omissions["expired"] += 1
+                continue
+            if not belief_evidence_is_live(self._store, namespace=ns, body=body):
+                # The stored status is not rewritten: the version simply stops
+                # being deliverable while a source it cites is deleted.  The
+                # count stays internal, because publishing it would let a
+                # caller infer that hidden content exists.
+                omissions["evidence_not_live"] += 1
                 continue
             candidates.append((version, body, expired))
 
@@ -537,7 +579,9 @@ class CognitionQueryService:
         self, access: QueryAccess, query: EpisodeQuery, *, now: datetime
     ) -> QueryResult:
         query_text = _require_query_text(query.query)
-        query_scope = _normalize_query_scope(query.scope)
+        query_scope = expand_query_entity_ids(
+            self._store, access.namespace, _normalize_query_scope(query.scope)
+        )
         purpose = _require_episode_purpose(query.purpose)
         limit = _require_limit(query.limit)
         _require_episode_access(access, purpose)
@@ -574,6 +618,9 @@ class CognitionQueryService:
                 # but C10 must never re-emit a deleted EventRef even if a
                 # future multi-source search path returns one.
                 if self._store.event_is_deleted(ns, source_ref.event_id):
+                    omissions["source_ref_redacted"] += 1
+                    continue
+                if not self._store.projection_is_usable(ns, source_ref.event_id):
                     omissions["source_ref_redacted"] += 1
                     continue
                 header = self._store.event_header(ns, source_ref.event_id)

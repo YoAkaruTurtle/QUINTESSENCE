@@ -4,13 +4,13 @@
 
 **English** · [简体中文](ROADMAP.zh-CN.md)
 
-> Status checked 2026-10-24. The roadmap describes current priorities and completion conditions; it does not promise delivery dates. The P0 unified LLM–PCS collaboration layer is implemented on the current review line; merge, release packaging, and human evaluation are separate steps.
+> Status checked 2026-11-05. J-series and folder-instance A/B/C engineering are complete on local main within their exercised scope. No delivery date is promised; formal release, signing and genuinely clean-machine installation remain pending.
 
 [Project overview](README.md) · [Architecture](ARCHITECTURE.md)
 
 ## Where the project is now
 
-QUINTESSENCE has an early cognitive substrate and a real-model revision chain. The next focus is to bring these capabilities into everyday applications through a unified interface, and to test how revised persistent beliefs participate in later consultation.
+QUINTESSENCE has an early cognitive substrate and a real-model revision chain. Unified collaboration, chat and folder-owned instances are available in the Windows application; next work concerns bounded incremental maintenance, research and installation maturity.
 
 | Work | Status | Existing results or remaining work |
 |---|---|---|
@@ -19,10 +19,12 @@ QUINTESSENCE has an early cognitive substrate and a real-model revision chain. T
 | EXP-01 v4 research evaluation | Awaiting human review | Runs complete; blind review, lock, unblinding, and final research conclusion pending |
 | Migration, licensing, and formal mainline | Completed | First-party migration, Apache-2.0, tests and build acceptance; formal mainline switched to this repository |
 | M6 GitHub Public repository | Completed | Public repository is live; no formal release package or version tag yet |
-| P0 unified collaboration layer | Implemented on review line; controlled real-model evidence | Consult, deterministic query, Review, approval, recovery, Windows desktop client; merge/release pending |
-| 011 and later | Planned / research direction | Progress by capability dependency |
+| P0 unified collaboration layer | Implemented and merged to `main`; controlled real-model evidence | Consult, deterministic query, Review, approval, recovery, Windows desktop client; release packaging and signing pending |
+| J-series engineering | Implemented, with behavioral limits | Persona/SDRPE, Memory delivery/recall, Cognition governance, transcripts, bounded maintenance and recovery |
+| Folder-instance A/B/C | Implemented and exercised | Empty creation, complete relocation/restart, safe partial completion, GUI selection and explicit legacy registration |
+| Windows packaging/local installation | Exercised locally | Complete frozen sidecar and NSIS development installer; genuine clean-machine test not run |
 
-M1–M6 (migration, licensing, formal mainline, and Public repository preparation) are complete; P0 is implemented on `codex/c13b-exp-01` and awaits merge review. The Windows installer is an unsigned development build, not a formal release.
+M1–M6, P0, the J-series and A/B/C are complete within their engineering scope. The Windows installer has been exercised locally; it remains an unsigned development build, not a formal public release.
 
 “Implemented foundation” covers only the delivered scope; “engineering passed” and “real-model behavior verified” are recorded separately.
 
@@ -42,7 +44,7 @@ P0 is a new priority label; its formal task number is still to be determined. Th
 
 The goal is to let applications reuse the formal Context, model-call, belief-candidate, and commit mechanisms so that state changes persist across interactions. The implementation uses a thin coordination entry point inside the library and preserves existing domain rules; the first phase does not build a background scheduler or a general Agent platform.
 
-Milestones A and B and the Windows desktop application are implemented on the review line. Engineering checks cover the review/query/commit chain, and a controlled C13b synthetic run provides real-model evidence for the formal retract/replacement and post-restart query path. This does not establish human research evaluation, release signing, or a fresh-machine distribution claim.
+Milestones A and B and the Windows desktop application are implemented on `main`. Engineering checks cover the review/query/commit chain, and a controlled C13b synthetic run provides real-model evidence for the formal retract/replacement and post-restart query path. This does not establish human research evaluation, release signing, or a fresh-machine distribution claim.
 
 ### Milestone A: unified cognitive review
 
@@ -73,7 +75,7 @@ Corresponds to internal implementation plan C08–C11.
 
 Corresponds to internal implementation plan C12–C13.
 
-A development Windows application is implemented on the review line, providing consultation, provenance and scope display, candidate differences, confirmation or rejection, commit results, and a reauthorization entry point. Legacy Workbench V0.2 is frozen as an early demonstration demo; its bespoke calling protocol is not migrated.
+A development Windows application is implemented on `main`, providing consultation, provenance and scope display, candidate differences, confirmation or rejection, commit results, and a reauthorization entry point. Legacy Workbench V0.2 is frozen as an early demonstration demo; its bespoke calling protocol is not migrated.
 
 Small-scale real research uses synthetic tool capabilities and synthetic persona-context preference cases. The latter tests scope understanding and does not mean Persona P1 is implemented. Raw outputs, actual requests, provenance, failures, and costs are retained and evaluated against criteria defined in advance; results belong to the behavioral acceptance of Milestone B.
 
@@ -81,16 +83,16 @@ The new interface is not a prerequisite for the underlying collaboration capabil
 
 ## Next capability evolution
 
-The following is the current priority order; implementation details will follow prior evidence and design refinement, without fixed dates.
-
-| Stage | Problem to solve | Observable completion direction |
+| Direction | Status | Next observable work |
 |---|---|---|
-| **011 · Knowledge** | How can currently applicable knowledge be obtained from existing beliefs? | Traceable projection and retrieval that correctly filters old versions, invalid states, and out-of-scope material; results enter formal Context |
-| **012 · Question / Focus** | How can experience leave persistent questions and focus? | Questions and focus persist across calls; compare related experience and run EXP-02; internal triggers validated separately by scope |
-| **013 · Persona P1** | How does contextual feedback influence the expression of stable dispositions? | Source-bearing, constrained contextual-feedback updates and EXP-03; avoid expanding local preferences into a global persona |
-| **014 · Host collaboration** | How can PCS participate in real host environments? | DSH Observe / Advisory connects to the formal collaboration protocol and the single Context; the host provides real execution receipts |
+| Dreaming | Design and partial foundations; full system pending | Incremental Experience organization; coordinate Memory/Cognition workers, budgets, review and interruption recovery; validate processing rather than queue admission alone |
+| Work and DSH tools | Planned | Connect host observations, authorization and real execution receipts to existing collaboration boundaries; DSH is not a current core dependency |
+| Deeper Cognition and growth | Ongoing research; full growth not implemented | Source support, belief revision, Knowledge and Question/Focus, with separate behavioral evidence |
+| Memory deletion/cross-module forgetting | Not complete | Invalidation, removal and recovery consistency across PCS, Scope Recall, derived artifacts and backups; PCS deletion currently leaves delivered Memory text |
+| Persona evolution | Management/expression delivered; further evolution pending | Traceable, source-bearing and constrained contextual feedback, without turning a local preference into global identity |
+| Installation/compatibility | Local Windows checks complete; further work | Genuine clean-machine installation, WebView/overlay compatibility, signing/versioned releases; Linux/macOS require separate verification |
 
-Memory's experience selection, Episode integration, and retrieval will be designed incrementally with these needs. P0 first provides the provenance bridge and does not prematurely claim delivery of a complete memory system.
+Bounded maintenance, review linkage and raw Memory delivery do not constitute complete Dreaming, semantic memory or autonomous continual learning. A design document does not close an implementation item.
 
 ## Farther research
 
@@ -102,11 +104,11 @@ The five conceptual capabilities describe the project's long-term direction, not
 - **Long-term development**: study experience organization, disposition change, and individual continuity across time, with traceable provenance and controllable private data.
 - **More unified runtime orchestration**: evaluate further integration of session, model, task, and tool lifecycles only after real host-coordination needs appear; there is no commitment to rewrite DSH now.
 
-Models, retrieval components, or external memory projects are evaluated per concrete need; no mandatory technical dependency is assumed.
+Scope Recall is already integrated for Memory. Future model, retrieval and host choices remain driven by concrete needs rather than a new general platform.
 
 ## Publication and research proceed separately
 
-Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. P0 is implemented on the review line; a formal release package, installation examples, signing, fresh-machine validation, and versioned release still need to be arranged. Linux verification has been deferred and is not listed as a supported environment.
+Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. P0, the J-series and A/B/C are on local main; complete Windows packaging and local installation have been exercised. Formal release, signing, genuinely clean-machine validation and versioned publication remain pending. Linux verification has been deferred and is not listed as a supported environment.
 
 Publication preparation and capability development are recorded separately. GitHub upload is not a technical dependency of the cognitive mechanisms; execution order is set by the maintainer, and publication status is not rewritten as engineering capability or experimental results.
 

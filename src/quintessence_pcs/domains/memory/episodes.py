@@ -81,6 +81,11 @@ class EpisodeService:
                     raise Redacted(
                         f"event {eid} has been deleted; it cannot become an episode"
                     )
+                projection_gate = getattr(store, "projection_is_usable", None)
+                if projection_gate is not None and not projection_gate(ns, eid):
+                    raise Redacted(
+                        f"event {eid} has no usable experience projection"
+                    )
                 header = store.event_header(ns, eid)
                 if header is None:
                     raise EventNotFound(f"no event {eid} in namespace {ns!r}")

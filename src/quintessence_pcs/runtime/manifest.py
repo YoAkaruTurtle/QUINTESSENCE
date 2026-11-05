@@ -42,10 +42,10 @@ MANIFEST_FIELDS = (
     "temperature",
 )
 
-#: PCS2-009 only verifies "can call, can record, can parse".  Thinking mode is
-#: default-on upstream and makes ``temperature`` ineffective, so this card
-#: pins it off.  PCS2-010 may revisit the value, not the meaning of this field.
-SUPPORTED_THINKING = "disabled"
+#: Managed hosts default to thinking enabled.  The adapter still supports the
+#: frozen disabled branch for existing manifests/authorizations; an enabled
+#: manifest must carry ``reasoning_effort="high"`` and the candidate protocol.
+SUPPORTED_THINKING = "enabled"
 SUPPORTED_TEMPERATURE = 0
 
 MAX_HOSTED_MODEL_TOKENS = 393216
@@ -58,6 +58,19 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 _FORBIDDEN_REQUEST_KEYS = frozenset(
     {"tools", "functions", "tool_calls", "function_call"}
+)
+
+#: Request modes.  ``tool_free`` is the PCS2-009 behaviour and the default for
+#: every manifest that does not say otherwise; ``agent`` additionally permits a
+#: host-generated tool catalog (see ``docs/adr/0001-agent-mode.md``).
+TOOL_MODE_FREE = "tool_free"
+TOOL_MODE_AGENT = "agent"
+TOOL_MODES = (TOOL_MODE_FREE, TOOL_MODE_AGENT)
+
+#: Optional manifest keys.  ``tool_mode`` defaults to ``tool_free`` so every
+#: existing manifest keeps parsing -- and keeps hashing -- exactly as before.
+OPTIONAL_MANIFEST_FIELDS = frozenset(
+    {"reasoning_effort", "protocol_version", "tool_mode"}
 )
 
 
@@ -80,6 +93,7 @@ class ModelManifest:
     temperature: int
     reasoning_effort: str | None = None
     protocol_version: str | None = None
+    tool_mode: str = TOOL_MODE_FREE
 
     @classmethod
     def from_mapping(cls, value: Any) -> "ModelManifest":
@@ -93,7 +107,7 @@ class ModelManifest:
         if value.get("thinking") == "enabled":
             required.discard("temperature")
         missing = sorted(required - keys)
-        optional = {"reasoning_effort", "protocol_version"}
+        optional = set(OPTIONAL_MANIFEST_FIELDS)
         unknown = sorted(keys - expected - optional)
         if missing:
             raise ManifestError(f"manifest is missing: {', '.join(missing)}")
@@ -135,6 +149,9 @@ class ModelManifest:
                 raise ManifestError("PCS2-009 requires temperature=0")
         else:
             raise ManifestError("thinking must be disabled or enabled")
+        tool_mode = value.get("tool_mode", TOOL_MODE_FREE)
+        if tool_mode not in TOOL_MODES:
+            raise ManifestError("tool_mode must be 'tool_free' or 'agent'")
         return cls(
             provider=provider,
             base_url=base_url,
@@ -147,6 +164,7 @@ class ModelManifest:
             temperature=temperature,
             reasoning_effort=reasoning_effort,
             protocol_version=protocol_version,
+            tool_mode=tool_mode,
         )
 
     @classmethod
@@ -178,6 +196,10 @@ class ModelManifest:
             data["reasoning_effort"] = self.reasoning_effort
         if self.protocol_version is not None:
             data["protocol_version"] = self.protocol_version
+        # Only agent manifests carry the field, so every tool-free manifest
+        # keeps the hash its stored authorization was issued against.
+        if self.tool_mode != TOOL_MODE_FREE:
+            data["tool_mode"] = self.tool_mode
         return data
 
     @property

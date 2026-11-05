@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cognition.open_question.v1",
+  "title": "PCS Cognition OpenQuestion body v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "question",
+    "origin",
+    "origin_refs",
+    "evidence_refs",
+    "related_belief_refs",
+    "resolution_refs",
+    "resolution_reason",
+    "reopen_reason",
+    "priority",
+    "waiting_for",
+    "paused",
+    "pause_reason",
+    "paused_at",
+    "paused_by",
+    "last_evaluated_at",
+    "last_evaluated_revision",
+    "review_after",
+    "trigger_spec",
+    "consumed_trigger_refs",
+    "closed_reason",
+    "related_question_refs"
+  ],
+  "properties": {
+    "contract": {"const": "cognition.open_question.v1"},
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "origin": {"enum": ["user_requested", "system_proposed"]},
+    "origin_refs": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/ref"}},
+    "evidence_refs": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ref"}},
+    "related_belief_refs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/record_ref"}
+    },
+    "resolution_refs": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/ref"}},
+    "resolution_reason": {"type": ["string", "null"], "maxLength": 512},
+    "reopen_reason": {"type": ["string", "null"], "maxLength": 512},
+    "priority": {"enum": ["low", "normal", "high"]},
+    "waiting_for": {"type": ["string", "null"], "maxLength": 512},
+    "paused": {"type": "boolean"},
+    "pause_reason": {"type": ["string", "null"], "maxLength": 512},
+    "paused_at": {"type": ["string", "null"]},
+    "paused_by": {"enum": ["user", "host", null]},
+    "last_evaluated_at": {"type": ["string", "null"]},
+    "last_evaluated_revision": {"type": ["integer", "null"], "minimum": 1},
+    "review_after": {"type": ["string", "null"]},
+    "trigger_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_refs", "topic_keys"],
+      "properties": {
+        "source_refs": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/ref"}},
+        "topic_keys": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      }
+    },
+    "consumed_trigger_refs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/ref"}
+    },
+    "closed_reason": {"type": ["string", "null"], "maxLength": 512},
+    "related_question_refs": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/record_ref"}
+    }
+  },
+  "$defs": {
+    "event_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref_type", "namespace", "event_id"],
+      "properties": {
+        "ref_type": {"const": "event"},
+        "namespace": {"type": "string"},
+        "event_id": {"type": "string"}
+      }
+    },
+    "record_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref_type", "namespace", "record_id", "record_version"],
+      "properties": {
+        "ref_type": {"const": "record"},
+        "namespace": {"type": "string"},
+        "record_id": {"type": "string"},
+        "record_version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ref": {
+      "oneOf": [
+        {"$ref": "#/$defs/event_ref"},
+        {"$ref": "#/$defs/record_ref"}
+      ]
+    }
+  }
+}

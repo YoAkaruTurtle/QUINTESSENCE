@@ -77,7 +77,7 @@ MODEL_ATTEMPT_OUTCOMES = (
 )
 
 #: An HTTP body/response larger than this is refused before it is persisted.
-#: The Context itself is capped at 24 KiB; 2 MiB leaves ample room for a normal
+#: The Context itself is capped at 64 KiB; 2 MiB leaves ample room for a normal
 #: chat completion and still bounds a hostile/looping provider.
 MAX_ATTEMPT_BODY_BYTES = 2 * 1024 * 1024
 
@@ -650,6 +650,7 @@ class ModelLedgerMixin:
         finish_reason: str | None = None,
         usage: Mapping[str, Any] | None = None,
         usage_known: bool = False,
+        pcs_estimated: Mapping[str, Any] | None = None,
         cost_estimate: float | None = None,
         cost_known: bool = False,
         error_label: str | None = None,
@@ -672,11 +673,21 @@ class ModelLedgerMixin:
         if usage is not None:
             if not isinstance(usage, Mapping):
                 raise InvalidInput("usage must be a JSON object or null")
-            usage_text: str | None = canonical_json_text(dict(usage))
-            if len(usage_text) > 65536:
-                raise InvalidInput("usage is too large to store")
+            usage_object = dict(usage)
         else:
-            usage_text = None
+            usage_object = None
+        if pcs_estimated is not None:
+            # J03: the PCS estimate lives beside the provider usage, never
+            # overwriting it.  No schema change: it is a key inside usage_json.
+            if not isinstance(pcs_estimated, Mapping):
+                raise InvalidInput("pcs_estimated must be a JSON object or null")
+            usage_object = dict(usage_object or {})
+            usage_object["pcs_estimated"] = dict(pcs_estimated)
+        usage_text: str | None = (
+            canonical_json_text(usage_object) if usage_object is not None else None
+        )
+        if usage_text is not None and len(usage_text) > 65536:
+            raise InvalidInput("usage is too large to store")
         if type(usage_known) is not bool:
             raise InvalidInput("usage_known must be a boolean")
         if usage_known and usage_text is None:
@@ -701,8 +712,14 @@ class ModelLedgerMixin:
         if outcome == MODEL_ATTEMPT_OK:
             if response_text is None:
                 raise InvalidInput("an ok attempt must carry the response it parsed")
-            if reason != "stop":
-                raise InvalidInput("an ok attempt must have finish_reason 'stop'")
+            # J07: one call can succeed and still ask for a tool.  The ledger
+            # records both; the finish_reason distinguishes "turn finished"
+            # from "turn continues".  The parsed response and the absence of
+            # an error label remain mandatory either way (0015).
+            if reason not in ("stop", "tool_calls"):
+                raise InvalidInput(
+                    "an ok attempt must have finish_reason 'stop' or 'tool_calls'"
+                )
             if label is not None:
                 raise InvalidInput("an ok attempt cannot carry an error label")
 

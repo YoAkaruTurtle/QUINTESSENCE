@@ -321,3 +321,102 @@ directory names instead of one machine path.
   the exact Context sources; it is not a full content classification system.
 - The in-transaction guard closes the determined race, not every possible
   concurrency schedule; C06b's gate and C06c's recovery remain the backstop.
+
+## 11. `project_decision` rollback rule (J06)
+
+`project_decision` is a Belief claim type added by J06. An older binary that does
+not know it refuses the record at `parse_belief_body` — the failure is
+**fail-closed**, not a silent downgrade to a known type.
+
+Operational rules:
+
+- Do **not** point an older binary at a database that may contain
+  `project_decision` records.
+- Rolling back means a cold restore into a compatible build, or exporting and
+  rebuilding the data. There is no in-place downgrade path.
+- Do not relax the claim-type validator to make an older build read the row: a
+  permissive reader turns an unknown authority class into an ordinary claim.
+- No production rollback of this kind has been exercised in this repository; the
+  rule above is design intent, not a tested procedure.
+
+## 12. J06 closure notes for the next consumer
+
+Two J06 behaviours changed during final closure. Both are enforced in code, not
+only documented:
+
+- **`DirectiveBinding.statement_digest` is verified.** A binding must name a
+  `user_report` event *and* carry the digest of that event's stored payload
+  (`sha256:<hex>`). A missing or mismatched digest is refused with
+  `directive_digest_mismatch`; the record is not written. The comparison runs
+  inside the commit transaction, so a source deleted between review and commit
+  also fails.
+- **`question.reopen` has a persistent approval path.** It is E2 and always
+  requires a human: the request creates a candidate that an `ApprovalAction` can
+  commit later. `AWAITING_HUMAN` on this operation now means "a candidate exists",
+  not "the request was dropped".
+
+Still true after closure, and easy to misread:
+
+- `evidence_linkage=verified` means the supporting events are of a registered
+  *type*; it is not a semantic verification of the claim.
+- The rejection guard matches a change fingerprint inside a 30 day window. A
+  retry that changes the scope or the target is not detected.
+- No semantic verifier component exists in this repository (`R1Verifier`
+  appears nowhere in `src/`); `verification_result` stays `unavailable`.
+  This is a *missing capability*, not a stub that is waiting to be switched on.
+- `external_report` states "the source says X". A `verified` external_report
+  means the quoted fragment really appears in the captured fetch whose digest
+  still matches; it does **not** mean the page is right, that the quote
+  supports the conclusion, or that the page has not changed since.
+- A supporting link of the wrong kind is **rejected**
+  (`evidence_type_mismatch`), never downgraded to a weak support.
+- The epistemic partition reflects stored status, not live validity: a belief
+  written as `supported` and expiring later remains in `accepted` until it is
+  re-derived.
+
+RG05-F02 adds one accepted statement source:
+
+- **`DirectiveBinding.statement_ref` may name a `collab_input`.** A binding is
+  accepted only when the candidate's own Context recorded that exact input
+  version as a source (`context_collab_sources`), the input's `origin_kind` is
+  `user_statement`, and its stored `content_digest` matches the binding digest.
+  A different turn's input, a fabricated input id, a deleted input or a
+  non-user origin is refused with `directive_source_not_user_report` /
+  `directive_digest_mismatch`. The legacy `event` `user_report` branch is
+  unchanged.
+- A `user_preference` Belief may cite the same current input as evidence. This
+  is a collaboration-row evidence type, not a second event or a fabricated
+  `user_report`; deleting the input makes the belief's evidence unusable at read
+  time, exactly like a deleted event.
+
+### 12.1 Directive audit shape on a `user_directive` decision (F02-AUDIT-01)
+
+A directive-authorized commit records the binding facts in the existing
+`cognition_review_decisions` JSON columns; no schema migration is involved:
+
+| Column | Directive value |
+| --- | --- |
+| `directive_digest` | `DirectiveBinding.digest` (sha256 of the canonical binding) |
+| `evidence_refs_json` | `[statement_ref, directive_binding_audit]` |
+| `target_refs_json` | `[dict(DirectiveBinding.target)]` |
+| `scope_json` | `dict(DirectiveBinding.decision_scope)` |
+
+`statement_ref` is the plain reference the commit was bound to (`collab_input` or
+the legacy `event`).  The second element is not a loadable ref; it is marked
+`{"kind": "directive_binding_audit"}` and carries `directive_kind`,
+`statement_digest`, `bound_at`, `binding_policy_id`, `binding_policy_version`,
+`classifier_policy_id`, `classifier_policy_version` and `allowed_claim_types`.
+`classifier_*` is `null` only for a synthetic/legacy binding that never named a
+classifier; the RG05-F02 router fills it from the stored turn plan.
+
+This answers, from one decision row: which user input authorized the change
+(statement ref + digest), which target was intended (`target_refs`), which scope
+the binding covered (`scope_json`), and which binding/classifier rule version
+produced it.  The table is append-only, so decisions committed before this shape
+existed keep their old rows; there is no backfill.  The binding is still not a
+first-class row: there is no
+`directive_binding_json` column, so `host_instance`, `access_ref` and
+`project_authority_ref` remain recoverable only through the candidate's
+interaction/authority records, and the binding cannot be re-hashed from the
+decision alone.  A first-class column would require a new migration and was
+deliberately not added here.

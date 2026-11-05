@@ -88,6 +88,9 @@ $arguments = @('tauri', 'build', '--config', $bundleConfig)
 if (-not $SkipBundle) {
     $arguments += @('--bundles', 'nsis')
 }
+else {
+    $arguments += '--no-bundle'
+}
 if ($DebugBuild) {
     $arguments += '--debug'
 }

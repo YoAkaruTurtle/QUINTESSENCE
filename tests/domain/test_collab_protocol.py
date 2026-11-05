@@ -32,6 +32,7 @@ from quintessence_pcs.runtime import (  # noqa: E402
     MAX_REFERENCES,
     MAX_REPLY_CHARS,
     ConsultSendPolicy,
+    ModelManifest,
     build_collab_request_body,
     build_request_body,
     parse_collab_output,
@@ -399,6 +400,44 @@ class CollabProtocolTests(CognitionTestCase):
                 }
             ),
             legacy,
+        )
+
+    def test_collab_enabled_body_has_thinking_and_no_temperature(self) -> None:
+        manifest = ModelManifest.from_mapping(
+            {
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-flash",
+                "api_key_env": "PCS_TEST_MODEL_API_KEY",
+                "max_calls": 8,
+                "max_output_tokens_per_call": 512,
+                "max_wall_seconds": 30,
+                "thinking": "enabled",
+                "reasoning_effort": "high",
+                "protocol_version": "EXP-01-THINKING-CANDIDATE-v1",
+            }
+        )
+        messages = render_collab_messages(self.context)
+        body = json.loads(
+            build_collab_request_body(
+                manifest, messages=messages, max_tokens=512
+            )
+        )
+        self.assertEqual({"type": "enabled"}, body["thinking"])
+        self.assertEqual("high", body["reasoning_effort"])
+        self.assertNotIn("temperature", body)
+        self.assertEqual(512, body["max_tokens"])
+        self.assertFalse(body["stream"])
+        self.assertEqual(
+            {
+                "model",
+                "messages",
+                "thinking",
+                "reasoning_effort",
+                "max_tokens",
+                "stream",
+            },
+            set(body),
         )
 
     # --------------------------------------------------------------- policy

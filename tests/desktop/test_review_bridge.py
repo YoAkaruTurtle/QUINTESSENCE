@@ -126,7 +126,6 @@ class ReviewBridgeTests(ReviewBridgeCase):
         self.assertTrue(reply["ok"], reply)
         result = reply["result"]
         self.assertEqual(len(result["managed"]), 1)
-        self.assertGreaterEqual(len(result["legacy"]), 1)
         managed_item = result["managed"][0]
         self.assertEqual(managed_item["work_id"], managed[0]["work_id"])
         self.assertEqual(managed_item["event_id"], managed[0]["event_id"])
@@ -136,14 +135,15 @@ class ReviewBridgeTests(ReviewBridgeCase):
         # Only the existence of a rerun reference is public; the reference
         # value itself is never returned.
         self.assertNotIn("rerun_authorization_ref", managed_item)
-        legacy_item = next(
-            item
-            for item in result["legacy"]
-            if item["work_id"] == legacy[0]["work_id"]
+        # RG08 card B: an uncontrolled derivation chore is not review work.  It
+        # can never own a candidate and review.generate refuses it, so it is
+        # counted instead of listed -- Review stays empty until a candidate
+        # exists.
+        self.assertEqual([], result["legacy"])
+        self.assertGreaterEqual(result["derivation_backlog"], 1)
+        self.assertNotIn(
+            legacy[0]["work_id"], [item["work_id"] for item in result["legacy"]]
         )
-        self.assertEqual(legacy_item["work_id"], legacy[0]["work_id"])
-        self.assertIn("kind", legacy_item)
-        self.assertIn("created_at", legacy_item)
 
     def test_generate_detail_approve_and_result_recovery(self) -> None:
         process, info, works, _ = self.prepare(managed=1)

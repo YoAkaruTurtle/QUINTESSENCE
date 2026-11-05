@@ -39,6 +39,19 @@ class EventRef:
             "event_id": self.event_id,
         }
 
+    @property
+    def origin_group_id(self) -> str:
+        """The independence group the store derives for this event.
+
+        PCS2-008's minimal resolution is "one Event = one origin group", and
+        ``BeliefService`` re-derives exactly this string when it resolves an
+        evidence link.  A host adapter that already holds a verified
+        ``EventRef`` can bind the value instead of asking a model to invent it;
+        the value is derived here, never supplied by a caller.
+        """
+
+        return f"event:{self.event_id}"
+
     @classmethod
     def from_value(cls, value: Any, *, field: str = "event_ref") -> "EventRef":
         """Validate a wire object; bare IDs and unknown keys are rejected."""

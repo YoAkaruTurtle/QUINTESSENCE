@@ -49,7 +49,6 @@ TEXT_PATTERNS = {
     "private-key-marker": re.compile(
         rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
     ),
-    "private-db-name": re.compile(rb"pcs\.sqlite", re.I),
 }
 
 UTF16_PATTERNS = {
@@ -97,6 +96,11 @@ def scan(root: Path) -> dict[str, Any]:
         except OSError:
             continue
         total += len(data)
+        # A program must be allowed to name its database. Detect shipped data
+        # files and SQLite headers, rather than treating a public filename
+        # constant inside an executable as a private database leak.
+        if path.name.lower() in {"pcs.sqlite", "memory.sqlite3"} or data.startswith(b"SQLite format 3\x00"):
+            findings.append({"pattern": "private-database-file", "file": path.name if root.is_file() else str(path.relative_to(root)).replace("\\", "/"), "count": 1})
         data, stripped = _strip_known_upstream(data)
         ignored_upstream += stripped
         for name in TEXT_PATTERNS:

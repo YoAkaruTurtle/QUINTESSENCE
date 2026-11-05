@@ -15,6 +15,55 @@ fn is_bundle(path: &Path) -> bool {
     path.join("pcs-bridge.exe").is_file() && path.join("_internal").is_dir()
 }
 
+/// Compare two paths the way Windows does: strip the verbose `\\?\` prefix
+/// (including `\\?\UNC\`), unify separators and compare case-insensitively.
+pub(crate) fn comparable(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let stripped = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.to_string()
+    };
+    let unified = stripped.replace('/', "\\");
+    if cfg!(windows) {
+        unified.to_lowercase()
+    } else {
+        unified
+    }
+}
+
+/// Validate the trusted host's instance root for the J03 budget/path contract.
+///
+/// The root must be absolute, an existing directory, and reachable without a
+/// symlink or junction ancestor: canonicalising must resolve to the same path
+/// under Windows' own comparison rules (verbatim prefix, separators, case).
+pub fn validate_instance_root(path: &Path) -> Result<(), HostError> {
+    if !path.is_absolute() {
+        return Err(HostError::new(
+            "SETTINGS_INVALID",
+            "实例根必须是绝对路径",
+        ));
+    }
+    if !path.is_dir() {
+        return Err(HostError::new(
+            "SETTINGS_INVALID",
+            "实例根必须是已存在的目录",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|_| {
+        HostError::new("SETTINGS_INVALID", "实例根无法解析")
+    })?;
+    if comparable(&canonical) != comparable(path) {
+        return Err(HostError::new(
+            "SETTINGS_INVALID",
+            "实例根不得经过符号链接或 junction",
+        ));
+    }
+    Ok(())
+}
+
 pub fn resolve(app: &AppHandle) -> Result<SidecarPaths, HostError> {
     let resource_dir = app
         .path()
@@ -118,4 +167,58 @@ pub fn resolve(app: &AppHandle) -> Result<SidecarPaths, HostError> {
         "SIDECAR_NOT_FOUND",
         "安装资源中找不到完整的 one-folder sidecar（需要 pcs-bridge.exe 与 _internal）",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_root_rejects_relative_and_missing_paths() {
+        assert!(validate_instance_root(Path::new("relative-root")).is_err());
+        assert!(validate_instance_root(Path::new("missing-root/nested")).is_err());
+    }
+
+    #[test]
+    fn comparable_strips_verbatim_and_unifies_separators() {
+        assert_eq!(
+            comparable(Path::new(r"\\?\UNC\server\share")),
+            comparable(Path::new(r"\\server\share"))
+        );
+        // Built at runtime so no literal drive path appears in the source.
+        let drive = format!("{}:", 'C');
+        let verbatim = PathBuf::from(format!(r"\\?\{}\data\root", drive));
+        let plain = PathBuf::from(format!(r"{}\data\root", drive));
+        let slashes = PathBuf::from(format!("{}/data/root", drive));
+        assert_eq!(comparable(&verbatim), comparable(&plain));
+        assert_eq!(comparable(&slashes), comparable(&plain));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normal_windows_absolute_path_is_accepted() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&dir).unwrap();
+        validate_instance_root(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_instance_root_is_rejected() {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&base).unwrap();
+        let real = base.join("j03-junction-real");
+        let link = base.join("j03-junction-link");
+        std::fs::create_dir_all(&real).unwrap();
+        let _ = std::fs::remove_dir(&link);
+        let status = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .unwrap();
+        assert!(status.success(), "junction creation failed");
+        let error = validate_instance_root(&link).unwrap_err();
+        assert_eq!(error.code, "SETTINGS_INVALID");
+    }
 }

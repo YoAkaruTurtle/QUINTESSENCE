@@ -201,6 +201,9 @@ _UNSET = object()
 def config_document(
     database: Path,
     *,
+    root: Path | None = None,
+    request_budget_units: int = 200_000,
+    output_reserve_units: int = 4096,
     script: list[dict[str, Any]] | None = None,
     query_plan: Any = _UNSET,
     external: bool = True,
@@ -213,6 +216,9 @@ def config_document(
     review_permissions: list[str] | None = None,
     review_script: list[dict[str, Any]] | None = None,
     desktop: dict[str, Any] | None = None,
+    memory_bridge: dict[str, Any] | None = None,
+    memory: dict[str, Any] | None = None,
+    maintenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if query_plan is _UNSET:
         query_plan = {
@@ -236,7 +242,14 @@ def config_document(
     document: dict[str, Any] = {
         "schema": "desktop.host.v1",
         "app": {"profile": profile, "label": "QUINTESSENCE Lab"},
-        "store": {"database": str(database)},
+        "store": {
+            "root": str(Path(database).parent if root is None else root),
+            "database": str(database),
+        },
+        "budget": {
+            "request_budget_units": request_budget_units,
+            "output_reserve_units": output_reserve_units,
+        },
         "host": {
             "namespace": NAMESPACE,
             "host_instance": HOST_INSTANCE,
@@ -265,6 +278,12 @@ def config_document(
         document["review"] = {"permissions": list(review_permissions)}
     if desktop is not None:
         document["desktop"] = dict(desktop)
+    if memory_bridge is not None:
+        document["memory_bridge"] = dict(memory_bridge)
+    if memory is not None:
+        document["memory"] = dict(memory)
+    if maintenance is not None:
+        document["maintenance"] = dict(maintenance)
     if profile == "lab":
         document["lab"] = {
             "seed": True,

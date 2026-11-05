@@ -55,7 +55,7 @@ window that ``get_result`` repairs on the next call.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Collection, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,6 +84,7 @@ from ..store.collaboration import (
     WorkControl,
 )
 from ..store.errors import CandidateTransitionDenied
+from ..store.governance import CHANGE_OPERATION
 from ..store.tx_b import CommitBasis, CommitReceipt
 from .policy import PROPOSAL_OPERATIONS, CommitAuthority
 
@@ -183,7 +184,10 @@ class CollaborationService:
         candidate_id: str,
         authority: CommitAuthority,
         decision_ref: str,
-    ) -> CandidateCommitOutcome:
+        change_access: Any = None,
+        approval_action: Any = None,
+        appended_events: Collection[str] = (),
+    ) -> Any:
         """Commit one pending candidate atomically.
 
         There is deliberately no ``now`` or ``trigger_kind`` parameter: the
@@ -225,6 +229,22 @@ class CollaborationService:
 
         proposal = candidate.proposal
         operation = proposal.get("operation")
+        if operation == CHANGE_OPERATION:
+            # J06: the change bundle has its own commit contract.  It still runs
+            # through this one entry point; only the transaction body differs.
+            from .change_service import commit_change
+
+            return commit_change(
+                self._store,
+                self._beliefs,
+                self._clock,
+                candidate=candidate,
+                authority=authority,
+                decision_ref=decision,
+                access=change_access,
+                approval_action=approval_action,
+                appended_events=appended_events,
+            )
         if operation not in PROPOSAL_OPERATIONS:
             raise CandidateTransitionDenied(
                 f"candidate operation {operation!r} is not one of "

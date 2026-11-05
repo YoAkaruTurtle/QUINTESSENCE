@@ -38,6 +38,41 @@ export interface ReviewCapabilities {
   result: boolean;
 }
 
+export interface PersonaSpeaker {
+  identity: "owner" | "known_other" | "unknown" | string;
+  source?: string;
+  display_name?: string;
+}
+
+export interface PersonaInfo {
+  state: "ready" | "not_ready" | string;
+  source: "expected" | "active" | "neutral_provisioned" | null;
+  profile_id: string | null;
+  profile_version: string | null;
+  record_id?: string | null;
+  record_version?: number | null;
+  asset_hash?: string | null;
+  expected: { profile_id: string; profile_version?: string } | null;
+  matches_expected?: boolean | null;
+  speaker: PersonaSpeaker | null;
+  reason_code?: string | null;
+}
+
+/** RG08: the host-reported web surface, without a credential value. */
+export interface WebCapabilities {
+  enabled: boolean;
+  configured: boolean;
+  declared: boolean;
+  search: boolean;
+  fetch: boolean;
+  credential_present: boolean;
+  credential_env: string | null;
+  allowed_hosts: number;
+  host_policy: "allowlist" | "any_public_https" | null;
+  source: "managed" | "external" | "lab" | null;
+  missing: string[];
+}
+
 export interface AppInfo {
   app: string;
   version: string;
@@ -45,6 +80,7 @@ export interface AppInfo {
   mode: string;
   label: string | null;
   ai_display_name: string | null;
+  persona?: PersonaInfo;
   ui: {
     ai_display_name: string;
     source: "preference" | "host" | "default" | string;
@@ -54,14 +90,23 @@ export interface AppInfo {
   destination: Destination | null;
   workspace: {
     consult: boolean;
+    conversation?: boolean;
     review: boolean;
     review_reason: string | null;
   };
   capabilities: {
     consult: boolean;
+    conversation?: boolean;
     confirm_destination: boolean;
     input_registration: boolean;
+    process?: boolean;
+    cancel?: boolean;
     review?: ReviewCapabilities;
+    memory?: { configured: boolean; search?: boolean };
+    cognition?: CognitionCapabilities;
+    persona?: PersonaCapabilities;
+    preferences?: PreferenceCapabilities;
+    web?: WebCapabilities;
   };
   limits: {
     frame_bytes: number;
@@ -132,6 +177,35 @@ export interface BridgeError {
   result_unknown: boolean;
 }
 
+export interface CognitionCapabilities {
+  enabled: boolean;
+  configured: boolean;
+  propose: boolean;
+  pending_review: boolean;
+  auto_authorization: boolean;
+  working_set_limit: number;
+  pending_limit: number;
+}
+
+export interface CognitionCandidate {
+  candidate_id: string;
+  artifact_version: number;
+  claim: string;
+  claim_type: string | null;
+  target?: unknown;
+  created_at: string;
+  state: string;
+  requires_human: boolean;
+  impact: string | null;
+  reason_code: string | null;
+  turn_id: string | null;
+}
+
+export interface CognitionCandidateList {
+  candidates: CognitionCandidate[];
+  pending_review: boolean;
+}
+
 export interface HostReply {
   ok: boolean;
   result?: unknown;
@@ -145,6 +219,9 @@ export interface ModelStatus {
   managed: boolean;
   model_choices: string[];
   key_saved: boolean;
+  key_available?: boolean;
+  credential_source?: "environment" | "credential_manager" | "none";
+  credential_restart_required?: boolean;
   key_store_error: string | null;
   sidecar_available: boolean;
   host_ready: boolean;
@@ -299,4 +376,179 @@ export interface ReviewCandidateDetail {
   eligibility_reason: string | null;
   redacted: boolean;
   detail: string | null;
+}
+
+// --------------------------------------------------------------------------
+// UI-F02 persona & preference management (desktop.v1).  Data only.
+// --------------------------------------------------------------------------
+
+export interface PersonaCapabilities {
+  read: boolean;
+  publish: boolean;
+  activate: boolean;
+  read_body?: boolean;
+  import?: boolean;
+}
+
+export interface PreferenceCapabilities {
+  read: boolean;
+  revoke: boolean;
+}
+
+export interface ProfileVersionSummary {
+  record_version: number;
+  profile_version: string | null;
+  schema_version: string | null;
+  recorded_at: string;
+  record_status: string;
+  is_active_version: boolean;
+  review_event_id: string | null;
+}
+
+export interface ProfileStyleSummary {
+  language: string | null;
+  tone: string | null;
+  verbosity_by_context: { casual: string | null; technical: string | null };
+}
+
+export interface ProfileCurrentSummary {
+  record_version: number;
+  profile_version: string | null;
+  schema_version: string | null;
+  record_status: string;
+  recorded_at: string;
+  asset_hash: string | null;
+  renderer_compatibility: string | null;
+  style_summary: ProfileStyleSummary | null;
+  principles_count: number;
+  examples_count: number;
+}
+
+export interface ProfileSummary {
+  profile_id: string;
+  record_id: string;
+  is_active: boolean;
+  current: ProfileCurrentSummary;
+  versions: ProfileVersionSummary[];
+  versions_total: number;
+  versions_truncated: boolean;
+}
+
+export interface ActiveProfileRef {
+  record_id: string;
+  record_version: number;
+  profile_id: string | null;
+  degraded: boolean;
+}
+
+export interface ProfileList {
+  active: ActiveProfileRef | null;
+  profiles: ProfileSummary[];
+  truncated: boolean;
+}
+
+export interface ProfileBody {
+  record_id: string;
+  record_version: number;
+  profile_id: string | null;
+  profile_version: string | null;
+  schema_version: string | null;
+  body: Record<string, unknown>;
+  body_sha256: string;
+  size_bytes: number;
+}
+
+export interface ImportFile {
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface ImportList {
+  available: boolean;
+  reason: string | null;
+  dir_label: string;
+  files: ImportFile[];
+}
+
+export interface ImportSummary {
+  import_id: string;
+  profile_id: string;
+  profile_version: string | null;
+  schema_version: string;
+  asset_hash: string | null;
+  renderer_compatibility: string | null;
+  style_summary: ProfileStyleSummary | null;
+  principles_count: number;
+  examples_count: number;
+  body_sha256: string;
+  size_bytes: number;
+  expires_at: string;
+  warnings: string[];
+}
+
+export interface PersonaPublishResult {
+  profile_id: string;
+  record_id: string;
+  record_version: number;
+  review_event_id: string | null;
+  review_event_bound?: boolean;
+  review_body_sha256: string;
+  active_changed: boolean;
+  reused: boolean;
+}
+
+export interface PreferenceSource {
+  kind: "user_statement" | "unknown" | string;
+  input_id: string | null;
+}
+
+export interface PreferenceRecordRef {
+  record_id: string;
+  record_version: number;
+  recorded_at: string;
+}
+
+export interface ConfirmedPreference {
+  dimension: string;
+  value: string;
+  label: string;
+  claim: string | null;
+  strength: string | null;
+  scope: Record<string, unknown>;
+  source: PreferenceSource;
+  record: PreferenceRecordRef;
+}
+
+export interface TentativePreference {
+  dimension: string;
+  value: string;
+  label: string;
+  status: string;
+  scope: Record<string, unknown>;
+  source: PreferenceSource;
+  record: PreferenceRecordRef;
+}
+
+export interface InactivePreference {
+  kind: "confirmed" | "tentative";
+  state: string;
+  status: string | null;
+  dimension: string | null;
+  value: string | null;
+  label: string | null;
+  reason: string | null;
+  scope: Record<string, unknown>;
+  record: PreferenceRecordRef;
+  superseded_by: { record_id: string; record_version: number } | null;
+}
+
+export interface PreferenceList {
+  confirmed: ConfirmedPreference[];
+  tentative: TentativePreference[];
+  inactive: InactivePreference[];
+  conversation: { conversation_id: string; title: string | null } | null;
+  expression_recording: { enabled: boolean; reason: string | null };
+  confirmed_recording: { enabled: boolean; reason: string | null };
+  truncated: boolean;
 }

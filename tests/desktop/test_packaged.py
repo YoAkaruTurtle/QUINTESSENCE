@@ -112,7 +112,7 @@ class PackagedSidecarTests(DesktopCase):
         process = self.start(executable=EXE)
         info = process.request("app.info")["result"]
         self.assertTrue(info["host"]["ready"], info["host"])
-        self.assertEqual(info["pcs"]["schema_migrations"], 10)
+        self.assertEqual(info["pcs"]["schema_migrations"], 17)
         confirm = process.request(
             "app.confirm_destination",
             {

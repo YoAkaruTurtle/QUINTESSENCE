@@ -221,6 +221,29 @@ class ProposalContractSourceTests(unittest.TestCase):
         )
         self.assertIn("evidence reference is not usable", untrusted)
 
+    def test_premise_refs_field_type_names_the_record_shape_and_empty_form(self) -> None:
+        text = PROPOSAL_CONTRACT["field_types"]["premise_refs"]
+        self.assertIn("required", text)
+        self.assertIn("RecordRef", text)
+        self.assertIn("[]", text)
+        self.assertIn("evidence_links[].ref", text)
+        self.assertIn("EventRef", text)
+
+    def test_repair_feedback_names_premise_refs_and_the_legal_empty_form(self) -> None:
+        for message in (
+            "premise_refs[0] must have exactly ref_type, namespace, "
+            "record_id and record_version",
+            "belief body is missing required field(s): premise_refs",
+        ):
+            with self.subTest(message=message):
+                feedback = repair_feedback(InvalidInput(message))
+                self.assertIn("Erroneous field: premise_refs", feedback)
+                self.assertIn("required body field", feedback)
+                self.assertIn("send []", feedback)
+                self.assertIn("RecordRef", feedback)
+                self.assertIn("evidence_links[].ref", feedback)
+                self.assertIn("Return exactly one JSON object", feedback)
+
 
 class ProposalContractContextTests(CognitionTestCase):
     def test_complete_contract_is_only_rendered_for_a_model_bound_context(self) -> None:

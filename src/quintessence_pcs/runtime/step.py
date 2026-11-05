@@ -69,6 +69,7 @@ from ..store.collaboration import WorkControl
 from ..store.tx_b import CommitBasis, CommitReceipt
 from .candidate import MAX_MODEL_CALLS, GenerationBudget, generate_candidate
 from .context import ContextEnvelope, ContextService
+from .revision_contract import STEP_REVISION_RULE
 from .fake_model import FakeModel
 from .proposal_generation import (
     parse_proposal,
@@ -627,12 +628,8 @@ def semantic_retry_feedback(exc: BaseException) -> str:
         or "claim_type cannot change" in message
     ):
         parts.append(
-            "The claim text and claim_type of an existing Belief are frozen. "
-            "revise_belief cannot change them. If the new evidence requires a "
-            "different claim, use retract_belief with the existing target, "
-            "evidence_links and reason; after the retraction commits, a new "
-            "Context will be built and you may be asked again. WAIT is also "
-            "legal. Do not repeat the same revise_belief."
+            STEP_REVISION_RULE
+            + " WAIT is also legal. Do not repeat the same revise_belief."
         )
     else:
         parts.append(repair_feedback(exc))

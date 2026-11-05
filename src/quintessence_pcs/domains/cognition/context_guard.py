@@ -20,6 +20,7 @@ broken reference (record row present but version missing) is
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from ...foundation import identifiers
@@ -45,13 +46,25 @@ _CONSULT_CONTEXT_KIND = "consult"
 
 
 def require_live_context(
-    store: CognitionStore, *, context_id: str, namespace: str
+    store: CognitionStore,
+    *,
+    context_id: str,
+    namespace: str,
+    moved_in_transaction: Collection[str] = (),
 ) -> ContextSnapshot:
     """Load one full Context and prove its basis is still live.
 
     Raises ``NEEDS_CONTEXT`` for a pre-008 snapshot, ``CONTEXT_STALE`` when the
     basis moved or a source was deleted, ``NOT_FOUND`` for an unknown ID and
     ``CORRUPT_STORE`` for a broken reference structure.
+
+    ``moved_in_transaction`` names records this *same* transaction has already
+    appended a new version of.  For those records the "must still be current"
+    assertion is replaced by "the version the Context saw must still exist",
+    because the pointer is expected to have advanced as a consequence of our
+    own write.  The default empty collection keeps every existing caller
+    byte-for-byte unchanged: a record moved by anyone else, or before this
+    transaction started, still fails exactly as before.
     """
 
     try:
@@ -68,15 +81,25 @@ def require_live_context(
             f"not {namespace!r}"
         )
 
-    trigger = EventRef.from_value(snapshot.trigger_ref, field="trigger_ref")
-    if trigger.namespace != namespace:
-        raise ScopeViolation(
-            f"context trigger is in namespace {trigger.namespace!r}, not {namespace!r}"
-        )
-    _require_live_event(store, namespace, trigger.event_id, what="context trigger")
+    trigger = None
+    trigger_value = snapshot.trigger_ref or None
+    if trigger_value is not None:
+        trigger = EventRef.from_value(trigger_value, field="trigger_ref")
+        if trigger.namespace != namespace:
+            raise ScopeViolation(
+                f"context trigger is in namespace {trigger.namespace!r}, not {namespace!r}"
+            )
+        _require_live_event(store, namespace, trigger.event_id, what="context trigger")
+    elif snapshot.context_kind != _CONSULT_CONTEXT_KIND:
+        # RG05 decision 01: only a consult Context may stand as a commit basis
+        # without a trigger event.  A review Context without one is corrupt, and
+        # a Work review still names the event it reviewed.
+        raise CorruptStore(f"context {context_id} has no trigger event")
 
     for entry in snapshot.read_set:
-        _check_read_set_entry(store, namespace, entry)
+        _check_read_set_entry(
+            store, namespace, entry, moved_in_transaction=moved_in_transaction
+        )
 
     for source in snapshot.sources:
         if source.ref_kind == "event":
@@ -116,7 +139,11 @@ def require_live_context(
 
 
 def _check_read_set_entry(
-    store: CognitionStore, namespace: str, entry: dict[str, Any]
+    store: CognitionStore,
+    namespace: str,
+    entry: dict[str, Any],
+    *,
+    moved_in_transaction: Collection[str] = (),
 ) -> None:
     if not isinstance(entry, dict) or set(entry) != {"ref", "usage"}:
         raise CorruptStore("stored read_set entry does not have exactly ref and usage")
@@ -132,6 +159,16 @@ def _check_read_set_entry(
         pointer = store.record_pointer(namespace, ref.record_id)
         if pointer is None:
             raise CorruptStore("a current read_set entry points at a missing record")
+        if ref.record_id in moved_in_transaction:
+            # We moved it ourselves in this transaction: the version the Context
+            # saw must still exist, but the pointer is expected to have advanced.
+            try:
+                store.get_version(namespace, ref.record_id, ref.record_version)
+            except RecordNotFound as exc:
+                raise CorruptStore(
+                    "a current read_set entry points at a missing record version"
+                ) from exc
+            return
         if pointer.current_version != ref.record_version:
             raise ContextStale(
                 "a current read_set entry is no longer the current version"

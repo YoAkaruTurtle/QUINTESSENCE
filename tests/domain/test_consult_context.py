@@ -624,8 +624,8 @@ class ConsultContextTests(CognitionTestCase):
 
         original_insert = type(self.store).insert_context_snapshot_locked
 
-        def recording_insert(store, entry, *, context_kind="review"):
-            snapshot = original_insert(store, entry, context_kind=context_kind)
+        def recording_insert(store, entry, *, context_kind="review", **kwargs):
+            snapshot = original_insert(store, entry, context_kind=context_kind, **kwargs)
             captured["context_id"] = snapshot.context_id
             return snapshot
 
@@ -941,6 +941,120 @@ class ConsultContextTests(CognitionTestCase):
             )
         with self.assertRaises(InvalidInput):
             self.build_consult([], materials=(object(),))
+
+
+    # --------------------------------------------------- RG06 persona material
+
+    def _persona_example(self, example_id: str = "synthetic-example-1") -> dict:
+        return {
+            "example_id": example_id,
+            "scene": "owner-close",
+            "basis": "expression_demo",
+            "not_experience": True,
+            "source": {
+                "kind": "persona_profile",
+                "profile_id": "example.synthetic.c08",
+                "profile_version": "0.0.1",
+                "asset_hash": "a" * 64,
+            },
+            "user": "Synthetic example line.",
+            "assistant": "Synthetic example reply.",
+        }
+
+    def _persona_material(self, examples: list[dict]) -> dict:
+        return {
+            "asset_hash": "a" * 64,
+            "examples": examples,
+            "examples_omitted": [],
+            "speaker": {
+                "identity": "owner",
+                "source": "host_config",
+                "display_name": "Synthetic Owner",
+            },
+        }
+
+    def test_persona_material_renders_examples_and_the_speaker(self) -> None:
+        _row, ref = self.register_consult_input()
+        envelope = self.contexts.build_consult_context(
+            namespace=NS,
+            access=self.access(),
+            input_refs=[ref],
+            persona=self._persona_material([self._persona_example()]),
+        )
+        document = self.document(envelope)
+        self.assertEqual("a" * 64, document["profile"]["asset_hash"])
+        self.assertEqual(
+            ["synthetic-example-1"],
+            [item["example_id"] for item in document["profile"]["examples"]],
+        )
+        self.assertEqual(
+            "expression_demo", document["profile"]["examples"][0]["basis"]
+        )
+        self.assertEqual(
+            {
+                "identity": "owner",
+                "source": "host_config",
+                "display_name": "Synthetic Owner",
+            },
+            document["speaker"],
+        )
+        # Examples are never collaboration sources: the linked sources are the
+        # registered input only, with no artifact created for an example.
+        sources = list(
+            self.store.context_collab_sources(
+                namespace=NS, context_id=envelope.context_id
+            )
+        )
+        self.assertTrue(sources)
+        self.assertTrue(
+            all(item["ref_type"] == "collab_input" for item in sources)
+        )
+        self.assertEqual(0, self.count_rows("collab_artifacts"))
+
+    def test_a_context_without_persona_material_is_unchanged(self) -> None:
+        _row, ref = self.register_consult_input()
+        envelope = self.contexts.build_consult_context(
+            namespace=NS,
+            access=self.access(),
+            input_refs=[ref],
+        )
+        document = self.document(envelope)
+        self.assertNotIn("speaker", document)
+        self.assertNotIn("asset_hash", document["profile"])
+        self.assertNotIn("examples", document["profile"])
+        self.assertNotIn("examples_omitted", document["profile"])
+
+    def test_examples_are_dropped_before_the_core_persona(self) -> None:
+        _row, ref = self.register_consult_input()
+        baseline = self.contexts.build_consult_context(
+            namespace=NS,
+            access=self.access(),
+            input_refs=[ref],
+        )
+        base_bytes = len(baseline.rendered_input.encode("utf-8"))
+        small = ContextService(
+            self.store,
+            self_view_service=self.self_view,
+            profile_service=self.profiles,
+            pcs_context_max_bytes=base_bytes + 700,
+        )
+        large = self._persona_example("synthetic-example-big")
+        large["assistant"] = "S" * 2000
+        envelope = small.build_consult_context(
+            namespace=NS,
+            access=self.access(),
+            input_refs=[ref],
+            persona=self._persona_material([large]),
+        )
+        document = self.document(envelope)
+        self.assertNotIn("examples", document["profile"])
+        self.assertEqual(
+            [{"example_id": "synthetic-example-big", "reason": "budget"}],
+            document["profile"]["examples_omitted"],
+        )
+        # The core persona survives: dropping examples is not dropping identity.
+        self.assertIn("identity_summary", document["profile"])
+        self.assertIn("principles", document["profile"])
 
 
 if __name__ == "__main__":  # pragma: no cover

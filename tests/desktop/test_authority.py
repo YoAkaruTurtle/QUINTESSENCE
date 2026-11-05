@@ -65,6 +65,9 @@ class AuthorityTests(DesktopCase):
         text = json.dumps(info, ensure_ascii=False)
         self.assertTrue(info["host"]["ready"])
         self.assertEqual(info["protocol"], "desktop.v1")
+        # PS06: the default deployment is protected, and that answer is visible
+        # without opening the store.
+        self.assertEqual("enforced", info["deletion_safety"])
         self.assertEqual(info["workspace"]["review"], False)
         self.assertEqual(
             info["workspace"]["review_reason"], "REVIEW_NOT_CONFIGURED"
@@ -73,7 +76,8 @@ class AuthorityTests(DesktopCase):
         self.assertTrue(info["destination"]["confirmation_required"])
         self.assertTrue(info["destination"]["external"])
         self.assertNotIn("127.0.0.1", text)
-        self.assertNotIn("http", text)
+        self.assertIsNone(re.search(r"https?://", text))
+        self.assertNotIn("base_url", text)
         self.assertNotIn("QUINTESSENCE_DESKTOP_LAB_MODEL_KEY", text)
         self.assertNotIn("sk-", text)
         self.assertIsNone(re.search(r"lab-[0-9a-f]{40,}", text))
@@ -83,14 +87,47 @@ class AuthorityTests(DesktopCase):
                 "app.confirm_destination",
                 "app.info",
                 "bridge.ping",
+                "cognition.candidate.decide",
+                "cognition.candidates.list",
                 "consult.interact",
+                "conversation.create",
+                "conversation.get",
+                "conversation.list",
+                "conversation.search",
+                "conversation.send",
+                "conversation.usage",
+                "maintenance.control",
+                "maintenance.run",
+                "maintenance.status",
+                "memory.bridge.deliver",
+                "memory.bridge.sync",
+                "memory.search",
                 "model.test_connection",
+                "postprocess.retry",
+                "postprocess.status",
+                "preference.list",
+                "preference.revoke",
+                "profile.activate",
+                "profile.import.list",
+                "profile.import.preview",
+                "profile.list",
+                "profile.publish",
+                "profile.publish_reviewed",
+                "profile.read",
+                "profile.read_body",
+                "profile.status",
                 "review.candidate.detail",
                 "review.candidates.list",
                 "review.generate",
                 "review.resolve",
                 "review.result",
                 "review.work.list",
+                "settings.reload",
+                "turn.cancel",
+                "turn.events",
+                "turn.result",
+                "turn.steps",
+                "turn.trace",
             ],
         )
 

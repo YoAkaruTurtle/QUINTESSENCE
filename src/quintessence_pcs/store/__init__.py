@@ -70,11 +70,22 @@ from .errors import (
     WorkAlreadyCompleted,
 )
 from .events import (
+    DERIVATION_WORK_KINDS,
     EventCause,
     EventJournalEntry,
     EventStore,
     IngestReceipt,
     PendingWork,
+)
+from .governance import (
+    CHANGE_OPERATION,
+    GOVERNANCE_PERMISSIONS,
+    LIFECYCLE_STATES,
+    AuthorizationRow,
+    DecisionRow,
+    GovernanceAccess,
+    GovernanceStore,
+    SubjectAuthorityRow,
 )
 from .model import (
     MAX_ATTEMPT_BODY_BYTES,
@@ -112,9 +123,11 @@ from .tx_b import (
 )
 
 __all__ = [
+    "CHANGE_OPERATION",
     "COMMIT_OUTCOMES",
     "CONTEXT_ADAPTER_DIRECT_HTTP",
     "CONTEXT_ADAPTER_FAKE_MODEL",
+    "AuthorizationRow",
     "CleanupReport",
     "CleanupResult",
     "CognitionStore",
@@ -132,6 +145,7 @@ __all__ = [
     "DELETION_PENDING_CLEANUP",
     "DELETION_RECORD",
     "DELETION_STATUSES",
+    "DecisionRow",
     "DeletionTarget",
     "DomainStateMixin",
     "DomainStore",
@@ -141,8 +155,12 @@ __all__ = [
     "EventHeader",
     "EventJournalEntry",
     "EventStore",
+    "GOVERNANCE_PERMISSIONS",
+    "GovernanceAccess",
+    "GovernanceStore",
     "IngestReceipt",
     "InvalidWorkCompletion",
+    "LIFECYCLE_STATES",
     "MAX_CONTEXT_BYTES",
     "MAX_SCOPE_JSON_LENGTH",
     "MAX_ATTEMPT_BODY_BYTES",
@@ -170,11 +188,13 @@ __all__ = [
     "NeedsContext",
     "OUTCOME_COMMITTED",
     "OUTCOME_NOOP",
+    "DERIVATION_WORK_KINDS",
     "PendingWork",
     "RecordPointer",
     "RecordStore",
     "RecordVersion",
     "Snapshot",
+    "SubjectAuthorityRow",
     "TxScope",
     "TX_WORK_OUTCOMES",
     "WORK_OUTCOMES",

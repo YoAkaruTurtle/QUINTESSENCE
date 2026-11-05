@@ -32,7 +32,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..foundation import identifiers
 from ..foundation.errors import (
@@ -51,12 +51,15 @@ from ..foundation.jsonutil import (
 )
 from ..foundation.timeutil import utc_now_rfc3339
 from .collaboration import CollaborationMixin
+from .conversation import ConversationMixin
 from .deletion import DELETION_EVENT, DELETION_RECORD, DeletionTarget
 from .domain import DomainStore
 from .errors import ContextTooLarge, NeedsContext, WorkAlreadyCompleted
 from .events import PendingWork
 from .experience import ExperienceMixin
 from .model import ModelLedgerMixin
+from .memory_delivery import MemoryDeliveryMixin
+from .transcript import TranscriptMixin
 
 WORK_OUTCOME_COMMITTED = "committed"
 WORK_OUTCOME_CHECKED_NO_BELIEF = "checked_no_belief"
@@ -80,7 +83,8 @@ CONTEXT_ADAPTER_DIRECT_HTTP = "direct-http"
 CONTEXT_ADAPTERS = (CONTEXT_ADAPTER_FAKE_MODEL, CONTEXT_ADAPTER_DIRECT_HTTP)
 
 #: Byte budget for one rendered Context (persona guide / J.5 default brief).
-MAX_CONTEXT_BYTES = 24 * 1024
+#: Raised to 64 KiB on 2026-11-04; J07 shipped with 24 KiB.
+MAX_CONTEXT_BYTES = 64 * 1024
 
 CONTEXT_REF_KIND_EVENT = "event"
 CONTEXT_REF_KIND_RECORD = "record"
@@ -118,7 +122,7 @@ _CONTEXT_COLUMNS = (
     "unknown_execution_ids_json, permission_view_ref, budget_view_json, "
     "pending_source_event_refs_json, omissions_json, index_generation, "
     "index_coverage_json, content_hash, model_input_complete, "
-    "rendered_input_payload_ref, adapter_kind, context_kind"
+    "rendered_input_payload_ref, adapter_kind, context_kind, renderer_version"
 )
 
 _SOURCE_COLUMNS = "context_id, ref_kind, ref_id, ref_version"
@@ -181,6 +185,7 @@ class ContextInsert:
     rendered_input: str
     adapter_kind: str | None
     sources: Sequence[ContextSourceInput]
+    renderer_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,7 @@ class ContextSnapshot:
     created_at: str
     sources: tuple[ContextSource, ...] = ()
     context_kind: str = "review"
+    renderer_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -286,7 +292,8 @@ class ContextStateMixin:
     # ---------------------------------------------------------------- insert
 
     def insert_context_snapshot_locked(
-        self, entry: ContextInsert, *, context_kind: str = "review"
+        self, entry: ContextInsert, *, context_kind: str = "review",
+        max_context_bytes: int = MAX_CONTEXT_BYTES
     ) -> ContextSnapshot:
         """Persist one full Context; caller supplies the surrounding transaction.
 
@@ -351,6 +358,11 @@ class ContextStateMixin:
         adapter_kind = entry.adapter_kind
         if adapter_kind is not None:
             adapter_kind = _require_bounded_text(adapter_kind, "adapter_kind", 64)
+        renderer_version = entry.renderer_version
+        if renderer_version is not None:
+            renderer_version = _require_bounded_text(
+                renderer_version, "renderer_version", 64
+            )
         # C3/009: model_input_complete may only be true for an adapter that
         # persists the exact request bytes it sends.  Both the FakeModel path
         # and the direct HTTP path do; the raw payload is always stored below.
@@ -371,10 +383,12 @@ class ContextStateMixin:
 
         sources = _normalize_sources(entry.sources)
         rendered_bytes = len(rendered_input.encode("utf-8"))
-        if rendered_bytes > MAX_CONTEXT_BYTES:
+        if type(max_context_bytes) is not int or max_context_bytes < 1:
+            raise InvalidInput("max_context_bytes must be a positive integer")
+        if rendered_bytes > max_context_bytes:
             raise ContextTooLarge(
                 f"rendered context is {rendered_bytes} bytes; the budget is "
-                f"{MAX_CONTEXT_BYTES}"
+                f"{max_context_bytes}"
             )
 
         payload_ref = self.store_context_payload_locked(rendered_input)
@@ -397,8 +411,9 @@ class ContextStateMixin:
             "unknown_execution_ids_json, permission_view_ref, budget_view_json, "
             "pending_source_event_refs_json, omissions_json, index_generation, "
             "index_coverage_json, content_hash, model_input_complete, "
-            "rendered_input_payload_ref, adapter_kind, context_kind"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "rendered_input_payload_ref, adapter_kind, context_kind, "
+            "renderer_version"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 context_id,
                 ns,
@@ -426,6 +441,7 @@ class ContextStateMixin:
                 payload_ref,
                 adapter_kind,
                 context_kind,
+                renderer_version,
             ),
         )
         for source in stored_sources:
@@ -463,6 +479,7 @@ class ContextStateMixin:
             created_at=created_at,
             sources=stored_sources,
             context_kind=context_kind,
+            renderer_version=renderer_version,
         )
 
     # ------------------------------------------------------------------ read
@@ -606,6 +623,7 @@ class ContextStateMixin:
             created_at=row["created_at"],
             sources=self.context_sources(cid),
             context_kind=context_kind,
+            renderer_version=row["renderer_version"],
         )
 
     def context_sources(self, context_id: str) -> tuple[ContextSource, ...]:
@@ -692,7 +710,7 @@ class ContextStateMixin:
         from this round's trusted trigger, current pending batch or explicitly
         validated source dependencies (causation refs).  Historical skipped work
         that is unrelated to this round is neither enumerated nor rendered, so
-        it cannot consume the 24 KiB budget of an unrelated new event.
+        it cannot consume the Context budget of an unrelated new event.
 
         Only the event reference is returned; the Context renders
         ``{ref, reason: "source_redacted"}`` and never any event body.
@@ -1011,23 +1029,22 @@ class ContextStateMixin:
         unfinished.
         """
 
-        if target.target_kind != DELETION_EVENT:
-            return 0
-        revision = self._watermarks_locked(target.namespace)["state_revision"]
         skipped = 0
-        for work in self._pending_work_without_progress_locked(
-            target.namespace, target.target_id
-        ):
-            try:
-                self._insert_skipped_work_locked(
-                    namespace=target.namespace,
-                    work_id=work.work_id,
-                    completed_state_revision=revision,
-                )
-            except WorkAlreadyCompleted:  # pragma: no cover - PK backstop
-                continue
-            skipped += 1
-        return skipped
+        if target.target_kind == DELETION_EVENT:
+            revision = self._watermarks_locked(target.namespace)["state_revision"]
+            for work in self._pending_work_without_progress_locked(
+                target.namespace, target.target_id
+            ):
+                try:
+                    self._insert_skipped_work_locked(
+                        namespace=target.namespace,
+                        work_id=work.work_id,
+                        completed_state_revision=revision,
+                    )
+                except WorkAlreadyCompleted:  # pragma: no cover - PK backstop
+                    continue
+                skipped += 1
+        return skipped + super()._after_deletion_barrier_locked(target)
 
     def _after_target_cleared_locked(self, target: DeletionTarget) -> int:
         """Clear rendered Context payloads that used a now-cleaned target.
@@ -1065,8 +1082,11 @@ class ContextStateMixin:
 
 
 class CognitionStore(
+    MemoryDeliveryMixin,
     ModelLedgerMixin,
     CollaborationMixin,
+    TranscriptMixin,
+    ConversationMixin,
     ExperienceMixin,
     ContextStateMixin,
     DomainStore,
@@ -1080,6 +1100,7 @@ class CognitionStore(
         *,
         migrations_dir: str | Path | None = None,
         apply_migrations: bool = True,
+        **open_options: object,
     ) -> "CognitionStore":
         """Open/migrate the database, then finish redacted work recovery.
 
@@ -1087,12 +1108,19 @@ class CognitionStore(
         makes a process restart finish a deletion whose original writer died
         before it could write the ``skipped`` terminal rows (and it also
         upgrades a pre-R1 database whose barriers are already committed).
+
+        Every remaining keyword is forwarded verbatim to ``RecordStore.open``.
+        That is deliberate: this override used to spell the options out one by
+        one and silently drop any new one, which broke the desktop host three
+        times (ledger, anchor, adoption) whenever a parameter was added
+        upstream.  Only the two options this method consumes are named.
         """
 
         store = super().open(
             db_path,
             migrations_dir=migrations_dir,
             apply_migrations=apply_migrations,
+            **open_options,
         )
         try:
             store.reconcile_redacted_work()

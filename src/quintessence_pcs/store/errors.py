@@ -88,11 +88,36 @@ class CandidateTransitionDenied(StorageError):
     code = "INVALID_TRANSITION"
 
 
+class ClientRequestConflict(StorageError):
+    """The same ``client_request_id`` was reused with another payload.
+
+    RG02's durable idempotency key is ``(conversation, client_request_id)``
+    plus a digest over ``(conversation, text, mode)``.  The same key with the
+    same digest replays the existing turn; a different digest is a conflict and
+    must never create a second turn or call a model.
+    """
+
+    code = "CONFLICT"
+
+
+class TurnStateConflict(StorageError):
+    """A conversation turn is not in the state a transition requires.
+
+    Examples: starting a turn that is not ``accepted``, publishing a message
+    after the turn left ``running``, or a moved turn counter.  The caller must
+    read the current state and report it honestly instead of retrying blindly.
+    """
+
+    code = "INVALID_TRANSITION"
+
+
 __all__ = [
     "CandidateTransitionDenied",
+    "ClientRequestConflict",
     "ConsultContextNotCommittable",
     "ContextTooLarge",
     "InvalidWorkCompletion",
     "NeedsContext",
+    "TurnStateConflict",
     "WorkAlreadyCompleted",
 ]

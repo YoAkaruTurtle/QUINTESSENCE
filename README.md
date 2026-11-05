@@ -28,11 +28,11 @@
 
 ---
 
-QUINTESSENCE is an open-source research and engineering project exploring how AI systems can preserve, revise, and develop cognitive state across interactions — beyond the lifespan of any single language-model call. It keeps persistent state, evidence provenance, and belief revision outside the model, while a replaceable language model participates in inference.
+QUINTESSENCE is a general-purpose personal AI persistent-state and cognitive collaboration system. It combines a replaceable LLM with long-lived Persona, Memory and Cognition, managed by a trusted host. Persistent state, provenance and belief revision live outside the model; this is research and engineering toward continuity, not a claim of consciousness or complete autonomous learning.
 
 A Persistent Cognitive System keeps experiences, current beliefs, provenance, versions, and unfinished work across calls, and treats model output as a candidate subject to domain rules rather than as directly authoritative state. This differs from a conventional LLM memory layer, which mainly stores and retrieves text for prompts: PCS adds explicit evidence relationships, scoped beliefs, versioned retraction and replacement, formal Context assembly, and commit and audit boundaries. Retrieval is one part; the system also governs whether a proposed belief may become persistent state.
 
-> **Early research stage. The GitHub repository is public.** Status checked 2026-10-24. The M1–M6 phases (migration, licensing, formal mainline, and Public repository) are complete. The cognitive substrate, the controlled revision chain, and the P0 unified LLM–PCS collaboration layer have implementations and real-model run records. The P0 integration is on the current review line, not yet merged to `main`; formal release packaging, signing, and human research evaluation remain separate steps.
+> **Early research stage; status checked 2026-11-05.** Local `main` includes the J-series engineering work and folder-instance A/B/C implementation. Chat, Persona/SDRPE, Scope Recall integration, Cognition governance, recovery and Windows folder selection have code and scoped tests. Windows packaging and installation have been exercised locally; signing, a formal binary release and genuinely clean-machine installation remain unverified or pending. Engineering completion does not establish autonomous cognition or general behavioral reliability.
 
 ## Why this matters
 
@@ -50,14 +50,19 @@ The long-term goal is a system with identity continuity, memory, cognition, eval
 
 | Capability | Current status | Scope |
 |---|---|---|
-| Persistent state and provenance | Implemented foundation | Events, record versions, evidence links, and controlled state updates |
-| Belief and formal Context | Implemented foundation | Scoped beliefs, retraction and supersession, and canonical model-facing context |
-| Model participation in belief revision | Real-run records exist | Candidate, validation feedback, and persistent revision in controlled cases; success rate and behavioral effect remain limited |
-| Unified consult and cognitive review | Implemented P0, controlled real-model evidence | Reusable LLM–PCS collaboration layer: Consult, deterministic query, Review, candidate approval and recovery |
-| Windows desktop development build | Tested development build | Consult/Review client, trusted sidecar and Credential Manager key storage; unsigned and not a formal release |
-| Cognitive Workbench V0.2 | Experimental prototype | Standalone demo with bespoke orchestration; not the delivered standard chat interface of the core package |
-| Knowledge, Question / Focus, contextual persona feedback | Planned | To be integrated with unified state and the collaboration path |
-| Affect, Load & Recovery, long-term development | Research direction | No complete engineering capability yet |
+| Persistent state and unified LLM–PCS collaboration | Implemented | Versioned records, formal Context, consult/review, bounded chat/tool orchestration and authoritative receipts |
+| Persona and expression | Implemented | Reviewed profile publication/activation, expression policy and examples; optional two-stage SDRPE; model-default style without a custom Persona |
+| Scope Recall memory integration | Implemented, with limits | Experience delivery, persisted upstream events, browse/search and bounded automatic recall; semantic consolidation/vector workers are not automatically provisioned by the desktop adapter |
+| Cognition | Implemented foundation | Source-linked beliefs, direct/inferred support rules, revision and impact-based automatic/manual review; durable decisions, not proof of semantic truth |
+| Conversations and cross-session use | Implemented | Saved transcripts, history search, Memory recall and cognition reuse; model self-reports are not storage receipts |
+| Independent instance folders: A/B/C | Implemented and exercised | Empty creation, complete-folder migration/restart, safe partial completion and explicit legacy onboarding |
+| Windows desktop and local installer | Tested locally | Folder picker, connection/status, settings and review; unsigned development build, clean-machine test not run |
+| Cognitive Workbench V0.2 | Frozen experimental prototype | Separate bespoke demo, not the standard desktop application |
+| Dreaming, Work/DSH and deeper growth | Planned / research | See the roadmap; no complete autonomous continual-learning system |
+
+### Current limits
+
+The host adapter currently establishes raw-event storage and lexical recall. Scope Recall semantic consolidation and embedding require separately configured and driven upstream workers; queued work is not evidence that those capabilities ran. PCS deletion does not yet physically remove already-delivered Memory content. Recovery assets travel inside the instance folder, so a joint rollback of database, ledger and Anchor cannot be reliably detected. Windows compatibility with injected overlays remains environment-dependent; local installation is not clean-machine validation.
 
 ### A concrete example: revising “this tool does not work”
 
@@ -73,7 +78,7 @@ Engineering tests check state updates, versions, validation, and recovery mechan
 
 The PCS2-010 engineering work is closed. The formal EXP-01 v4 study ran six times: one run completed belief formation, revision, and the later Advice stage; three did not trigger a valid initial operation; two produced invalid operations during revision. Human blind review and final research conclusions remain pending. The earlier five exploratory rounds are a different batch and are not pooled with v4.
 
-The current P0 review line's engineering acceptance record includes **972 Python regression tests passing (3 skipped)**, frontend and Rust checks, packaged-sidecar smoke checks, and repository-gate verification. This shows that the line passes the corresponding engineering checks; it does not prove stable cognitive transfer. In the synthetic C13b run, a real DeepSeek call queried a formally committed belief, and the owner observed the revised belief being used after a client restart; the durable experiment records support the belief/query/commit path, while process-identity and human evaluation remain separately qualified.
+The P0 engineering acceptance record includes the offline Python suite, frontend and Rust checks, packaged-sidecar smoke checks, and repository-gate verification; [docs/development/STATUS.md](docs/development/STATUS.md) records the latest run and its exact counts. This shows that the line passes the corresponding engineering checks; it does not prove stable cognitive transfer. In the synthetic C13b run, a real DeepSeek call queried a formally committed belief, and the owner observed the revised belief being used after a client restart; the durable experiment records support the belief/query/commit path, while process-identity and human evaluation remain separately qualified.
 
 ## How the system is organized
 
@@ -92,34 +97,44 @@ The five conceptual capabilities in the architecture are Persona, Memory, Cognit
 
 ## Getting started
 
-The GitHub repository is public. There is no confirmed public release package or installation entry point yet. This document does not provide unverified installation commands, and the standalone Workbench demo is not the core package's default feature.
+The source is public; a signed public binary release is not claimed. For a Windows development package, follow the prerequisites and build commands in [the desktop guide](apps/desktop/README.md#development). Build output stays outside the checkout. A bare Cargo release executable is insufficient: the frozen Python sidecar and its resources must be bundled beside the host.
 
-### Source-tree checks (Windows / Python 3.12)
+With the complete application installed:
 
-Python 3.12+ is required. The current verification environment is Windows; Linux has not been verified. From the repository root:
+1. Open QUINTESSENCE → **Settings → Instance folder → Choose folder**.
+2. Select an empty folder to initialize, or a complete existing folder to connect. A partial folder is completed only when its component history permits it; damage or unexplained loss stops connection.
+3. Configure the supported model endpoint/model and your API credential in Settings. Model service access, authorization and network connectivity are required for external calls; credentials remain in Windows Credential Manager or the deployment process environment.
+4. Wait for connection/reload, then chat, browse memory/history and inspect Cognition review. A custom Persona is optional; without one the model uses its own default expression style. The generated Persona README explains how to add one gradually.
+5. Quit before copying an instance. Copy the **entire folder**, including safety records, then select its new location. See [instance operations and recovery limits](docs/desktop/INSTANCE-FOLDERS.md).
+
+Unknown legacy component history requires an explicit, audited confirmation that the component never existed. Accepting a new PS06 recovery baseline is a separate decision and does not authorize replacement of lost data.
+
+### Source-tree checks (Windows / Python 3.12+)
 
 ```powershell
 python tools/run_tests.py
 python tools/check_repository.py
 ```
 
-`run_tests.py` uses synthetic data and a loopback fake provider, and writes test output to a temporary directory outside the checkout. `check_repository.py` checks the path allowlist, sensitive patterns, and reachable Git history. There is no confirmed installation or command-line entry point; these commands are only for source-tree development checks.
-
-Release packaging will add versioned installation instructions, dependencies, and synthetic examples. Linux verification remains future work; current engineering acceptance does not extend to a cross-platform support claim.
+The core uses the standard library. Folder/Scope Recall and packaged tests additionally need the validated upstream runtime and build prerequisites; see the desktop guide. Tests use synthetic data and loopback providers, with output outside the checkout. Windows is the exercised platform; Linux/macOS support is not established.
 
 ## Next step
 
-The P0 collaboration layer is implemented on the review line; the next engineering step is publication preparation and merge review, followed by Knowledge, Question / Focus, persona-context feedback, and host integration.
-
-One key validation: after revising a belief, close the process, clear the chat cache, and ask a related question. Can the system still retrieve the correct version from persistent state and handle new applicability conditions appropriately? See [ROADMAP.md](ROADMAP.md).
+The J-series and A/B/C engineering increments are implemented within their documented scope. Next work is Dreaming and incremental maintenance, Work/DSH integration, deeper Cognition research, cross-module deletion governance, Persona evolution and installation compatibility. Existing bounded maintenance code is a foundation, not a completed Dreaming system. See [ROADMAP.md](ROADMAP.md).
 
 ## Development and contributions
 
-The project is independently maintained and uses **AI-assisted code, tests, and documentation**; the maintainer owns direction, trade-offs, and delivery, and AI output is reviewed and verified. AI-assisted contributions should disclose their use and follow the project's contribution rules.
+The project is personally led: the maintainer sets architecture, direction and key decisions, using **AI assistance for design, programming, testing and review**. Generated work is checked and verified; neither sole manual authorship nor AI independence is claimed. AI-assisted contributions should disclose their use and follow the project's contribution rules.
 
 Future development of the general PCS uses this repository as the sole authoritative source mainline. The legacy research repository, experiment worktrees, and sealed materials are preserved as historical and research sources only; they are not the code authority for the general PCS.
 
 Contributions are welcome around concrete problems, minimal reproductions, synthetic tests, and well-defined capability gaps. See [CONTRIBUTING.md](CONTRIBUTING.md). Do not submit private conversations, instance databases, persona profiles, keys, or other sensitive data. See [MIGRATION-BOUNDARY.md](docs/development/MIGRATION-BOUNDARY.md) for the maintenance boundary.
+
+## Third-party acknowledgements
+
+Thank you to [Scope Recall](https://github.com/410979729/scope-recall-hermes), repository owner/maintainer **410979729**, and the **scope-recall contributors** for an important foundation of QUINTESSENCE's long-term memory capability. QUINTESSENCE integrates and adapts Scope Recall; its memory engine, storage and retrieval implementation are upstream work. QUINTESSENCE supplies host collaboration, Experience projection/delivery, binding and management integration, and its own Cognition mechanisms.
+
+The validated build baseline is `hermes-scope-recall` **3.14.1**, upstream revision [`2b640260`](https://github.com/410979729/scope-recall-hermes/tree/2b640260134565ac7fef3a76644e352a50866533). Its MIT notice, **Copyright (c) 2026 scope-recall contributors**, and complete [MIT text](licenses/Scope-Recall-MIT.txt) are preserved. See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency licenses and distribution boundaries.
 
 ## License and data
 

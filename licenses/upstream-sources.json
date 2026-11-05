@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Scope-Recall-MIT.txt",
+    "source": "https://github.com/410979729/scope-recall-hermes/blob/2b640260134565ac7fef3a76644e352a50866533/LICENSE",
+    "git_blob": "a1bf6f317d4603f3378cc35ed53e1d0b7ece9e7d"
+  },
+  {
+    "name": "alloc-stdlib-BSD-3-Clause.txt",
+    "source": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+    "git_blob": "cd496ba72eb37e83a44958358d1f89a8a28cbc15"
+  },
+  {
+    "name": "webview2-rs-MIT.txt",
+    "source": "https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+    "git_blob": "de9a7e660e173136b351982a34f715af424ff812"
+  },
+  {
+    "name": "OpenSSL-LICENSE.txt",
+    "source": "https://github.com/openssl/openssl/blob/openssl-3.0.16/LICENSE.txt",
+    "git_blob": "49cc83d2ee29d13453188217f0e4edd70c7f842f"
+  },
+  {
+    "name": "expatLicense.txt",
+    "source": "https://github.com/libexpat/libexpat/blob/R_2_7_1/expat/COPYING",
+    "git_blob": "c6d184a8aae845ce7bf4d195b214d8244d457f8f"
+  },
+  {
+    "name": "xzLicense.txt",
+    "source": "https://github.com/tukaani-project/xz/blob/v5.2.5/COPYING",
+    "git_blob": "20e60d5b2427334e1fec6701e7c5ad0da0bc8a5d"
+  },
+  {
+    "name": "zlibLicense.txt",
+    "source": "https://github.com/madler/zlib/blob/v1.3.1/LICENSE",
+    "git_blob": "ab8ee6f71428c3e4646b12b64ad387cde33462e5"
+  },
+  {
+    "name": "WebView2-SDK-LICENSE.txt",
+    "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+    "version": "1.0.3800.47",
+    "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
+    "package_sha256": "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db",
+    "loader_sha256": "89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8"
+  },
+  {
+    "name": "WebView2-SDK-NOTICE.txt",
+    "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+    "version": "1.0.3800.47",
+    "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90",
+    "package_sha256": "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db",
+    "loader_sha256": "89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8"
+  },
+  {
+    "name": "MPL-2.0.txt",
+    "source": "https://www.mozilla.org/en-US/MPL/2.0/",
+    "obtained_from": "cssparser 0.37.0 original LICENSE",
+    "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+  },
+  {
+    "name": "NSIS-COPYING.txt",
+    "source": "https://sourceforge.net/projects/nsis/files/NSIS%203/3.13/",
+    "version": "3.13",
+    "obtained_from": "official Tauri-verified NSIS 3.13 distribution",
+    "sha256": "388357c1215ff403c5ebde3a5ecd273e68f8b79a579996775245d1ee65442aba"
+  }
+]

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model_output.json",
+  "title": "CollabModelOutputV2",
+  "description": "One versioned chat model output for the structured tool loop. It carries no authoritative request_id, read_set, state_revision, authorization, context_id, turn_id, conversation_id, stage_id or attempt_id. The action set is final / call_tool / wait; commentary is optional and may accompany call_tool, final or wait; messages is an optional ordered bubble list for final only (renderer collab.v2.renderer.8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action"
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "final",
+        "call_tool",
+        "wait"
+      ]
+    },
+    "reply": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "commentary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      }
+    },
+    "tool_call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "arguments"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_.]{0,127}$"
+        },
+        "arguments": {
+          "type": "object"
+        }
+      }
+    },
+    "wait_question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "references": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "_common.json#/$defs/source_ref"
+      }
+    },
+    "brief_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    }
+  }
+}

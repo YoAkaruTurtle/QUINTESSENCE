@@ -65,6 +65,12 @@ OUTCOMES = (OUTCOME_CREATED, OUTCOME_DUPLICATE)
 #: kinds together with the consumer that understands them.
 PENDING_WORK_KIND = "event.derive"
 
+#: Work kinds that exist only to finish an internal derivation (event-cause
+#: linking, correction back-fill).  They are processed by the store, never by a
+#: person, so a Review surface that lists them would show rows with no possible
+#: candidate.  Kept explicit so a new chore kind must be registered here.
+DERIVATION_WORK_KINDS = frozenset({PENDING_WORK_KIND, "event.derive.correction"})
+
 CAUSE_PENDING = "pending"
 CAUSE_RESOLVED = "resolved"
 
@@ -480,6 +486,7 @@ __all__ = [
     "OUTCOMES",
     "OUTCOME_CREATED",
     "OUTCOME_DUPLICATE",
+    "DERIVATION_WORK_KINDS",
     "PENDING_WORK_KIND",
     "PendingWork",
 ]

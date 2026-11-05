@@ -30,6 +30,20 @@
   --mono: "Cascadia Mono", "Consolas", "SFMono-Regular", ui-monospace, monospace;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff; --bg-veil: #f3f4f5;
+  --surface: #ffffff; --surface-2: #f3f4f5; --surface-3: #e9ecef;
+  --ink: #202428; --ink-soft: #343b42; --muted: #606a73;
+  --line: #d7dce1; --line-strong: #89939c;
+  --brand: #f2ce20; --brand-strong: #dec019; --brand-soft: rgba(242, 206, 32, .16);
+  --focus: #665500; --ok: #226c46; --warn: #755100; --danger: #a03030;
+  --shadow: 0 12px 36px rgba(20, 30, 40, .12);
+}
+:root[data-theme="light"] body { background: var(--bg); }
+.settings-field { display: grid; gap: 8px; margin: 16px 0; }
+.settings-field select, .settings-field input { width: 100%; min-width: 0; color: var(--ink); background: var(--surface-2); }
+
 * {
   box-sizing: border-box;
 }
@@ -294,6 +308,25 @@ button:disabled {
   font-style: italic;
 }
 
+.persona-chip {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.persona-chip.is-not-ready {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .icon-button {
   display: inline-grid;
   place-items: center;
@@ -470,7 +503,7 @@ h1 {
 }
 
 .message-ai .bubble {
-  background: linear-gradient(180deg, #111417 0%, #0f1114 100%);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 6px 18px 18px 18px;
   padding: 18px 20px;
@@ -1553,7 +1586,7 @@ h1 {
   overflow-y: auto;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  background: #0c0e10;
+  background: var(--surface);
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
   padding: 18px 20px 16px;
   display: flex;
@@ -1692,7 +1725,7 @@ h1 {
   margin: 0 auto;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #121518, #0f1114);
+  background: var(--surface);
   box-shadow: var(--shadow);
   padding: 12px 14px 10px;
   transition: border-color 160ms ease;
@@ -1879,7 +1912,7 @@ h1 {
   width: min(490px, 94vw);
   display: flex;
   flex-direction: column;
-  background: #0c0e10;
+  background: var(--surface);
   border-left: 1px solid var(--line-strong);
   box-shadow: -24px 0 60px rgba(0, 0, 0, 0.55);
   z-index: 31;
@@ -2508,3 +2541,619 @@ code {
     padding: 7px 0 9px;
   }
 }
+
+/* RG02 conversation workspace: layout only, no visual redesign. */
+.chat-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(820px, 100%);
+  margin: 0 auto;
+  position: relative;
+}
+
+.chat-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chat-select {
+  flex: 1 1 220px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: inherit;
+}
+
+.chat-busy {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+/* RG08 card C2: explicit entry for the older pages of a long transcript. */
+.chat-history {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 2px 12px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-history-status {
+  opacity: 0.8;
+}
+
+.chat-history-error {
+  max-width: 72%;
+  color: var(--danger);
+}
+
+.chat-message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 86%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-message.is-user {
+  align-self: flex-end;
+  background: var(--surface-strong);
+}
+
+.chat-message.is-assistant {
+  align-self: flex-start;
+}
+
+.chat-message.is-redacted .chat-text {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* RG08: explicit ordered bubbles.  The gap is rhythm, not a delay. */
+.chat-message.is-bubble-split {
+  margin-bottom: 6px;
+}
+
+.chat-message.is-bubble-continuation .chat-role {
+  display: none;
+}
+
+/* One restrained entry per bubble; never replayed on a polling re-render. */
+.chat-message.bubble-reveal,
+.chat-commentary.bubble-reveal {
+  animation: bubble-reveal 220ms ease-out both;
+}
+
+@keyframes bubble-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-message.bubble-reveal,
+  .chat-commentary.bubble-reveal {
+    animation: none;
+  }
+}
+
+.chat-role {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.chat-empty,
+.chat-status,
+.chat-turn-state {
+  padding: 10px 12px;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.chat-turn-state {
+  border-left: 3px solid var(--warn, #b8860b);
+}
+
+/* RG03: public process panel, stop button and tool detail */
+.cancel-button {
+  color: var(--danger, #b3423a);
+}
+
+.chat-process {
+  margin: 0.6rem 0 1.2rem;
+  border: 1px solid var(--line, rgba(120, 110, 95, 0.28));
+  border-radius: 0.7rem;
+  background: var(--panel-soft, rgba(250, 247, 240, 0.55));
+  padding: 0.35rem 0.7rem;
+}
+
+.chat-process-summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+.chat-process-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+.process-commentary {
+  font-size: 0.9rem;
+  padding: 0.35rem 0.55rem;
+  border-left: 2px solid var(--accent, #8a6d3b);
+  background: var(--panel, rgba(255, 253, 248, 0.8));
+  border-radius: 0.25rem;
+}
+
+.process-step {
+  border-top: 1px dashed var(--line, rgba(120, 110, 95, 0.25));
+  padding-top: 0.35rem;
+}
+
+.process-step-head {
+  cursor: pointer;
+  font-size: 0.82rem;
+  opacity: 0.9;
+}
+
+.process-step-body {
+  padding: 0.3rem 0 0.1rem 0.6rem;
+}
+
+.process-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+  margin-top: 0.3rem;
+}
+
+.process-pre {
+  margin: 0.2rem 0 0.4rem;
+  padding: 0.5rem 0.6rem;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--code-bg, rgba(40, 38, 34, 0.06));
+  border-radius: 0.35rem;
+}
+
+.process-note {
+  font-size: 0.82rem;
+  opacity: 0.8;
+}
+
+.process-details {
+  margin-top: 0.45rem;
+}
+
+/* RG03: the process panel sits on a light surface in both themes. */
+.chat-process,
+.chat-process .process-pre,
+.chat-process .process-commentary,
+.chat-process .process-note,
+.chat-process .process-label,
+.chat-process .process-step-head,
+.chat-process .chat-process-summary {
+  color: #241f18;
+}
+
+.chat-process .process-commentary {
+  background: #f4efe3;
+  border-left-color: #8a6d3b;
+}
+
+.chat-process .process-pre {
+  background: #ece5d6;
+}
+
+.chat-process .process-label,
+.chat-process .process-step-head,
+.chat-process .chat-process-summary {
+  opacity: 0.75;
+}
+
+/* RG04: transcript archive lookup and the two independent turn states. */
+
+.chat-postprocess {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 2px 0 10px 52px;
+}
+
+.postprocess-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid #c9c0ad;
+  background: #f4efe3;
+  color: #4a4337;
+}
+
+.postprocess-saved {
+  border-color: #9aa88f;
+  background: #eef2e8;
+  color: #3f5236;
+}
+
+.postprocess-memory-pending,
+.postprocess-memory-outcome_unknown {
+  border-color: #c8a34a;
+  background: #fbf3dc;
+  color: #6b5318;
+}
+
+.postprocess-memory-delivered {
+  border-color: #7f9b74;
+  background: #e8f0e2;
+  color: #35502c;
+}
+
+.postprocess-memory-needs_review,
+.postprocess-memory-blocked,
+.postprocess-memory-obsolete {
+  border-color: #b58b84;
+  background: #f6e8e5;
+  color: #6b3a31;
+}
+
+.postprocess-retry {
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+.transcript-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 7vh 16px 16px;
+  background: rgba(35, 30, 22, 0.45);
+}
+
+.transcript-panel {
+  width: min(760px, 96vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+  padding: 16px;
+  border-radius: 14px;
+  background: #fbf8f0;
+  border: 1px solid #cfc5b0;
+  box-shadow: 0 18px 50px rgba(30, 25, 18, 0.35);
+}
+
+.transcript-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.transcript-note,
+.transcript-scan,
+.transcript-truncated,
+.transcript-meta {
+  font-size: 12px;
+  color: #6c6253;
+}
+
+.transcript-form {
+  display: flex;
+  gap: 8px;
+}
+
+.transcript-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #c9c0ad;
+  background: #fffdf8;
+}
+
+.transcript-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  min-height: 60px;
+}
+
+.transcript-result {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid #d7cebc;
+  background: #fffdf8;
+  color: #2f2a22;
+  cursor: pointer;
+}
+
+.transcript-result:hover:not(:disabled) {
+  border-color: #8a6d3b;
+}
+
+.transcript-result:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.transcript-snippet {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.transcript-empty,
+.transcript-error {
+  padding: 10px 2px;
+  font-size: 13px;
+}
+
+.transcript-error {
+  color: #8a2f24;
+}
+
+:root[data-theme="light"] .composer-shell,
+:root[data-theme="light"] .review-footer { background: var(--bg); }
+:root[data-theme="light"] .send-button,
+:root[data-theme="light"] .confirm-button,
+:root[data-theme="light"] .primary-button { color: #262410; }
+:root[data-theme="light"] .send-button:disabled { background: var(--surface-3); border-color: var(--line); color: var(--muted); }
+:root[data-theme="light"] code { background: var(--surface-2); color: var(--ink); }
+
+/* UI-F01/UI message submit: local pending user bubble, not a host success.
+   Card C: the projection uses the same role/text structure as the official
+   user bubble; the send status is reported once in .chat-status, never inside
+   the bubble, so confirming it cannot change the bubble height. */
+.chat-message.is-pending {
+  opacity: 0.82;
+}
+
+/* RG08: one search panel, two explicitly labelled sources. */
+.knowledge-panel {
+  width: min(820px, 96vw);
+  max-height: 84vh;
+}
+
+.knowledge-results {
+  gap: 14px;
+}
+
+.knowledge-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.knowledge-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid #e2d9c6;
+}
+
+.knowledge-section:first-child .knowledge-section-head {
+  border-top: none;
+  padding-top: 0;
+}
+
+.knowledge-section-title {
+  font-size: 13px;
+}
+
+.knowledge-chip {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid #cfc5b0;
+  background: #f1eadb;
+  font-size: 11px;
+  color: #5b5244;
+  white-space: nowrap;
+}
+
+.knowledge-chip-memory {
+  background: #e3ecdf;
+  border-color: #a8bd9f;
+  color: #33452c;
+}
+
+.knowledge-chip-transcript {
+  background: #e4e8f0;
+  border-color: #aeb8c8;
+  color: #354052;
+}
+
+.knowledge-chip-state {
+  background: #fff4dc;
+  border-color: #d6c08a;
+}
+
+.knowledge-chip-source {
+  background: transparent;
+  color: #7a7060;
+}
+
+.knowledge-count {
+  font-size: 11px;
+  color: #7a7060;
+}
+
+.knowledge-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-time {
+  font-size: 11px;
+  color: #6c6253;
+}
+
+.knowledge-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid #d7cebc;
+  background: #fffdf8;
+  color: #2f2a22;
+}
+
+.knowledge-snippet {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.knowledge-ref,
+.knowledge-source,
+.knowledge-scan,
+.knowledge-truncated {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6c6253;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-ref {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.knowledge-empty,
+.knowledge-error,
+.knowledge-note {
+  padding: 8px 2px;
+  font-size: 12px;
+  color: #6c6253;
+}
+
+.knowledge-error {
+  color: #8a2f24;
+}
+
+.knowledge-note.is-unavailable {
+  color: #7a531f;
+}
+
+.knowledge-input:disabled {
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------------
+   RG08 card D: explicit bubbles and the replay panel's explicit gaps.
+   These selectors are disjoint from card C's pending/scroll rules.
+   -------------------------------------------------------------------------- */
+
+.chat-message.is-bubble-split {
+  margin-bottom: 8px;
+}
+
+.chat-message.is-bubble-continuation {
+  margin-top: 0;
+}
+
+.process-gap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.process-gap.is-error {
+  color: var(--danger);
+}
+
+.process-gap.is-busy {
+  color: var(--warn, var(--muted));
+}
+
+.process-gap.is-unavailable,
+.process-gap.is-not-called,
+.process-gap.is-inconsistent,
+.process-gap.is-format-blocked,
+.process-gap.is-rejected {
+  color: var(--muted);
+}
+
+.process-gap.is-inconsistent,
+.process-gap.is-format-blocked,
+.process-gap.is-rejected {
+  font-weight: 600;
+}
+
+.process-retry {
+  flex: none;
+  font-size: 0.75rem;
+  padding: 2px 7px;
+}
+
+.process-args,
+.process-result {
+  min-width: 0;
+}
+
+.process-args .process-pre,
+.process-result .process-pre {
+  margin-top: 0;
+}
+
+.process-step[open] > .process-step-head {
+  opacity: 1;
+}
+
+.instance-settings .setting-input { width: 100%; box-sizing: border-box; }
+.instance-settings .setting-row { margin-top: 10px; }
+.instance-connecting-overlay { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; background: rgba(15, 19, 28, .88); color: #f3f4f6; font-size: 16px; }

@@ -7,10 +7,11 @@
 //! ``result_unknown = true``; the caller must not retry a non-idempotent
 //! consult automatically.
 
+use crate::logs::{Level, LogStore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -200,7 +201,6 @@ pub struct SidecarManager {
     pending: Arc<Mutex<HashMap<String, Sender<HostReply>>>>,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
-    stderr_tail: Arc<Mutex<VecDeque<String>>>,
     reader: Mutex<Option<thread::JoinHandle<()>>>,
     stderr_thread: Mutex<Option<thread::JoinHandle<()>>>,
     info: SidecarInfo,
@@ -209,7 +209,7 @@ pub struct SidecarManager {
 
 impl SidecarManager {
     pub fn spawn(paths: &SidecarPaths, config_path: &Path) -> Result<Self, HostError> {
-        Self::spawn_with_env(paths, config_path, None, None)
+        Self::spawn_with_env(paths, config_path, None, None, None)
     }
 
     /// Spawn with an optional model credential in the child's environment.
@@ -219,6 +219,7 @@ impl SidecarManager {
         config_path: &Path,
         api_key_env: Option<&str>,
         api_key: Option<&str>,
+        logs: Option<Arc<LogStore>>,
     ) -> Result<Self, HostError> {
         let info = SidecarInfo::from_paths(paths)?;
         let mut command = Command::new(match &paths.launch {
@@ -267,7 +268,7 @@ impl SidecarManager {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        Self::spawn_command(command, info)
+        Self::spawn_command(command, info, logs)
     }
 
     /// Test seam: spawn an arbitrary child with the production framing/state.
@@ -276,10 +277,14 @@ impl SidecarManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        Self::spawn_command(command, info)
+        Self::spawn_command(command, info, None)
     }
 
-    fn spawn_command(mut command: Command, info: SidecarInfo) -> Result<Self, HostError> {
+    fn spawn_command(
+        mut command: Command,
+        info: SidecarInfo,
+        logs: Option<Arc<LogStore>>,
+    ) -> Result<Self, HostError> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -304,11 +309,11 @@ impl SidecarManager {
         let pending: Arc<Mutex<HashMap<String, Sender<HostReply>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
 
         let reader_child = Arc::clone(&child);
         let reader_pending = Arc::clone(&pending);
         let reader_alive = Arc::clone(&alive);
+        let reader_logs = logs.clone();
         let reader = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -325,6 +330,13 @@ impl SidecarManager {
                         }
                         Err(error) => {
                             reader_alive.store(false, Ordering::SeqCst);
+                            if let Some(logs) = &reader_logs {
+                                logs.record_lifecycle(
+                                    Level::Info,
+                                    "sidecar.exited",
+                                    "reason=protocol_error",
+                                );
+                            }
                             fail_all(&reader_pending, error);
                             kill_child(&reader_child);
                             return;
@@ -332,6 +344,13 @@ impl SidecarManager {
                     },
                     Ok(None) => {
                         reader_alive.store(false, Ordering::SeqCst);
+                        if let Some(logs) = &reader_logs {
+                            logs.record_lifecycle(
+                                Level::Info,
+                                "sidecar.exited",
+                                "reason=stdout_eof",
+                            );
+                        }
                         fail_all(
                             &reader_pending,
                             HostError::unknown(
@@ -343,6 +362,13 @@ impl SidecarManager {
                     }
                     Err(error) => {
                         reader_alive.store(false, Ordering::SeqCst);
+                        if let Some(logs) = &reader_logs {
+                            logs.record_lifecycle(
+                                Level::Info,
+                                "sidecar.exited",
+                                "reason=io_error",
+                            );
+                        }
                         fail_all(&reader_pending, error);
                         kill_child(&reader_child);
                         return;
@@ -351,7 +377,7 @@ impl SidecarManager {
             }
         });
 
-        let stderr_tail_thread = Arc::clone(&stderr_tail);
+        let stderr_logs = logs.clone();
         let stderr_thread = thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
@@ -361,11 +387,10 @@ impl SidecarManager {
                     Ok(0) => return,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        if let Ok(mut tail) = stderr_tail_thread.lock() {
-                            tail.push_back(trimmed);
-                            while tail.len() > 200 {
-                                tail.pop_front();
-                            }
+                        // Raw stderr is consumed here and nowhere else: only
+                        // the redacted, bounded entry survives.
+                        if let Some(logs) = &stderr_logs {
+                            logs.record_sidecar_line(&trimmed);
                         }
                     }
                     Err(_) => return,
@@ -379,7 +404,6 @@ impl SidecarManager {
             pending,
             next_id: AtomicU64::new(1),
             alive,
-            stderr_tail,
             reader: Mutex::new(Some(reader)),
             stderr_thread: Mutex::new(Some(stderr_thread)),
             info,
@@ -401,13 +425,6 @@ impl SidecarManager {
 
     pub fn pending_count(&self) -> usize {
         self.pending.lock().map(|map| map.len()).unwrap_or(0)
-    }
-
-    pub fn stderr_tail(&self) -> Vec<String> {
-        self.stderr_tail
-            .lock()
-            .map(|tail| tail.iter().cloned().collect())
-            .unwrap_or_default()
     }
 
     pub fn request(&self, method: &str, params: Value) -> HostReply {

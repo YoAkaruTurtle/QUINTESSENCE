@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
@@ -51,13 +52,15 @@ from ...foundation.errors import (
     InvalidInput,
     RecordKindMismatch,
     RecordNotFound,
+    Redacted,
     ScopeViolation,
     SourceRedacted,
     StateRevisionConflict,
 )
-from ...foundation.jsonutil import canonical_json_text
+from ...foundation.jsonutil import canonical_json_text, sha256_hex
 from ...store.cognition import CognitionStore
 from ...store.records import RecordVersion
+from ..aliases import canonicalize_entity_ids
 from ..errors import SourceUntrusted
 from ..memory.episode_shape import parse_episode_body
 from ..refs import EventRef, RecordRef
@@ -83,6 +86,11 @@ CLAIM_TYPES = (
     "capability",
     "general_hypothesis",
     "derived_rule",
+    # J06 policy correction (J1): a statement *about a source*, not about the
+    # world.  "Page P says X" can be mechanically checked; "X is true" cannot be
+    # derived from it.  Keeping the two separate is what lets a web-informed
+    # tentative claim be persisted honestly instead of being pushed to E2.
+    "external_report",
 )
 
 STRENGTHS = ("insufficient", "limited", "moderate", "strong")
@@ -98,6 +106,7 @@ INFERENCE_BASIS_BY_CLAIM_TYPE = {
     "capability": "observation",
     "general_hypothesis": "inductive",
     "derived_rule": "deductive",
+    "external_report": "direct_report",
 }
 
 #: A source kind that may appear as evidence at all.  A model inference and a
@@ -117,6 +126,10 @@ SUPPORT_SOURCE_KINDS = {
     "capability": frozenset({"host_observation"}),
     "general_hypothesis": frozenset(TRUSTED_EVIDENCE_SOURCE_KINDS),
     "derived_rule": frozenset(TRUSTED_EVIDENCE_SOURCE_KINDS),
+    # A fetch is performed and recorded by the host, so host_observation is the
+    # honest source kind: it records "the host received this response", never
+    # "the page's claim is true".
+    "external_report": frozenset({"host_observation"}),
 }
 
 #: Claims that must state their applicability range in the Record envelope
@@ -124,7 +137,77 @@ SUPPORT_SOURCE_KINDS = {
 #: beyond the range the person declared; a global capability/environment claim
 #: would generalize beyond the tested/observed range.
 SCOPE_REQUIRED_CLAIM_TYPES = frozenset(
-    {"user_preference", "environment_state", "capability"}
+    {"user_preference", "environment_state", "capability", "external_report"}
+)
+
+#: The JSON shape of one belief body, expressed for tool schemas.  Kept next to
+#: the validator on purpose: a field added here without a schema update, or the
+#: other way round, shows up in the catalog's consistency test instead of in a
+#: model that cannot form a legal body.
+#: One line per claim type, published in the tool schema.  Without it the model
+#: has to guess whether "the deployment window is Tuesday" is an observation of
+#: the world or a user preference -- and that guess decides whether the change is
+#: graded E0 or E2.
+CLAIM_TYPE_DESCRIPTIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "capability": "a judgement about what the system can do; needs observation",
+        "environment_state": "a judgement about the outside world or a project; needs observation",
+        "external_report": "a source says X; needs a quote from a fetched page",
+        "user_preference": (
+            "how the user wants things to be; an explicit lasting directive needs "
+            "a host binding, while a low-impact ordinary expression is recorded as "
+            "a tentative conversation preference, not a confirmed belief"
+        ),
+        # ``project_decision`` is deliberately absent: it is not a Belief claim
+        # type in this card.  The model-visible descriptions must match the
+        # enum, not suggest a type the schema will reject.
+        "general_hypothesis": "a guess or hypothesis; can stay tentative",
+        "derived_rule": "a rule derived from premises; publication stays blocked",
+    }
+)
+
+BELIEF_BODY_FIELDS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+    {
+        "claim": {"type": "string", "minLength": 1},
+        "claim_type": {"type": "string", "enum": list(CLAIM_TYPES)},
+        "evidence_links": {"type": "array"},
+        "strength": {
+            "type": "string",
+            "enum": list(STRENGTHS),
+            "description": (
+                "how strongly the evidence backs the claim; the number of "
+                "independent support groups caps it: 0 groups -> insufficient, "
+                "1 -> limited, 2 -> moderate, 3+ -> strong. Claiming more than "
+                "the evidence supports is graded E2 (strength_overstated)."
+            ),
+        },
+        "strength_reason": {"type": "string", "minLength": 1},
+        "inference_basis": {"type": "string", "enum": list(INFERENCE_BASES)},
+        "premise_refs": {"type": "array"},
+        "alternative_group_id": {"type": ["string", "null"]},
+        "valid_until": {"type": ["string", "null"]},
+        "review_condition": {"type": "string", "minLength": 1},
+    }
+)
+
+#: Evidence link shape: the four frozen keys plus the optional quote the J06
+#: correction added for external reports.
+EVIDENCE_LINK_FIELDS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+    {
+        "ref": {"type": "object"},
+        "relation": {"type": "string", "enum": list(RELATIONS)},
+        "origin_group_id": {"type": "string", "minLength": 1},
+        "applicability_reason": {"type": "string", "minLength": 1},
+        "quote": {
+            "type": "string",
+            "maxLength": 512,
+            "description": (
+                "an exact fragment of the *fetched page text* (not the search "
+                "result summary); it is checked as a substring of the stored "
+                "body and a mismatch refuses the change"
+            ),
+        },
+    }
 )
 
 BELIEF_BODY_KEYS = frozenset(
@@ -154,6 +237,12 @@ MAX_PREMISE_REFS = 32
 _EVIDENCE_KEYS = frozenset(
     {"ref", "relation", "origin_group_id", "applicability_reason"}
 )
+#: Optional keys an evidence link may carry.  ``quote`` is the verbatim fragment
+#: an ``external_report`` claims to have read; it is optional at the schema level
+#: so existing claim types keep their exact link shape, and required by the
+#: support rules of ``external_report``.
+_OPTIONAL_EVIDENCE_KEYS = frozenset({"quote"})
+MAX_QUOTE_LENGTH = 512
 _EVENT_REF_KEYS = frozenset({"ref_type", "namespace", "event_id"})
 _RECORD_REF_KEYS = frozenset(
     {"ref_type", "namespace", "record_id", "record_version"}
@@ -186,6 +275,40 @@ class BeliefSubmission:
     version: RecordVersion
     receipt: Any
     appended: bool
+
+
+def derive_status(
+    *,
+    claim_type: str,
+    has_support: bool,
+    has_contradiction: bool,
+    expired: bool,
+    retract: bool,
+) -> str:
+    """The frozen status branch of :meth:`BeliefService._derive`.
+
+    Pure by design: it takes only facts that have already been resolved, so the
+    review policy can predict the status a proposal would derive without opening
+    a transaction or reaching the store.  This must stay the single definition --
+    a second copy inside the policy layer would drift from the commit path.
+    """
+
+    if retract:
+        return "retracted"
+    if has_support and has_contradiction:
+        return "contested"
+    if has_contradiction and not has_support:
+        return "contradicted"
+    if not has_support:
+        return "proposed"
+    if claim_type in ("general_hypothesis", "derived_rule"):
+        # The card forbids automatic support for induction and requires a
+        # designated validator for deductive rules; PCS2-008 has neither,
+        # so the honest status is proposed.
+        return "proposed"
+    if expired:
+        return "stale"
+    return "supported"
 
 
 class BeliefService:
@@ -360,37 +483,24 @@ class BeliefService:
         ns = identifiers.require_namespace(namespace)
         cid = identifiers.require_context_id(context_id)
         rid = identifiers.require_request_id(request_id)
-        normalized_scope = normalize_scope(scope)
+        normalized_scope = canonicalize_entity_ids(
+            self._store, ns, normalize_scope(scope)
+        )
         validated = validate_belief_body(body, scope=normalized_scope)
         record_id = str(uuid.uuid4())
         result: list[RecordVersion] = []
 
         def apply(tx: Any) -> None:
-            require_live_context(self._store, context_id=cid, namespace=ns)
-            resolved = self._resolve_evidence_locked(ns, validated)
-            self._check_support_rules_locked(ns, validated, resolved)
-            status, strength = self._derive(
-                ns, validated, resolved, retract=False
-            )
-            effective = dict(validated)
-            effective["strength"] = strength
-            version = tx.append_record_version(
+            self._apply_propose_locked(
+                tx,
+                namespace=ns,
+                context_id=cid,
                 record_id=record_id,
-                record_version=1,
-                kind=BELIEF_KIND,
-                body=effective,
-                status=status,
-                schema_version=BELIEF_SCHEMA_VERSION,
-                privacy_class="private",
-                scope=normalized_scope,
+                validated=validated,
+                normalized_scope=normalized_scope,
+                work_id=work_id,
+                result=result,
             )
-            result.append(version)
-            if work_id is not None:
-                tx.complete_work(
-                    work_id=work_id,
-                    context_id=cid,
-                    outcome="committed",
-                )
 
         if commit_basis is None:
             operation = "belief.propose"
@@ -421,6 +531,57 @@ class BeliefService:
             appended=bool(receipt.record_refs),
         )
 
+    def _apply_propose_locked(
+        self,
+        tx: Any,
+        *,
+        namespace: str,
+        context_id: str,
+        record_id: str,
+        validated: Mapping[str, Any],
+        normalized_scope: Mapping[str, Any],
+        work_id: str | None,
+        result: list[RecordVersion],
+    ) -> None:
+        """Append one new Belief inside an already open TxScope.
+
+        This is the transaction body of :meth:`_propose`, moved here verbatim so
+        one combination commit can validate and append several objects inside a
+        single ``commit_command``.  It performs exactly one append and calls
+        ``complete_work`` last when a work item is bound.
+        """
+
+        require_live_context(
+            self._store,
+            context_id=context_id,
+            namespace=namespace,
+            moved_in_transaction=tuple(ref.record_id for ref in tx.appended),
+        )
+        resolved = self._resolve_evidence_locked(namespace, validated)
+        self._check_support_rules_locked(namespace, validated, resolved)
+        status, strength = self._derive(
+            namespace, validated, resolved, retract=False
+        )
+        effective = dict(validated)
+        effective["strength"] = strength
+        version = tx.append_record_version(
+            record_id=record_id,
+            record_version=1,
+            kind=BELIEF_KIND,
+            body=effective,
+            status=status,
+            schema_version=BELIEF_SCHEMA_VERSION,
+            privacy_class="private",
+            scope=normalized_scope,
+        )
+        result.append(version)
+        if work_id is not None:
+            tx.complete_work(
+                work_id=work_id,
+                context_id=context_id,
+                outcome="committed",
+            )
+
     def _revise(
         self,
         *,
@@ -443,7 +604,9 @@ class BeliefService:
             raise ScopeViolation(
                 f"target is in namespace {target_ref.namespace!r}, not {ns!r}"
             )
-        normalized_scope = normalize_scope(scope)
+        normalized_scope = canonicalize_entity_ids(
+            self._store, ns, normalize_scope(scope)
+        )
         validated = validate_belief_body(
             body, scope=normalized_scope, retract=retract
         )
@@ -455,78 +618,18 @@ class BeliefService:
         noop_version: list[RecordVersion] = []
 
         def apply(tx: Any) -> None:
-            require_live_context(self._store, context_id=cid, namespace=ns)
-            current = self._store.get_current(ns, target_ref.record_id)
-            if current.kind != BELIEF_KIND:
-                raise RecordKindMismatch(
-                    f"record {target_ref.record_id} is kind {current.kind!r}, "
-                    "not a belief"
-                )
-            if current.record_version != target_ref.record_version:
-                raise StateRevisionConflict(
-                    f"belief {target_ref.record_id} moved from version "
-                    f"{target_ref.record_version} to {current.record_version}; "
-                    "revise the current version"
-                )
-            if current.status in ("retracted", "contradicted"):
-                raise InvalidTransition(
-                    f"belief {target_ref.record_id} is {current.status}; PCS2-008 "
-                    "does not implement an explicit reopen"
-                )
-            old_body = parse_belief_body(current)
-            conflict = revision_claim_conflict(old_body, validated)
-            if conflict == CLAIM_TEXT_FROZEN:
-                raise InvalidTransition(
-                    "the claim text is frozen in PCS2-008; a substantive change "
-                    "requires retracting this belief and proposing a new record"
-                )
-            if conflict == CLAIM_TYPE_FROZEN:
-                raise InvalidTransition(
-                    "the claim_type cannot change within one belief record"
-                )
-            resolved = self._resolve_evidence_locked(ns, validated)
-            self._check_support_rules_locked(
-                ns,
-                validated,
-                resolved,
-                self_record_id=target_ref.record_id if not retract else None,
+            self._apply_revise_locked(
+                tx,
+                namespace=ns,
+                context_id=cid,
+                target_ref=target_ref,
+                validated=validated,
+                normalized_scope=normalized_scope,
+                retract=retract,
+                work_id=work_id,
+                result=result,
+                noop_version=noop_version,
             )
-            status, strength = self._derive(
-                ns, validated, resolved, retract=retract
-            )
-            effective = dict(validated)
-            effective["strength"] = strength
-            unchanged = (
-                not retract
-                and canonical_json_text(effective) == canonical_json_text(old_body)
-                and normalized_scope == (current.scope or {})
-            )
-            if unchanged:
-                noop_version.append(current)
-                if work_id is not None:
-                    tx.complete_work(
-                        work_id=work_id,
-                        context_id=cid,
-                        outcome="checked_no_belief",
-                    )
-                return
-            version = tx.append_record_version(
-                record_id=target_ref.record_id,
-                record_version=current.record_version + 1,
-                kind=BELIEF_KIND,
-                body=effective,
-                status=status,
-                schema_version=BELIEF_SCHEMA_VERSION,
-                privacy_class="private",
-                scope=normalized_scope,
-            )
-            result.append(version)
-            if work_id is not None:
-                tx.complete_work(
-                    work_id=work_id,
-                    context_id=cid,
-                    outcome="committed",
-                )
 
         if commit_basis is None:
             operation = "belief.revise"
@@ -572,6 +675,107 @@ class BeliefService:
             appended=False,
         )
 
+    def _apply_revise_locked(
+        self,
+        tx: Any,
+        *,
+        namespace: str,
+        context_id: str,
+        target_ref: RecordRef,
+        validated: Mapping[str, Any],
+        normalized_scope: Mapping[str, Any],
+        retract: bool,
+        work_id: str | None,
+        result: list[RecordVersion],
+        noop_version: list[RecordVersion],
+    ) -> None:
+        """Append the next version of one Belief inside an open TxScope.
+
+        This is the transaction body of :meth:`_revise`, moved here verbatim so
+        one combination commit can validate and append several objects inside a
+        single ``commit_command``.  A legal no-op revision records the current
+        version in ``noop_version`` instead of appending; ``complete_work``
+        stays the last write.
+        """
+
+        require_live_context(
+            self._store,
+            context_id=context_id,
+            namespace=namespace,
+            moved_in_transaction=tuple(ref.record_id for ref in tx.appended),
+        )
+        current = self._store.get_current(namespace, target_ref.record_id)
+        if current.kind != BELIEF_KIND:
+            raise RecordKindMismatch(
+                f"record {target_ref.record_id} is kind {current.kind!r}, "
+                "not a belief"
+            )
+        if current.record_version != target_ref.record_version:
+            raise StateRevisionConflict(
+                f"belief {target_ref.record_id} moved from version "
+                f"{target_ref.record_version} to {current.record_version}; "
+                "revise the current version"
+            )
+        if current.status in ("retracted", "contradicted"):
+            raise InvalidTransition(
+                f"belief {target_ref.record_id} is {current.status}; PCS2-008 "
+                "does not implement an explicit reopen"
+            )
+        old_body = parse_belief_body(current)
+        conflict = revision_claim_conflict(old_body, validated)
+        if conflict == CLAIM_TEXT_FROZEN:
+            raise InvalidTransition(
+                "the claim text is frozen in PCS2-008; a substantive change "
+                "requires retracting this belief and proposing a new record"
+            )
+        if conflict == CLAIM_TYPE_FROZEN:
+            raise InvalidTransition(
+                "the claim_type cannot change within one belief record"
+            )
+        resolved = self._resolve_evidence_locked(namespace, validated)
+        self._check_support_rules_locked(
+            namespace,
+            validated,
+            resolved,
+            self_record_id=target_ref.record_id if not retract else None,
+        )
+        status, strength = self._derive(
+            namespace, validated, resolved, retract=retract
+        )
+        effective = dict(validated)
+        effective["strength"] = strength
+        unchanged = (
+            not retract
+            and canonical_json_text(effective) == canonical_json_text(old_body)
+            and normalized_scope == (current.scope or {})
+        )
+        if unchanged:
+            noop_version.append(current)
+            if work_id is not None:
+                tx.complete_work(
+                    work_id=work_id,
+                    context_id=context_id,
+                    outcome="checked_no_belief",
+                )
+            return
+        version = tx.append_record_version(
+            record_id=target_ref.record_id,
+            record_version=current.record_version + 1,
+            kind=BELIEF_KIND,
+            body=effective,
+            status=status,
+            schema_version=BELIEF_SCHEMA_VERSION,
+            privacy_class="private",
+            scope=normalized_scope,
+        )
+        result.append(version)
+        if work_id is not None:
+            tx.complete_work(
+                work_id=work_id,
+                context_id=context_id,
+                outcome="committed",
+            )
+
     # -------------------------------------------------------------- evidence
 
     def _resolve_evidence_locked(
@@ -582,9 +786,66 @@ class BeliefService:
             ref = link["ref"]
             if ref.get("ref_type") == "event":
                 resolved.append(self._resolve_event_ref(namespace, link))
+            elif ref.get("ref_type") == "collab_input":
+                resolved.append(self._resolve_input_ref(namespace, link))
             else:
                 resolved.append(self._resolve_record_ref(namespace, link))
         return tuple(resolved)
+
+    def _resolve_input_ref(
+        self, namespace: str, link: Mapping[str, Any]
+    ) -> _ResolvedEvidence:
+        """RG05-F02: a current user statement is the evidence for a preference.
+
+        The input is a collaboration row, not an event.  It is resolved through
+        the same deletion barrier beliefs use for events: a deleted or cleared
+        input raises ``SourceRedacted`` rather than being silently treated as a
+        usable statement.
+        """
+
+        ref = link["ref"]
+        if set(ref) != {"ref_type", "namespace", "input_id", "content_version"}:
+            raise InvalidInput(
+                "evidence_links[].ref for a collab_input must have exactly "
+                "ref_type, namespace, input_id and content_version"
+            )
+        if ref.get("namespace") != namespace:
+            raise ScopeViolation(
+                f"evidence input {ref.get('input_id')!r} is in namespace "
+                f"{ref.get('namespace')!r}, not {namespace!r}"
+            )
+        try:
+            row = self._store.load_input(
+                namespace=namespace,
+                input_id=str(ref["input_id"]),
+                content_version=int(ref["content_version"]),
+            )
+        except Redacted as exc:
+            raise SourceRedacted(
+                f"evidence input {ref.get('input_id')} has been deleted"
+            ) from exc
+        except RecordNotFound as exc:
+            raise EvidenceMissing(
+                f"evidence input {ref.get('input_id')} does not exist in this namespace"
+            ) from exc
+        if row.origin_kind != "user_statement":
+            raise SourceUntrusted(
+                f"evidence input {row.input_id} has origin_kind "
+                f"{row.origin_kind!r}; a user statement is required"
+            )
+        group = f"collab_input:{row.input_id}"
+        _require_group(link, group)
+        return _ResolvedEvidence(
+            link=dict(link),
+            ref_type="collab_input",
+            origin_group_id=group,
+            source_kinds=("user_report",),
+            source_instances=("collab_input",),
+            source_event_ids=(row.input_id,),
+            event_ids=(),
+            multi_source=False,
+            imported=False,
+        )
 
     def _resolve_event_ref(
         self, namespace: str, link: Mapping[str, Any]
@@ -598,6 +859,13 @@ class BeliefService:
         if self._store.event_is_deleted(namespace, ref.event_id):
             raise SourceRedacted(
                 f"evidence event {ref.event_id} has been deleted"
+            )
+        projection_gate = getattr(self._store, "projection_is_usable", None)
+        if projection_gate is not None and not projection_gate(
+            namespace, ref.event_id
+        ):
+            raise SourceRedacted(
+                f"evidence event {ref.event_id} has no usable experience projection"
             )
         header = self._store.event_header(namespace, ref.event_id)
         if header is None:
@@ -762,6 +1030,60 @@ class BeliefService:
                     "a user_preference must come from one reporting person; "
                     "supports from different source_instance values were supplied"
                 )
+        if claim_type == "external_report":
+            self._check_external_report_quotes_locked(namespace, supports)
+
+    def _check_external_report_quotes_locked(
+        self, namespace: str, supports: Sequence["_ResolvedEvidence"]
+    ) -> None:
+        """Verify that each quoted fragment really came from its fetch event.
+
+        ``external_report`` claims "source S says X", so the only honest support
+        is a verbatim fragment of what the host actually received.  The check is
+        mechanical and deliberately narrow:
+
+        * the event must carry the captured body (``capture="evidence"``);
+        * ``sha256(text)`` must equal the recorded ``content_sha256``;
+        * ``quote`` must be a substring of ``text``.
+
+        It proves the fragment appears in that response -- nothing about whether
+        the page is right, whether the fragment supports the conclusion, or
+        whether the page was later changed.
+        """
+
+        for item in supports:
+            if item.ref_type != "event":
+                raise _evidence_unusable(
+                    "an external_report must cite a fetch event, not a record",
+                    "evidence_type_mismatch",
+                )
+            quote = item.link.get("quote")
+            if not isinstance(quote, str) or not quote:
+                raise _evidence_unusable(
+                    "an external_report evidence link must carry a quote",
+                    "evidence_quote_missing",
+                )
+            event_id = item.event_ids[0]
+            entry = self._store.get_event(namespace, event_id)
+            payload = entry.payload if isinstance(entry.payload, Mapping) else {}
+            text = payload.get("text")
+            recorded = payload.get("content_sha256")
+            if not isinstance(text, str) or not isinstance(recorded, str):
+                raise _evidence_unusable(
+                    f"fetch event {event_id} carries no captured body; "
+                    "only capture=\"evidence\" fetches can support a claim",
+                    "evidence_text_unavailable",
+                )
+            if sha256_hex(text) != recorded:
+                raise _evidence_unusable(
+                    f"fetch event {event_id} content does not match its digest",
+                    "evidence_content_hash_mismatch",
+                )
+            if quote not in text:
+                raise _evidence_unusable(
+                    f"quote is not a verbatim fragment of fetch event {event_id}",
+                    "evidence_quote_mismatch",
+                )
 
     def _check_premises_locked(
         self,
@@ -821,23 +1143,18 @@ class BeliefService:
         count = self._independent_support_count(namespace, supports)
         strength = _cap_strength(body["strength"], count, claim_type)
         expired = _is_expired(body["valid_until"], self._clock())
-
-        if retract:
-            return "retracted", strength
-        if supports and contradicts:
-            return "contested", strength
-        if contradicts and not supports:
-            return "contradicted", "insufficient"
-        if not supports:
-            return "proposed", "insufficient"
-        if claim_type in ("general_hypothesis", "derived_rule"):
-            # The card forbids automatic support for induction and requires a
-            # designated validator for deductive rules; PCS2-008 has neither,
-            # so the honest status is proposed.
-            return "proposed", strength
-        if expired:
-            return "stale", strength
-        return "supported", strength
+        status = derive_status(
+            claim_type=claim_type,
+            has_support=bool(supports),
+            has_contradiction=bool(contradicts),
+            expired=expired,
+            retract=retract,
+        )
+        # A claim with no support, and a claim the evidence contradicts, both
+        # carry "insufficient" strength regardless of what was requested.
+        if status == "contradicted" or (status == "proposed" and not supports):
+            return status, "insufficient"
+        return status, strength
 
     def _independent_support_count(
         self, namespace: str, supports: Sequence[_ResolvedEvidence]
@@ -1050,6 +1367,113 @@ def revision_claim_conflict(
     return None
 
 
+def _evidence_link_is_live(
+    store: CognitionStore,
+    namespace: str,
+    link: Mapping[str, Any],
+) -> bool:
+    """Whether one evidence link still points at readable, undeleted sources."""
+
+    ref = link["ref"]
+    if ref.get("ref_type") == "event":
+        event_id = ref["event_id"]
+        if store.event_is_deleted(namespace, event_id):
+            return False
+        projection_gate = getattr(store, "projection_is_usable", None)
+        if projection_gate is not None and not projection_gate(
+            namespace, event_id
+        ):
+            return False
+        if store.event_header(namespace, event_id) is None:
+            raise CorruptStore(
+                f"belief evidence event {event_id} is missing"
+            )
+        return True
+    if ref.get("ref_type") == "collab_input":
+        try:
+            row = store.load_input(
+                namespace=namespace,
+                input_id=str(ref["input_id"]),
+                content_version=int(ref["content_version"]),
+            )
+        except Redacted:
+            return False
+        except RecordNotFound as exc:
+            raise CorruptStore(
+                f"belief evidence input {ref.get('input_id')} is missing"
+            ) from exc
+        return row.origin_kind == "user_statement"
+    record = RecordRef.from_value(ref, field="evidence_links[].ref")
+    if store.record_is_deleted(namespace, record.record_id):
+        return False
+    pointer = store.record_pointer(namespace, record.record_id)
+    if pointer is None:
+        raise CorruptStore(
+            f"belief evidence record {record.record_id} is missing"
+        )
+    if pointer.kind != "episode":
+        raise CorruptStore(
+            f"belief evidence record {record.record_id} is not an episode"
+        )
+    try:
+        episode_version = store.get_version(
+            namespace, record.record_id, record.record_version
+        )
+    except RecordNotFound as exc:
+        raise CorruptStore(
+            f"belief evidence episode {record.record_id} has no version "
+            f"{record.record_version}"
+        ) from exc
+    shape = parse_episode_body(episode_version)
+    sources = store.episode_sources_for_record(namespace, record.record_id)
+    if not sources:
+        raise CorruptStore(
+            f"episode {record.record_id} has no episode_sources mapping"
+        )
+    if {item.event_id for item in shape.event_refs} != {
+        source.event_id for source in sources
+    }:
+        raise CorruptStore(
+            f"episode {record.record_id}@{record.record_version} disagrees "
+            "with its episode_sources mapping"
+        )
+    for source in sources:
+        if store.event_is_deleted(namespace, source.event_id):
+            return False
+        if store.event_header(namespace, source.event_id) is None:
+            raise CorruptStore(
+                f"episode {record.record_id} references missing event "
+                f"{source.event_id}"
+            )
+    return True
+
+
+def _premise_is_live(
+    store: CognitionStore,
+    namespace: str,
+    raw: Mapping[str, Any],
+) -> bool:
+    """Whether one premise reference still points at a readable record version."""
+
+    premise = RecordRef.from_value(raw, field="premise_refs[]")
+    if store.record_is_deleted(namespace, premise.record_id):
+        return False
+    if store.record_pointer(namespace, premise.record_id) is None:
+        raise CorruptStore(
+            f"belief premise {premise.record_id} is missing"
+        )
+    try:
+        store.get_version(
+            namespace, premise.record_id, premise.record_version
+        )
+    except RecordNotFound as exc:
+        raise CorruptStore(
+            f"belief premise {premise.record_id} has no version "
+            f"{premise.record_version}"
+        ) from exc
+    return True
+
+
 def belief_evidence_is_live(
     store: CognitionStore,
     *,
@@ -1070,77 +1494,91 @@ def belief_evidence_is_live(
     """
 
     for link in body["evidence_links"]:
-        ref = link["ref"]
-        if ref.get("ref_type") == "event":
-            event_id = ref["event_id"]
-            if store.event_is_deleted(namespace, event_id):
-                return False
-            if store.event_header(namespace, event_id) is None:
-                raise CorruptStore(
-                    f"belief evidence event {event_id} is missing"
-                )
-            continue
-        record = RecordRef.from_value(ref, field="evidence_links[].ref")
-        if store.record_is_deleted(namespace, record.record_id):
+        if not _evidence_link_is_live(store, namespace, link):
             return False
-        pointer = store.record_pointer(namespace, record.record_id)
-        if pointer is None:
-            raise CorruptStore(
-                f"belief evidence record {record.record_id} is missing"
-            )
-        if pointer.kind != "episode":
-            raise CorruptStore(
-                f"belief evidence record {record.record_id} is not an episode"
-            )
-        try:
-            episode_version = store.get_version(
-                namespace, record.record_id, record.record_version
-            )
-        except RecordNotFound as exc:
-            raise CorruptStore(
-                f"belief evidence episode {record.record_id} has no version "
-                f"{record.record_version}"
-            ) from exc
-        shape = parse_episode_body(episode_version)
-        sources = store.episode_sources_for_record(namespace, record.record_id)
-        if not sources:
-            raise CorruptStore(
-                f"episode {record.record_id} has no episode_sources mapping"
-            )
-        if {item.event_id for item in shape.event_refs} != {
-            source.event_id for source in sources
-        }:
-            raise CorruptStore(
-                f"episode {record.record_id}@{record.record_version} disagrees "
-                "with its episode_sources mapping"
-            )
-        for source in sources:
-            if store.event_is_deleted(namespace, source.event_id):
-                return False
-            if store.event_header(namespace, source.event_id) is None:
-                raise CorruptStore(
-                    f"episode {record.record_id} references missing event "
-                    f"{source.event_id}"
-                )
-
     for raw in body["premise_refs"]:
-        premise = RecordRef.from_value(raw, field="premise_refs[]")
-        if store.record_is_deleted(namespace, premise.record_id):
+        if not _premise_is_live(store, namespace, raw):
             return False
-        if store.record_pointer(namespace, premise.record_id) is None:
-            raise CorruptStore(
-                f"belief premise {premise.record_id} is missing"
-            )
-        try:
-            store.get_version(
-                namespace, premise.record_id, premise.record_version
-            )
-        except RecordNotFound as exc:
-            raise CorruptStore(
-                f"belief premise {premise.record_id} has no version "
-                f"{premise.record_version}"
-            ) from exc
     return True
+
+
+@dataclass(frozen=True)
+class BeliefReEvaluation:
+    """Read-only verdict computed from only the still-readable evidence links.
+
+    Produced by :func:`reevaluate_belief_against_live_sources`; it is material
+    for a later Review card, never a commit.  Nothing here is persisted.
+    """
+
+    live_link_count: int
+    retired_refs: tuple[dict[str, Any], ...]
+    status: str
+    strength: str
+    degraded_to_proposed: bool
+
+
+def reevaluate_belief_against_live_sources(
+    store: CognitionStore,
+    *,
+    namespace: str,
+    body: Mapping[str, Any],
+    clock: Callable[[], datetime] | None = None,
+) -> BeliefReEvaluation:
+    """Recompute one stored Belief's verdict without its deleted sources.
+
+    This is the read-only half of the J01 re-evaluation split: it answers
+    "what would this judgement be if only the surviving evidence counted?" and
+    writes nothing.  The verdict is derived through the same rules as the
+    commit path (:meth:`BeliefService._derive`), so the computation cannot
+    drift from what a new proposal would store.
+
+    Writing the verdict back (a new Belief version through Tx B, or a Review
+    candidate) belongs to the later review card and is deliberately absent.
+    A *missing* source is corruption and raises ``CorruptStore``, exactly like
+    :func:`belief_evidence_is_live`.
+    """
+
+    ns = identifiers.require_namespace(namespace)
+    live_links: list[Mapping[str, Any]] = []
+    retired: list[dict[str, Any]] = []
+    for link in body["evidence_links"]:
+        if _evidence_link_is_live(store, ns, link):
+            live_links.append(link)
+        else:
+            retired.append(_retired_ref(link["ref"], role="evidence"))
+    for raw in body["premise_refs"]:
+        if not _premise_is_live(store, ns, raw):
+            retired.append(_retired_ref(raw, role="premise"))
+
+    service = BeliefService(store, clock=clock)
+    filtered = dict(body)
+    filtered["evidence_links"] = live_links
+    resolved = service._resolve_evidence_locked(ns, filtered)
+    status, strength = service._derive(ns, body, resolved, retract=False)
+    live_support = any(
+        item.relation in SUPPORTING_RELATIONS for item in resolved
+    )
+    return BeliefReEvaluation(
+        live_link_count=len(live_links),
+        retired_refs=tuple(retired),
+        status=status,
+        strength=strength,
+        degraded_to_proposed=status == "proposed" and not live_support,
+    )
+
+
+def _retired_ref(ref: Mapping[str, Any], *, role: str) -> dict[str, Any]:
+    """Describe one unreachable source without copying its content."""
+
+    out: dict[str, Any] = {"role": role, "ref_type": ref.get("ref_type")}
+    if ref.get("ref_type") == "event":
+        out["namespace"] = ref.get("namespace")
+        out["event_id"] = ref.get("event_id")
+    else:
+        out["namespace"] = ref.get("namespace")
+        out["record_id"] = ref.get("record_id")
+        out["record_version"] = ref.get("record_version")
+    return out
 
 
 def _validate_evidence_links(value: Any) -> list[dict[str, Any]]:
@@ -1155,10 +1593,11 @@ def _validate_evidence_links(value: Any) -> list[dict[str, Any]]:
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
             raise InvalidInput(f"evidence_links[{index}] must be an object")
-        if set(item) != _EVIDENCE_KEYS:
+        keys = set(item)
+        if not _EVIDENCE_KEYS <= keys or keys - _EVIDENCE_KEYS - _OPTIONAL_EVIDENCE_KEYS:
             raise InvalidInput(
                 f"evidence_links[{index}] must have exactly ref, relation, "
-                "origin_group_id and applicability_reason"
+                "origin_group_id and applicability_reason, plus an optional quote"
             )
         relation = item["relation"]
         if relation not in RELATIONS:
@@ -1183,14 +1622,19 @@ def _validate_evidence_links(value: Any) -> list[dict[str, Any]]:
                 "evidence_links must not repeat the same reference"
             )
         seen.add(ref_key)
-        links.append(
-            {
-                "ref": ref,
-                "relation": relation,
-                "origin_group_id": origin_group,
-                "applicability_reason": applicability,
-            }
-        )
+        entry = {
+            "ref": ref,
+            "relation": relation,
+            "origin_group_id": origin_group,
+            "applicability_reason": applicability,
+        }
+        if "quote" in keys:
+            entry["quote"] = _require_text(
+                item["quote"],
+                f"evidence_links[{index}].quote",
+                MAX_QUOTE_LENGTH,
+            )
+        links.append(entry)
     return links
 
 
@@ -1221,7 +1665,23 @@ def _validate_any_ref(value: Any, field: str) -> dict[str, Any]:
         return EventRef.from_value(value, field=field).to_dict()
     if ref_type == "record":
         return RecordRef.from_value(value, field=field).to_dict()
-    raise InvalidInput(f'{field}.ref_type must be "event" or "record"')
+    if ref_type == "collab_input":
+        if set(value) != {"ref_type", "namespace", "input_id", "content_version"}:
+            raise InvalidInput(
+                f"{field} must have exactly ref_type, namespace, input_id and "
+                "content_version for a collab_input"
+            )
+        return {
+            "ref_type": "collab_input",
+            "namespace": identifiers.require_namespace(value["namespace"]),
+            "input_id": identifiers.require_record_id(value["input_id"]),
+            "content_version": identifiers.require_record_version(
+                value["content_version"]
+            ),
+        }
+    raise InvalidInput(
+        f'{field}.ref_type must be "event", "record" or "collab_input"'
+    )
 
 
 def _require_group(link: Mapping[str, Any], expected: str) -> None:
@@ -1266,6 +1726,19 @@ def _is_expired(valid_until: str | None, now: datetime) -> bool:
     return moment <= now.astimezone(timezone.utc)
 
 
+def _evidence_unusable(message: str, reason_code: str) -> EvidenceMissing:
+    """An evidence error that names the failing check on the exception itself.
+
+    No new public error code is introduced (the contract's ``EVIDENCE_MISSING``
+    stays the code); ``reason_code`` is what the change service records in the
+    decision row so "why was this rejected" stays answerable.
+    """
+
+    error = EvidenceMissing(message)
+    error.reason_code = reason_code  # type: ignore[attr-defined]
+    return error
+
+
 def _cap_strength(requested: str, count: int, claim_type: str) -> str:
     if count <= 0:
         return "insufficient"
@@ -1294,6 +1767,7 @@ __all__ = [
     "BELIEF_BODY_KEYS",
     "BELIEF_KIND",
     "BELIEF_SCHEMA_VERSION",
+    "BeliefReEvaluation",
     "BeliefService",
     "BeliefSubmission",
     "CLAIM_TYPES",
@@ -1306,9 +1780,11 @@ __all__ = [
     "STRENGTH_RANK",
     "SUPPORTING_RELATIONS",
     "SUPPORT_SOURCE_KINDS",
+    "derive_status",
     "TRUSTED_EVIDENCE_SOURCE_KINDS",
     "belief_evidence_is_live",
     "is_question_event_type",
     "parse_belief_body",
+    "reevaluate_belief_against_live_sources",
     "validate_belief_body",
 ]

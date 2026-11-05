@@ -60,6 +60,51 @@ if (@(Get-OwnedProcesses).Count -ne 0) { throw 'initial cleanup selected foreign
 
 
 class ConfigTests(unittest.TestCase):
+    def test_ps06_ledger_defaults_to_the_instance_root(self) -> None:
+        # A new instance must not start unprotected: the ledger defaults to
+        # <store.root>/ledger, and the anchor stays inside the same instance.
+        config = self.load(support.config_document(self.database))
+        self.assertEqual(self.directory / "ledger", config.deletion_ledger_dir)
+        self.assertEqual(
+            self.directory / "anchor", config.deletion_anchor_dir
+        )
+        self.assertIsNone(config.ps06_unprotected)
+
+    def test_ps06_explicit_opt_out_requires_operator_and_reason(self) -> None:
+        document = support.config_document(self.database)
+        document["store"]["deletion_ledger_dir"] = False
+        document["store"]["unprotected"] = {"by": "operator@lab", "reason": "no ledger"}
+        config = self.load(document)
+        self.assertIsNone(config.deletion_ledger_dir)
+        self.assertEqual(
+            {"by": "operator@lab", "reason": "no ledger"}, config.ps06_unprotected
+        )
+
+        for incomplete in ({"by": "", "reason": "x"}, {"by": "x"}, {}):
+            document = support.config_document(self.database)
+            document["store"]["deletion_ledger_dir"] = False
+            document["store"]["unprotected"] = incomplete
+            with self.assertRaises(ConfigError):
+                self.load(document)
+
+    def test_j07_context_cap_is_configurable_and_defaults_to_64k(self) -> None:
+        document = support.config_document(self.database)
+        self.assertEqual(65536, self.load(document).pcs_context_max_bytes)
+        for cap in (24576, 32768, 49152, 65536, 81920):
+            document["budget"]["pcs_context_max_bytes"] = cap
+            self.assertEqual(cap, self.load(document).pcs_context_max_bytes)
+
+    def test_j07_invalid_cap_and_disabled_receipt_refuse_startup(self) -> None:
+        for value in (False, 0, -1, "24576"):
+            document = support.config_document(self.database)
+            document["budget"]["pcs_context_max_bytes"] = value
+            with self.assertRaises(ConfigError):
+                self.load(document)
+        document = support.config_document(self.database)
+        document["budget"]["pcs_belief_coverage"] = False
+        with self.assertRaises(ConfigError):
+            self.load(document)
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="desktop-config-")
         self.addCleanup(self._tmp.cleanup)
@@ -195,6 +240,235 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self.load(document)
 
+    def test_conversation_section_defaults_and_bounds(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertEqual(8, config.history_max_turns)
+        self.assertEqual(8192, config.history_max_bytes)
+
+        document = support.config_document(self.database)
+        document["conversation"] = {
+            "history_max_turns": 4,
+            "history_max_bytes": 4096,
+        }
+        explicit = self.load(document)
+        self.assertEqual(4, explicit.history_max_turns)
+        self.assertEqual(4096, explicit.history_max_bytes)
+
+        for section in (
+            {"history_max_turns": 0},
+            {"history_max_turns": 65},
+            {"history_max_bytes": 512},
+            {"unexpected": 1},
+        ):
+            document = support.config_document(self.database)
+            document["conversation"] = dict(section)
+            with self.assertRaises(ConfigError):
+                self.load(document)
+
+        # The bound is ``context_max_bytes - 2048``.  Pin the 24 KiB cap
+        # explicitly: the product default is now 64 KiB, which would make
+        # 24000 legal and silently weaken this assertion.
+        document = support.config_document(self.database)
+        document["budget"]["pcs_context_max_bytes"] = 24576
+        document["conversation"] = {"history_max_bytes": 24000}
+        with self.assertRaises(ConfigError):
+            self.load(document)
+
+        # The same relation must hold at the new default.
+        document = support.config_document(self.database)
+        document["conversation"] = {"history_max_bytes": 65000}
+        with self.assertRaises(ConfigError):
+            self.load(document)
+
+    def test_rg03_tool_budgets_and_depth_cap(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertEqual(8, config.max_model_requests_per_turn)
+        self.assertEqual(6, config.max_tool_calls_per_turn)
+        self.assertEqual(180, config.turn_wall_seconds)
+        self.assertEqual(30, config.tool_wall_seconds)
+        self.assertEqual(2, config.commentary_max_per_turn)
+        self.assertEqual(60, config.commentary_max_chars)
+        self.assertEqual(1536, config.tool_result_excerpt_bytes)
+        self.assertEqual(6144, config.tool_results_total_bytes)
+        self.assertTrue(config.tools_enabled)
+
+        document = support.config_document(self.database)
+        document["conversation"] = {
+            "max_model_requests_per_turn": 4,
+            "max_tool_calls_per_turn": 2,
+            "turn_wall_seconds": 90,
+            "tool_wall_seconds": 10,
+            "commentary_max_per_turn": 1,
+            "commentary_max_chars": 40,
+            "tool_result_excerpt_bytes": 512,
+            "tool_results_total_bytes": 2048,
+            "tools_enabled": False,
+        }
+        explicit = self.load(document)
+        self.assertEqual(2, explicit.max_tool_calls_per_turn)
+        self.assertEqual(512, explicit.tool_result_excerpt_bytes)
+        self.assertFalse(explicit.tools_enabled)
+
+        # 7/8 tool calls are outside the deletion-closure depth budget.
+        for section in (
+            {"max_tool_calls_per_turn": 7},
+            {"max_tool_calls_per_turn": 8},
+            {"max_tool_calls_per_turn": -1},
+            {"max_model_requests_per_turn": 0},
+            {"commentary_max_chars": 0},
+            {"tool_result_excerpt_bytes": 4096, "tool_results_total_bytes": 1024},
+            {"tool_results_total_bytes": 24000},
+            {"tools_enabled": "yes"},
+        ):
+            document = support.config_document(self.database)
+            document["conversation"] = dict(section)
+            with self.subTest(section=section):
+                with self.assertRaises(ConfigError):
+                    self.load(document)
+
+    def test_rg08_commentary_is_bounded_and_can_be_disabled(self) -> None:
+        document = support.config_document(self.database)
+        document["conversation"] = {
+            "commentary_max_per_turn": 1,
+            "commentary_max_chars": 60,
+        }
+        config = self.load(document)
+        self.assertEqual(1, config.commentary_max_per_turn)
+        self.assertEqual(60, config.commentary_max_chars)
+
+        document = support.config_document(self.database)
+        document["conversation"] = {"commentary_max_per_turn": 0}
+        self.assertEqual(0, self.load(document).commentary_max_per_turn)
+
+        for section in (
+            {"commentary_max_per_turn": 5},
+            {"commentary_max_per_turn": -1},
+        ):
+            document = support.config_document(self.database)
+            document["conversation"] = dict(section)
+            with self.subTest(section=section):
+                with self.assertRaises(ConfigError):
+                    self.load(document)
+
+    def test_rg07_expression_mode_defaults_to_off_and_is_strict(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertEqual("off", config.sdrpe.mode)
+        self.assertEqual("sdrpe.v3", config.sdrpe.policy_version)
+
+        document = support.config_document(self.database)
+        document["conversation"] = {"sdrpe": {"mode": "on"}}
+        self.assertEqual("on", self.load(document).sdrpe.mode)
+
+        # `auto` is a reserved position: it parses so the setting can be shown
+        # as unavailable; it is never an implemented trigger policy.
+        document = support.config_document(self.database)
+        document["conversation"] = {"sdrpe": {"mode": "auto"}}
+        self.assertEqual("auto", self.load(document).sdrpe.mode)
+
+        for section in (
+            {"sdrpe": {"mode": "always"}},
+            {"sdrpe": {"mode": 1}},
+            {"sdrpe": {"mode": None}},
+            {"sdrpe": {"mode": "on", "extra": 1}},
+            {"sdrpe": "on"},
+            {"sdrpe": {"mode": "on", "auto_trigger": {}}},
+        ):
+            document = support.config_document(self.database)
+            document["conversation"] = dict(section)
+            with self.subTest(section=section):
+                with self.assertRaises(ConfigError):
+                    self.load(document)
+
+    def test_rg08_web_is_opt_in_by_default_and_strict(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertFalse(config.web.enabled)
+        self.assertTrue(config.web.search)
+        self.assertTrue(config.web.fetch)
+        self.assertEqual(20, config.web.timeout_seconds)
+        self.assertEqual((), config.web.allowed_hosts)
+        self.assertEqual("metadata", config.web.capture_default)
+        self.assertEqual("DEEPSEEK_API_KEY", config.web.api_key_env)
+
+        document = support.config_document(self.database)
+        document["web"] = {
+            "enabled": True,
+            "search": True,
+            "fetch": True,
+            "timeout_seconds": 15,
+            "allowed_hosts": [".wikipedia.org", "example.com"],
+            "capture_default": "evidence",
+            "api_key_env": "RG08_WEB_KEY",
+        }
+        explicit = self.load(document)
+        self.assertTrue(explicit.web.enabled)
+        self.assertEqual(15, explicit.web.timeout_seconds)
+        self.assertEqual(
+            (".wikipedia.org", "example.com"), explicit.web.allowed_hosts
+        )
+        self.assertEqual("evidence", explicit.web.capture_default)
+        self.assertEqual("RG08_WEB_KEY", explicit.web.api_key_env)
+
+        for section in (
+            {"enabled": "yes"},
+            {"enabled": True, "timeout_seconds": 4},
+            {"enabled": True, "timeout_seconds": 31},
+            {"enabled": True, "allowed_hosts": "example.com"},
+            {"enabled": True, "allowed_hosts": ["127.0.0.1"]},
+            {"enabled": True, "allowed_hosts": ["localhost"]},
+            {"enabled": True, "allowed_hosts": ["example.com", "example.com"]},
+            {"enabled": True, "capture_default": "full"},
+            {"enabled": True, "api_key_env": "not-an-env-name"},
+            {"enabled": True, "search": False, "fetch": False},
+            {"enabled": True, "unexpected": 1},
+        ):
+            document = support.config_document(self.database)
+            document["web"] = dict(section)
+            with self.subTest(section=section):
+                with self.assertRaises(ConfigError):
+                    self.load(document)
+
+        production = support.config_document(
+            self.database, profile="production", transport_kind="http"
+        )
+        production["web"] = {"enabled": True}
+        self.assertTrue(self.load(production).web.enabled)
+
+        inert = support.config_document(
+            self.database, profile="production", transport_kind="http"
+        )
+        inert["web"] = {"enabled": False, "allowed_hosts": ["example.com"]}
+        self.assertFalse(self.load(inert).web.enabled)
+
+    def test_rg08_sidecar_builds_a_web_surface_only_from_the_environment(self) -> None:
+        from runtime import _web_tool_config
+
+        off = self.load(support.config_document(self.database))
+        self.assertIsNone(_web_tool_config(off))
+        document = support.config_document(self.database)
+        document["web"] = {
+            "enabled": True,
+            "timeout_seconds": 10,
+            "allowed_hosts": ["example.com"],
+        }
+        config = self.load(document)
+        name = "DEEPSEEK_API_KEY"
+        previous = os.environ.pop(name, None)
+        try:
+            missing = _web_tool_config(config)
+            self.assertIsNotNone(missing)
+            self.assertIsNone(missing.client)
+            os.environ[name] = "synthetic-web-key-not-real"
+            present = _web_tool_config(config)
+            self.assertIsNotNone(present.client)
+            self.assertNotIn("synthetic-web-key", repr(present))
+            self.assertEqual(("web.search", "web.fetch"), present.names())
+            self.assertEqual(("example.com",), present.policy.allowed_hosts)
+        finally:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+
     def test_ai_display_name_is_optional_and_bounded(self) -> None:
         document = support.config_document(self.database)
         document["app"]["ai_display_name"] = "小助手"
@@ -295,3 +569,36 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CognitionConfigTests(ConfigTests):
+    """RG05: cognition is an explicit 64 KiB opt-in, not a default."""
+
+    def cognition_document(self, *, cap: int, propose: bool = True, scope=True):
+        document = support.config_document(self.database)
+        document["budget"]["pcs_context_max_bytes"] = cap
+        document["cognition"] = {
+            "propose": propose,
+            "working_set_limit": 5,
+            "pending_limit": 3,
+        }
+        if not scope:
+            document["consult"]["query_plan"]["scope"] = {}
+        return document
+
+    def test_cognition_requires_64_kib(self) -> None:
+        for cap in (24576, 32768, 49152):
+            with self.assertRaises(ConfigError):
+                self.load(self.cognition_document(cap=cap))
+        config = self.load(self.cognition_document(cap=65536))
+        self.assertTrue(config.cognition.enabled)
+        self.assertTrue(config.cognition.propose)
+
+    def test_cognition_requires_a_scope(self) -> None:
+        with self.assertRaises(ConfigError):
+            self.load(self.cognition_document(cap=65536, scope=False))
+
+    def test_absent_block_keeps_the_64_kib_default(self) -> None:
+        config = self.load(support.config_document(self.database))
+        self.assertFalse(config.cognition.enabled)
+        self.assertEqual(65536, config.pcs_context_max_bytes)

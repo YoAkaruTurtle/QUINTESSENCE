@@ -54,7 +54,55 @@ export function destinationKindLabel(destination: Destination | null): string {
   return destination.external ? "外部模型" : "本地模型";
 }
 
+/** One line for the persona chip; the body is never shown by the UI. */
+export function personaLabel(info: AppInfo | null): string {
+  const persona = info?.persona;
+  if (!persona || persona.state !== "ready" || !persona.profile_id) {
+    return "人格未就绪";
+  }
+  const version = persona.profile_version ? ` v${persona.profile_version}` : "";
+  return `人格：${persona.profile_id}${version}`;
+}
+
+export function personaSourceLabel(info: AppInfo | null): string {
+  const source = info?.persona?.source ?? null;
+  if (source === "expected") {
+    return "启动契约指定（app.persona_expected）";
+  }
+  if (source === "neutral_provisioned") {
+    return "中性默认（宿主初始化）";
+  }
+  if (source === "active") {
+    return "数据实例中已激活";
+  }
+  return "—";
+}
+
+export function speakerLabel(info: AppInfo | null): string {
+  const speaker = info?.persona?.speaker ?? null;
+  if (!speaker) {
+    return "未声明（按身份未知处理）";
+  }
+  const identity =
+    speaker.identity === "owner"
+      ? "所有者"
+      : speaker.identity === "known_other"
+        ? "已知他人"
+        : "身份未知";
+  const name = speaker.display_name ? ` · ${speaker.display_name}` : "";
+  return `${identity}${name}`;
+}
+
 export function reasonLabel(code: string | null, detail: string | null): string {
+  if (code === "EXPECTED_PERSONA_UNAVAILABLE") {
+    return "指定的新人格不可用，宿主已停止初始化（没有回退默认人格）";
+  }
+  if (code === "NEUTRAL_PROVISION_FAILED") {
+    return "默认人格初始化未完成";
+  }
+  if (code === "PROFILE_CORRUPT") {
+    return "已保存的人格记录不完整或已被删除";
+  }
   if (code === "DATA_LOCKED") {
     return "数据实例正在被另一个进程使用";
   }

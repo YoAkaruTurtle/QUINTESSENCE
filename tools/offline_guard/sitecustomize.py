@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+from urllib.parse import urlsplit, unquote
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = Path(os.environ['QUINTESSENCE_TEST_OUTPUT']).resolve()
@@ -31,13 +32,28 @@ def check_path(value, writing=False):
     if writing and (within(path, ROOT) or not within(path, OUTPUT)):
         raise PermissionError('test writes must stay in external output directory')
 
+def sqlite_path(value):
+    if not isinstance(value, (str, bytes)):
+        return value
+    text = os.fsdecode(value)
+    if not text.startswith('file:'):
+        return value
+    parsed = urlsplit(text)
+    if parsed.netloc not in ('', 'localhost') or parsed.fragment:
+        raise PermissionError('only local SQLite file URIs are permitted')
+    decoded = unquote(parsed.path)
+    if os.name == 'nt' and len(decoded) > 3 and decoded[0] == '/' and decoded[2] == ':':
+        decoded = decoded[1:]
+    return decoded
+
+
 def audit(event, args):
     if event == 'open':
         mode = args[1] or ''
         flags = args[2] or 0
         check_path(args[0], any(x in mode for x in 'wax+') or bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT)))
     elif event == 'sqlite3.connect':
-        check_path(args[0], True)
+        check_path(sqlite_path(args[0]), True)
     elif event in ('os.mkdir', 'os.remove', 'os.rmdir'):
         check_path(args[0], True)
     elif event in ('os.rename',):

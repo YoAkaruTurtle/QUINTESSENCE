@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domains.cognition.beliefs import (
+    belief_evidence_is_live,
     parse_belief_body,
     revision_claim_conflict,
     validate_belief_body,
@@ -1109,6 +1110,15 @@ class ReviewFacade:
         if version.privacy_class not in access.privacy_classes:
             return _CurrentRead(None, "redacted", False, None)
         body = parse_belief_body(version)
+        if not belief_evidence_is_live(
+            self._store, namespace=namespace, body=body
+        ):
+            # A deleted evidence or premise source must not keep the stored
+            # judgement readable in the review detail.  Reusing the existing
+            # redacted current state keeps the public contract unchanged; a
+            # *missing* source raises CorruptStore inside the predicate and is
+            # deliberately not downgraded to a redaction here.
+            return _CurrentRead(None, "redacted", False, None)
         scope = dict(version.scope or {})
         view = ReviewCurrentView(
             ref=target_ref,

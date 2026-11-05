@@ -268,6 +268,7 @@ class CognitionTestCase(unittest.TestCase):
                 "capability": "observation",
                 "general_hypothesis": "inductive",
                 "derived_rule": "deductive",
+                "external_report": "direct_report",
             }[claim_type]
         return {
             "claim": claim,
@@ -283,7 +284,12 @@ class CognitionTestCase(unittest.TestCase):
         }
 
     def default_scope(self, claim_type: str = "capability") -> dict[str, Any]:
-        if claim_type in ("user_preference", "environment_state", "capability"):
+        if claim_type in (
+            "user_preference",
+            "environment_state",
+            "capability",
+            "external_report",
+        ):
             return {"scene": "test.scene"}
         return {}
 

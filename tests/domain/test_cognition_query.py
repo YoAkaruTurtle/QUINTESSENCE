@@ -482,6 +482,53 @@ class CurrentBeliefQueryTests(QueryTestCase):
             {item.ref for item in both.items},
         )
 
+    def test_expression_preference_is_not_a_cognition_query_item(self) -> None:
+        normal = _append_belief(
+            self.store,
+            record_id=str(uuid.uuid4()),
+            claim="普通用户偏好",
+            claim_type="user_preference",
+            status="supported",
+            privacy_class="private",
+            scope={"scene": "test.scene"},
+        )
+        marker_body = _synthetic_body("用户在聊天中希望回答更详细。", "user_preference")
+        marker_body["review_condition"] = "expression_preference:length=detailed"
+        self.store.append_record_version(
+            namespace=NS,
+            record_id=str(uuid.uuid4()),
+            record_version=1,
+            kind="belief",
+            body=marker_body,
+            status="supported",
+            schema_version="1",
+            privacy_class="private",
+            scope={"scene": "test.scene"},
+        )
+        result = self.current(
+            query=BeliefCurrentQuery(
+                claim_types=("user_preference",),
+                scope={"scene": "test.scene"},
+                limit=20,
+            )
+        )
+        self.assertEqual([normal.record_id], [item.ref.record_id for item in result.items])
+        self.assertEqual(["普通用户偏好"], [item.claim for item in result.items])
+
+        from quintessence_pcs.domains.cognition.belief_page import read_belief_page
+
+        page = read_belief_page(
+            self.queries,
+            self.access(),
+            status="supported",
+            scope={"scene": "test.scene"},
+            limit=20,
+        )
+        self.assertEqual(
+            [normal.record_id],
+            [item["ref"]["record_id"] for item in page["items"]],
+        )
+
     def test_scope_is_a_necessary_condition(self) -> None:
         matching = self.propose_supported(
             claim="capability:a", scope={"scene": "test.scene"}

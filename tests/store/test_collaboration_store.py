@@ -17,6 +17,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from support import RECORDED_AT, StoreTestCase, append  # noqa: E402
+from support import NAMESPACE  # noqa: E402
 
 from quintessence_pcs.foundation.errors import (  # noqa: E402
     InvalidDeletionTarget,
@@ -395,6 +396,13 @@ class CollaborationTestCase(StoreTestCase):
         (target / "0008_collaboration.sql").unlink()
         (target / "0009_experience_audit.sql").unlink()
         (target / "0010_candidate_request_key.sql").unlink()
+        (target / "0011_memory_delivery.sql").unlink()
+        (target / "0012_bridge_gaps.sql").unlink()
+        (target / "0013_cognition_governance.sql").unlink()
+        (target / "0014_workless_candidates_and_blocked_impact.sql").unlink()
+        (target / "0015_model_attempt_tool_rounds.sql").unlink()
+        (target / "0016_maintenance_jobs.sql").unlink()
+        (target / "0017_conversation_turns.sql").unlink()
         return target
 
 
@@ -406,8 +414,8 @@ class MigrationTests(CollaborationTestCase):
                 "SELECT migration_id, name FROM schema_migrations ORDER BY migration_id"
             )
         ]
-        self.assertEqual(10, len(ledger))
-        self.assertEqual(("0010", "candidate_request_key"), (f"{ledger[-1][0]:04d}", ledger[-1][1]))
+        self.assertEqual(17, len(ledger))
+        self.assertEqual(("0017", "conversation_turns"), (f"{ledger[-1][0]:04d}", ledger[-1][1]))
         tables = {
             row[0]
             for row in self.store.connection.execute(
@@ -487,7 +495,7 @@ class MigrationTests(CollaborationTestCase):
                 "SELECT migration_id, name FROM schema_migrations ORDER BY migration_id"
             )
         ]
-        self.assertEqual(10, len(ledger))
+        self.assertEqual(17, len(ledger))
         target = upgraded.connection.execute(
             "SELECT target_kind, target_id, target_version, status, authorization_ref "
             "FROM deletion_targets"
@@ -1085,6 +1093,62 @@ class ContextCommitTests(CollaborationTestCase):
                     target_id=source.input_id,
                     authorization_ref="auth:public",
                 )
+
+
+class WorklessCandidateBasisTests(CollaborationTestCase):
+    """Card B2: which host events a workless candidate may name on commit.
+
+    The commit gate allows only events the candidate itself caused.  A repeated
+    click for one candidate is one such event even though the store deduplicates
+    the identical payload body, so the journal row -- not the payload -- is the
+    unit the basis has to return.
+    """
+
+    def _statement(self, candidate_id: str) -> str:
+        receipt = self.store.ingest_event(
+            namespace=NAMESPACE,
+            source_kind="user_report",
+            source_instance="host:test",
+            source_event_id=f"statement-{uuid.uuid4()}",
+            event_type="UserStatement:review_decision",
+            observed_at=RECORDED_AT,
+            payload={
+                "artifact_version": 1,
+                "candidate_id": candidate_id,
+                "decision": "approve",
+            },
+            privacy_class="private",
+        )
+        return receipt.event_id
+
+    def test_repeated_clicks_share_a_payload_and_are_all_own_events(self) -> None:
+        candidate_id = str(uuid.uuid4())
+        first = self._statement(candidate_id)
+        second = self._statement(candidate_id)
+        payloads = {
+            row["payload_ref"]
+            for row in self.store.connection.execute(
+                "SELECT payload_ref FROM event_journal WHERE event_id IN (?, ?)",
+                (first, second),
+            )
+        }
+        self.assertEqual(1, len(payloads), "identical statements must dedupe")
+        basis = self.store.workless_candidate_basis_events(
+            NAMESPACE, context_id=str(uuid.uuid4()), candidate_id=candidate_id
+        )
+        self.assertIn(first, basis)
+        self.assertIn(second, basis)
+
+    def test_another_candidates_statement_is_not_an_own_event(self) -> None:
+        mine = str(uuid.uuid4())
+        theirs = str(uuid.uuid4())
+        own_event = self._statement(mine)
+        other_event = self._statement(theirs)
+        basis = self.store.workless_candidate_basis_events(
+            NAMESPACE, context_id=str(uuid.uuid4()), candidate_id=mine
+        )
+        self.assertIn(own_event, basis)
+        self.assertNotIn(other_event, basis)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ The collaboration plane is deliberately small and closed:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -93,6 +94,16 @@ INTERACTION_MODES = ("consult", "review")
 ACTIVATION_KINDS = ("user_input", "manual_review")
 MAX_BODY_CHARS = 262144
 MAX_CLOSURE_DEPTH = 8
+
+#: The review-interaction policy of the one ``cognition.change`` entry point.
+#: ``collaboration/change_service.py`` owns the authoritative value; this copy
+#: exists because the store layer must not import the collaboration layer (that
+#: would be a cycle).  A consistency test asserts the two strings are equal.
+COGNITION_CHANGE_POLICY_REF = "policy:cognition.change.v1"
+
+#: RG02 history cascade bound.  A conversation may be longer than the
+#: artifact-closure depth, so this cascade has its own explicit node budget.
+MAX_HISTORY_CASCADE_NODES = 10_000
 MAX_GRANT_TEXT = 512
 
 _ARTIFACT_COLUMNS = (
@@ -133,7 +144,8 @@ _CANDIDATE_SUMMARY_COLUMNS = (
 _INTERACTION_COLUMNS = (
     "interaction_id, namespace, schema_version, mode, activation_kind, "
     "host_instance, trigger_ref_json, work_id, work_generation, context_id, "
-    "result, receipt_request_id, access_ref, policy_ref, created_at, completed_at"
+    "work_less, result, receipt_request_id, access_ref, policy_ref, created_at, "
+    "completed_at"
 )
 
 
@@ -714,6 +726,7 @@ class CollaborationMixin:
         trigger_ref: Mapping[str, Any] | None = None,
         work_id: str | None = None,
         work_generation: int | None = None,
+        work_less: bool = False,
         result: str | None = None,
         receipt_request_id: str | None = None,
         completed_at: str | None = None,
@@ -745,10 +758,25 @@ class CollaborationMixin:
                 raise InvalidInput("a review trigger must be an event reference")
         work: str | None = None
         generation: int | None = None
+        if work_less and mode != "review":
+            raise InvalidInput("work_less is only meaningful for a review interaction")
         if mode == "review":
             if trigger is None:
-                raise InvalidInput("a review interaction requires a trigger event")
-            if work_id is None or work_generation is None:
+                # RG05 decision 01: a Work-less review interaction created for a
+                # chat candidate may have no trigger event.  Its persisted
+                # Context is the basis, and every source of that Context is
+                # re-checked by the commit guard.  A Work review still needs the
+                # event it reviews; an empty context id cannot stand in.
+                if not (work_less and context_id):
+                    raise InvalidInput(
+                        "a review interaction requires a trigger event"
+                    )
+            if work_less:
+                if work_id is not None or work_generation is not None:
+                    raise InvalidInput(
+                        "a work-less review interaction carries no work binding"
+                    )
+            elif work_id is None or work_generation is None:
                 raise InvalidInput(
                     "a review interaction requires work_id and work_generation"
                 )
@@ -784,7 +812,7 @@ class CollaborationMixin:
                 self._require_connection().execute(
                     "INSERT INTO collab_interactions ("
                     + _INTERACTION_COLUMNS
-                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         identifier,
                         ns,
@@ -796,6 +824,7 @@ class CollaborationMixin:
                         work,
                         generation,
                         context,
+                        1 if work_less else 0,
                         result,
                         receipt,
                         access,
@@ -919,6 +948,128 @@ class CollaborationMixin:
             )
             for row in rows
         )
+
+    def workless_candidate_basis_events(
+        self, namespace: str, *, context_id: str, candidate_id: str
+    ) -> tuple[str, ...]:
+        """Host events that may legitimately follow this candidate's Context.
+
+        A workless chat candidate is proposed from the *content* Context of one
+        turn.  Two kinds of host event can still land after that Context closed
+        and before a human decides:
+
+        * the memory-bridge projection of **that turn's own** input, its reply
+          and the candidate artifact itself (``experience.observed``);
+        * an earlier ``UserStatement:review_decision`` for **this candidate**
+          (a previous click that failed or was retried).
+
+        Both are consequences of the candidate itself, so a commit that names
+        them as its own events is not committing on a moved basis.  Anything
+        else -- a later turn, another candidate's decision, a tool event -- is
+        deliberately absent, which keeps the Tx B own-events gate meaningful.
+
+        Read-only.  Bounded; a missing table or an unreadable payload simply
+        contributes nothing.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        ctx = _require_uuid(context_id, "context_id")
+        cid = _require_uuid(candidate_id, "candidate_id")
+        connection = self._require_connection()
+        found: set[str] = set()
+
+        turn_rows = connection.execute(
+            "SELECT DISTINCT ts.turn_id FROM collab_stage_contexts sc "
+            "JOIN collab_turn_stages ts ON ts.stage_id = sc.stage_id "
+            "  AND ts.namespace = sc.namespace "
+            "WHERE sc.namespace = ? AND sc.context_id = ? LIMIT 8",
+            (ns, ctx),
+        ).fetchall()
+        turn_ids = [str(row["turn_id"]) for row in turn_rows]
+        if turn_ids:
+            placeholders = ",".join("?" for _ in turn_ids)
+            message_rows = connection.execute(
+                "SELECT kind, input_ref_json, artifact_id FROM collab_turn_messages "
+                f"WHERE namespace = ? AND turn_id IN ({placeholders}) LIMIT 128",
+                (ns, *turn_ids),
+            ).fetchall()
+            input_ids: set[str] = set()
+            artifact_ids: set[str] = set()
+            for row in message_rows:
+                raw_input = row["input_ref_json"]
+                if isinstance(raw_input, str) and raw_input:
+                    try:
+                        parsed = json.loads(raw_input)
+                    except ValueError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        value = parsed.get("input_id")
+                        if isinstance(value, str) and value:
+                            input_ids.add(value)
+                artifact_id = row["artifact_id"]
+                if isinstance(artifact_id, str) and artifact_id:
+                    artifact_ids.add(artifact_id)
+            # The candidate itself and every artifact sharing its Context (tool
+            # results, the reply) are the same turn's output.  The bridge may
+            # project any of them, and a projection of the candidate's own
+            # artifact must not read as a foreign event.
+            artifact_ids.add(cid)
+            for row in connection.execute(
+                "SELECT artifact_id FROM collab_artifacts WHERE namespace = ? "
+                "AND (context_id = ? OR interaction_id IN ("
+                "  SELECT interaction_id FROM collab_artifacts "
+                "  WHERE namespace = ? AND artifact_id = ?)) LIMIT 64",
+                (ns, ctx, ns, cid),
+            ):
+                artifact_id = row["artifact_id"]
+                if isinstance(artifact_id, str) and artifact_id:
+                    artifact_ids.add(artifact_id)
+            for ref_type, refs in (
+                ("collab_input", input_ids),
+                ("collab_artifact", artifact_ids),
+            ):
+                if not refs:
+                    continue
+                marks = ",".join("?" for _ in sorted(refs))
+                for row in connection.execute(
+                    "SELECT event_id FROM memory_delivery WHERE namespace = ? "
+                    "AND ref_type = ? AND invalidated_at IS NULL "
+                    f"AND event_id IS NOT NULL AND ref_id IN ({marks}) LIMIT 64",
+                    (ns, ref_type, *sorted(refs)),
+                ):
+                    event_id = row["event_id"]
+                    if isinstance(event_id, str) and event_id:
+                        found.add(event_id)
+
+        # Several clicks for one candidate can share a deduplicated payload, so
+        # the journal row is the unit that must be allowed: read the event id and
+        # its payload together instead of resolving the payload back to one row.
+        for row in connection.execute(
+            "SELECT event_id, payload_ref FROM event_journal WHERE namespace = ? "
+            "AND event_type = 'UserStatement:review_decision' "
+            "ORDER BY event_seq DESC LIMIT 32",
+            (ns,),
+        ):
+            event_id = row["event_id"]
+            payload_ref = row["payload_ref"]
+            if not isinstance(event_id, str) or not event_id:
+                continue
+            if not isinstance(payload_ref, str) or not payload_ref:
+                continue
+            payload_row = connection.execute(
+                "SELECT body_json FROM private_payloads WHERE payload_ref = ?",
+                (payload_ref,),
+            ).fetchone()
+            if payload_row is None or payload_row["body_json"] == "":
+                continue
+            try:
+                body = json.loads(payload_row["body_json"])
+            except ValueError:
+                continue
+            if isinstance(body, dict) and body.get("candidate_id") == cid:
+                found.add(event_id)
+
+        return tuple(sorted(found))
 
     def complete_interaction(
         self,
@@ -1234,8 +1385,18 @@ class CollaborationMixin:
                 proposal_value = _require_mapping(proposal, "proposal")
                 proposal_text = canonical_json_text(proposal_value)
                 proposal_digest = _sha256_text(proposal_text)
-                work = _require_uuid(work_id, "work_id")
-                generation = _require_generation(work_generation, "work_generation")
+                work = (
+                    None if work_id is None else _require_uuid(work_id, "work_id")
+                )
+                generation = (
+                    None
+                    if work_generation is None
+                    else _require_generation(work_generation, "work_generation")
+                )
+                if (work is None) != (generation is None):
+                    raise InvalidInput(
+                        "a candidate names work_id and work_generation together or not at all"
+                    )
                 request = _require_uuid(request_id, "request_id")
                 status = "pending" if status is None else status
                 if status not in CANDIDATE_STATUSES:
@@ -1904,7 +2065,50 @@ class CollaborationMixin:
                 version=int(link["source_version"]),
             ):
                 return True
+        # RG02: the history ledger is not a material source, but a Context that
+        # rendered a deleted/cleared historical message is equally stale.
+        return self._context_history_barred_locked(ns, context)
+
+    def _context_history_barred_locked(self, ns: str, context_id: str) -> bool:
+        for link in self._require_connection().execute(
+            "SELECT ref_kind, ref_id, ref_version FROM collab_context_history "
+            "WHERE namespace = ? AND context_id = ?",
+            (ns, context_id),
+        ).fetchall():
+            kind = link["ref_kind"]
+            ref_id = str(link["ref_id"])
+            version = int(link["ref_version"])
+            if self._history_ref_missing_or_cleared_locked(
+                ns, kind, ref_id, version
+            ):
+                return True
+            if self._source_barred_locked(
+                namespace=ns, kind=kind, ref_id=ref_id, version=version
+            ):
+                return True
         return False
+
+    def _history_ref_missing_or_cleared_locked(
+        self, ns: str, kind: str, ref_id: str, version: int
+    ) -> bool:
+        connection = self._require_connection()
+        if kind == COLLAB_INPUT:
+            row = connection.execute(
+                "SELECT p.body_json FROM collab_inputs i JOIN private_payloads p "
+                "ON p.payload_ref = i.body_payload_ref WHERE i.namespace = ? "
+                "AND i.input_id = ? AND i.content_version = ?",
+                (ns, ref_id, version),
+            ).fetchone()
+        elif kind == COLLAB_ARTIFACT:
+            row = connection.execute(
+                "SELECT p.body_json FROM collab_artifacts a JOIN private_payloads p "
+                "ON p.payload_ref = a.body_payload_ref WHERE a.namespace = ? "
+                "AND a.artifact_id = ? AND a.artifact_version = ?",
+                (ns, ref_id, version),
+            ).fetchone()
+        else:
+            return True
+        return row is None or not row["body_json"]
 
     def require_context_deliverable(self, context_id: str) -> None:
         """Raise ``REDACTED`` before a barred Context is decoded or sent."""
@@ -1939,7 +2143,7 @@ class CollaborationMixin:
                 version=int(link["source_version"]),
             ):
                 return True
-        return False
+        return self._context_history_barred_locked(ns, context)
 
     def context_ids_for_collab_source(
         self, *, namespace: str, ref_kind: str, ref_id: str, ref_version: int
@@ -2054,7 +2258,73 @@ class CollaborationMixin:
 
     def _after_target_cleared_locked(self, target: DeletionTarget) -> int:
         cleared = super()._after_target_cleared_locked(target)  # type: ignore[misc]
-        return cleared + self._clear_collab_dependents_locked(target)
+        cleared += self._clear_collab_dependents_locked(target)
+        # RG02: history is not a material source.  The rendered copy of a
+        # deleted historical message lives in later Contexts (and in the reply
+        # artifacts those Contexts produced), so those must be cleared too,
+        # until a fixed point.  This cascade deliberately does not use the
+        # artifact->artifact 8-depth limit; it has its own node budget.
+        cleared += self._clear_history_dependents_locked(target)
+        return cleared
+
+    def _clear_history_dependents_locked(self, target: DeletionTarget) -> int:
+        if target.target_kind not in (COLLAB_INPUT, COLLAB_ARTIFACT):
+            return 0
+        connection = self._require_connection()
+        budget = MAX_HISTORY_CASCADE_NODES
+        seen_contexts: set[str] = set()
+        seen_artifacts: set[tuple[str, int]] = set()
+        queue: list[tuple[str, str, int]] = [
+            (target.target_kind, target.target_id, target.target_version)
+        ]
+        cleared = 0
+        while queue:
+            kind, ref_id, ref_version = queue.pop(0)
+            budget -= 1
+            if budget < 0:
+                raise CorruptStore("history deletion cascade did not converge")
+            contexts = connection.execute(
+                "SELECT context_id FROM collab_context_history "
+                "WHERE namespace = ? AND ref_kind = ? AND ref_id = ? "
+                "AND ref_version = ?",
+                (target.namespace, kind, ref_id, ref_version),
+            ).fetchall()
+            for row in contexts:
+                context_id = str(row["context_id"])
+                if context_id in seen_contexts:
+                    continue
+                seen_contexts.add(context_id)
+                snapshot = connection.execute(
+                    "SELECT rendered_input_payload_ref FROM context_snapshots "
+                    "WHERE context_id = ? AND namespace = ?",
+                    (context_id, target.namespace),
+                ).fetchone()
+                if snapshot is None:
+                    raise CorruptStore(
+                        f"history link names missing context {context_id}"
+                    )
+                payload = snapshot["rendered_input_payload_ref"]
+                if payload is not None:
+                    cleared += self._clear_payload_locked(payload)
+                artifacts = connection.execute(
+                    "SELECT artifact_id, artifact_version, body_payload_ref "
+                    "FROM collab_artifacts WHERE namespace = ? AND context_id = ? "
+                    "AND origin_kind = 'model_output'",
+                    (target.namespace, context_id),
+                ).fetchall()
+                for artifact in artifacts:
+                    key = (
+                        str(artifact["artifact_id"]),
+                        int(artifact["artifact_version"]),
+                    )
+                    if key in seen_artifacts:
+                        continue
+                    seen_artifacts.add(key)
+                    cleared += self._clear_payload_locked(
+                        artifact["body_payload_ref"]
+                    )
+                    queue.append(("collab_artifact", key[0], key[1]))
+        return cleared
 
     def _clear_collab_dependents_locked(self, target: DeletionTarget) -> int:
         connection = self._require_connection()
@@ -2293,6 +2563,61 @@ class CollaborationMixin:
         return None if row is None else _candidate_summary_from_row(row)
 
     # ------------------------------------------------------- candidate state
+
+    def pending_change_candidates(
+        self, namespace: str, *, limit: int = 20
+    ) -> tuple[dict[str, Any], ...]:
+        """Pending ``cognition.change`` candidates, newest first, metadata only.
+
+        The discriminator is the candidate's interaction ``policy_ref``: the
+        one change-bundle entry point stamps ``COGNITION_CHANGE_POLICY_REF`` on
+        the review interaction it creates, while legacy Work review uses its own
+        policy.  Joining on it keeps this read from becoming a second review
+        surface for Work candidates.
+
+        Only metadata is returned -- no body, proposal or payload.  The caller
+        must still apply its own visibility rule (``read_experience``) and the
+        governance lifecycle before showing anything; this query can never be
+        more permissive than those gates.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise InvalidInput("limit must be 1..100")
+        rows = self._require_connection().execute(
+            "SELECT a.artifact_id, a.artifact_version, a.created_at, "
+            "a.request_id, a.interaction_id, a.context_id "
+            "FROM collab_artifacts a "
+            "JOIN collab_interactions i "
+            "  ON i.namespace = a.namespace AND i.interaction_id = a.interaction_id "
+            "WHERE a.namespace = ? AND a.kind = 'candidate' "
+            "  AND a.status = 'pending' AND i.policy_ref = ? "
+            "ORDER BY a.created_at DESC, a.artifact_id DESC "
+            "LIMIT ?",
+            (ns, COGNITION_CHANGE_POLICY_REF, limit),
+        ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def candidate_for_request(
+        self, namespace: str, request_id: str
+    ) -> dict[str, Any] | None:
+        """The candidate stored under one stable request key, if any.
+
+        Used by the RG05 propose idempotence path: a second identical proposal
+        in the same turn must return the existing candidate instead of creating
+        a duplicate.  Metadata only; the caller still re-reads the governance
+        lifecycle before reporting a state.
+        """
+
+        ns = identifiers.require_namespace(namespace)
+        request = _require_uuid(request_id, "request_id")
+        row = self._require_connection().execute(
+            "SELECT artifact_id, artifact_version, status, created_at "
+            "FROM collab_artifacts "
+            "WHERE namespace = ? AND kind = 'candidate' AND request_id = ?",
+            (ns, request),
+        ).fetchone()
+        return None if row is None else dict(row)
 
     def register_candidate(
         self,
@@ -2562,6 +2887,45 @@ class CollaborationMixin:
                 raise CorruptStore("work control changed during candidate registration")
             return candidate
 
+    def mark_candidate_rejected(
+        self,
+        *,
+        namespace: str,
+        candidate_id: str,
+        decision_ref: str,
+        decided_at: str | None = None,
+    ) -> None:
+        """Mark one Work-less pending candidate rejected inside the caller's tx.
+
+        RG05-F02 uses this for a correction that supersedes a preference
+        candidate awaiting a human.  The ordinary ``reject_candidate`` path is
+        Work-bound; a cognition-change candidate is work-less, so this method
+        performs only the artifact transition.  The caller writes the durable
+        review-decision row in the same transaction.
+        """
+
+        if self._tx_depth == 0:
+            raise RuntimeError(
+                "mark_candidate_rejected must run inside the caller's transaction"
+            )
+        ns = identifiers.require_namespace(namespace)
+        cid = _require_uuid(candidate_id, "candidate_id")
+        decision = _require_text(decision_ref, "decision_ref", 256)
+        decided = utc_now_rfc3339() if decided_at is None else _require_timestamp(
+            decided_at, "decided_at"
+        )
+        cursor = self._require_connection().execute(
+            "UPDATE collab_artifacts SET status = 'rejected', "
+            "decided_at = ?, decision_ref = ? "
+            "WHERE namespace = ? AND artifact_id = ? AND artifact_version = 1 "
+            "AND status = 'pending'",
+            (decided, decision, ns, cid),
+        )
+        if cursor.rowcount != 1:
+            raise CandidateTransitionDenied(
+                f"candidate {cid} is not a pending artifact in {ns!r}"
+            )
+
     def reject_candidate(
         self,
         *,
@@ -2811,6 +3175,91 @@ class CollaborationMixin:
             namespace=ns, artifact_id=cid, artifact_version=1
         )
 
+    def _mark_workless_candidate_committed_locked(
+        self,
+        *,
+        namespace: str,
+        candidate_id: str,
+        decision_ref: str,
+        commit_authorization_ref: str | None = None,
+    ) -> ArtifactRow:
+        """Internal J06 primitive: bind a Work-less candidate to its receipt.
+
+        Same contract as :meth:`_mark_candidate_committed_locked`, minus the
+        work control: a cognition-change candidate has no work binding, so its
+        currentness is proven by the caller (``require_current_change_candidate``)
+        and its command identity by the receipt/digest check below.  It must run
+        inside the Tx B write transaction that produced the receipt.
+        """
+
+        if self._tx_depth == 0:
+            raise RuntimeError(
+                "_mark_workless_candidate_committed_locked must run inside "
+                "an open transaction"
+            )
+        ns = identifiers.require_namespace(namespace)
+        cid = _require_uuid(candidate_id, "candidate_id")
+        decision = _require_text(decision_ref, "decision_ref", 256)
+        commit = (
+            None
+            if commit_authorization_ref is None
+            else _require_text(
+                commit_authorization_ref, "commit_authorization_ref", 256
+            )
+        )
+        candidate = self.load_artifact(
+            namespace=ns, artifact_id=cid, artifact_version=1
+        )
+        if candidate.kind != "candidate" or candidate.work_id is not None:
+            raise CandidateTransitionDenied(
+                f"artifact {cid} is not a Work-less candidate"
+            )
+        if candidate.status != "pending":
+            raise CandidateTransitionDenied(
+                f"candidate {cid} is {candidate.status!r}; only a pending "
+                "candidate can be committed"
+            )
+        receipt = self.lookup_command_receipt(
+            namespace=ns, request_id=candidate.request_id
+        )
+        digest = self.lookup_command_request_digest(
+            namespace=ns, request_id=candidate.request_id
+        )
+        proposal_operation = (
+            candidate.proposal.get("operation")
+            if isinstance(candidate.proposal, dict)
+            else None
+        )
+        if (
+            receipt is None
+            or receipt.namespace != ns
+            or receipt.request_id != candidate.request_id
+            or receipt.context_id != candidate.context_id
+            or not isinstance(proposal_operation, str)
+            or receipt.operation != proposal_operation
+            or receipt.outcome not in ("committed", "noop")
+            or digest is None
+            or digest != candidate.command_digest
+        ):
+            raise CandidateTransitionDenied(
+                "no matching cognitive commit receipt for this candidate's "
+                "command digest"
+            )
+        cursor = self._require_connection().execute(
+            "UPDATE collab_artifacts SET status = 'committed', "
+            "decided_at = ?, decision_ref = ?, commit_authorization_ref = ? "
+            "WHERE namespace = ? AND artifact_id = ? AND artifact_version = 1 "
+            "AND status = 'pending'",
+            (utc_now_rfc3339(), decision, commit, ns, cid),
+        )
+        if cursor.rowcount != 1:  # pragma: no cover - write lock serialises
+            raise CandidateTransitionDenied(
+                "candidate changed before commit could be applied"
+            )
+        return self.load_artifact(
+            namespace=ns, artifact_id=cid, artifact_version=1
+        )
+
     def require_current_candidate(
         self, *, namespace: str, candidate_id: str
     ) -> tuple[ArtifactRow, WorkControl]:
@@ -2851,6 +3300,27 @@ class CollaborationMixin:
             raise CandidateTransitionDenied(
                 "candidate is not the current pending generation"
             )
+
+    def candidate_by_request(
+        self, *, namespace: str, request_id: str
+    ) -> Mapping[str, Any] | None:
+        """Return the candidate an earlier attempt registered for ``request_id``.
+
+        A single ``SELECT``: no transaction, no write lock, no row written.  It
+        exists so a crashed maintenance attempt can *find* the candidate it
+        already registered instead of proposing a second one under a fresh
+        request id.  It performs no permission filtering — the caller still
+        decides whether the candidate may be shown to anyone.
+        """
+
+        if not isinstance(request_id, str) or not request_id:
+            raise InvalidInput("request_id must be a non-empty string")
+        row = self._require_connection().execute(
+            f"SELECT {_ARTIFACT_COLUMNS} FROM collab_artifacts "
+            "WHERE namespace = ? AND kind = 'candidate' AND request_id = ?",
+            (namespace, request_id),
+        ).fetchone()
+        return None if row is None else dict(row)
 
     def _load_work_control_locked(
         self, namespace: str, work_id: str

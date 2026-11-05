@@ -24,6 +24,26 @@ $Dist = Join-Path $DistRoot 'pcs-bridge'
 $Exe = Join-Path $Dist 'pcs-bridge.exe'
 $Evidence = Join-Path $Build 'evidence'
 $Spec = Join-Path $Build 'pcs_desktop.spec'
+# Recursive cleanup is limited to named build children. Refuse junctions in
+# their ancestry instead of allowing a redirected build path to erase data.
+$buildBoundary = [System.IO.Path]::GetFullPath($Build).TrimEnd('\') + '\'
+foreach ($cleanupTarget in @($Stage, $Work, $Dist)) {
+    $resolvedTarget = [System.IO.Path]::GetFullPath($cleanupTarget)
+    if (-not $resolvedTarget.StartsWith($buildBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'build cleanup target escaped the selected build directory'
+    }
+    $ancestor = $resolvedTarget
+    while (-not [string]::IsNullOrEmpty($ancestor)) {
+        if (Test-Path -LiteralPath $ancestor) {
+            if (((Get-Item -LiteralPath $ancestor -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'build cleanup path must not traverse a junction or symbolic link'
+            }
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($ancestor)
+        if ($parent -eq $ancestor) { break }
+        $ancestor = $parent
+    }
+}
 New-Item -ItemType Directory -Force -Path $Build, $Evidence | Out-Null
 
 if (-not (Test-Path $Python)) {
@@ -31,6 +51,11 @@ if (-not (Test-Path $Python)) {
 }
 $PcsSource = Join-Path $RepoRoot 'src\quintessence_pcs'
 if (-not (Test-Path $PcsSource)) { throw "PCS source not found under $RepoRoot" }
+
+# Original notices are build resources; missing license/version evidence fails closed.
+$LicenseBundle = Join-Path $Build ('third-party-notices-' + [guid]::NewGuid().ToString('N'))
+& $Python -B (Join-Path $PSScriptRoot 'collect_licenses.py') --repo-root $RepoRoot --output $LicenseBundle
+if ($LASTEXITCODE -ne 0) { throw 'third-party notice collection failed' }
 
 Write-Host '[sidecar] staging sources outside the repository'
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
@@ -41,19 +66,27 @@ Get-ChildItem $Stage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Re
 Get-ChildItem $Stage -Recurse -File -Include '*.pyc', '*.pyo' | Remove-Item -Force
 
 $stageLiteral = $Stage.Replace('\', '\\')
+$licenseLiteral = $LicenseBundle.Replace('\', '\\')
 $specText = @"
 # Generated one-folder sidecar spec for the C12b desktop bridge.
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from importlib.metadata import distribution
 
 stage = Path(r'$stageLiteral')
+license_bundle = Path(r'$licenseLiteral')
 migrations = stage / 'quintessence_pcs' / 'resources' / 'migrations'
+upstream = distribution('hermes-scope-recall')
+license_file = next(upstream.locate_file(item) for item in upstream.files if str(item).endswith('/licenses/LICENSE'))
 
 a = Analysis(
     [str(stage / 'pcs_bridge.py')],
     pathex=[str(stage)],
     binaries=[],
-    datas=[(str(migrations), 'resources/migrations')],
-    hiddenimports=[],
+    datas=[(str(migrations), 'resources/migrations')]
+          + collect_data_files('scope_recall') + collect_data_files('tzdata')
+          + [(str(license_file), 'licenses/scope-recall'), (str(license_bundle), 'licenses')],
+    hiddenimports=collect_submodules('scope_recall.core') + ['scope_recall.contracts'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
