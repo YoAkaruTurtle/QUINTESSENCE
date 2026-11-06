@@ -11,6 +11,8 @@ import time
 import unittest
 
 from tests.desktop.support import DesktopCase, config_document, write_config
+from quintessence_pcs.runtime.manifest import ModelManifest
+from quintessence_pcs.store import CognitionStore
 
 
 def reply(text: str) -> dict:
@@ -199,6 +201,71 @@ class ConversationBridgeTests(DesktopCase):
             [tuple(row) for row in self.query("select max_calls, status from model_authorizations order by granted_at")],
         )
         self.assertEqual(2, len(self.query("select 1 from model_attempts")))
+
+    def test_legacy_64_call_renewal_persists_999_and_reuses_interrupted_grant(self) -> None:
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                directory = self.tmp_path / f"upgrade-{interrupted}"
+                directory.mkdir()
+                db = directory / "pcs.sqlite"
+                document = config_document(db, script=[reply("合成答复")])
+                path = write_config(directory, document, name="instance-host.json")
+                process = self.start(config_path=path, db_path=db)
+                process.close()
+                with CognitionStore.open(db) as store:
+                    old = store.model_authorizations()[0]
+                    self.assertEqual(64, old.max_calls)
+                    store.mark_model_authorization_exhausted(old.authorization_id)
+                    if interrupted:
+                        target = ModelManifest.from_mapping({
+                            **document["destination"]["manifest"], "max_calls": 999,
+                        })
+                        store.grant_model_authorization(
+                            namespace=old.namespace,
+                            authorization_ref=f"desktop-user-confirmed-renewal:{old.authorization_id}",
+                            provider=old.provider,
+                            model=old.model,
+                            manifest_hash=target.manifest_hash,
+                            max_calls=999,
+                            max_output_tokens_per_call=old.max_output_tokens_per_call,
+                            max_wall_seconds=old.max_wall_seconds,
+                        )
+
+                process = self.start(config_path=path)
+                before = process.request("app.info")["result"]
+                offer = before["capabilities"]["model_renewal"]
+                self.assertEqual(999, offer["max_calls"])
+                params = {
+                    "session_id": before["session_id"],
+                    "destination_id": before["destination"]["destination_id"],
+                    "authorization_id": offer["authorization_id"],
+                }
+                renewed = process.request("model.renew_authorization", params)
+                self.assertTrue(renewed["ok"], renewed)
+                after = process.request("app.info")["result"]
+                self.assertTrue(after["host"]["ready"])
+                self.assertNotEqual(params["destination_id"], after["destination"]["destination_id"])
+                document["destination"]["manifest"]["max_calls"] = 999
+                self.assertEqual(document, json.loads(path.read_text(encoding="utf-8")))
+                self.assertEqual(
+                    [(64, "exhausted"), (999, "active")],
+                    [tuple(row) for row in self.query(
+                        "select max_calls, status from model_authorizations order by granted_at",
+                    )],
+                )
+                process.close()
+                process = self.start(config_path=path)
+                info = process.request("app.info")["result"]
+                self.assertTrue(info["host"]["ready"])
+                self.assertEqual(after["destination"], info["destination"])
+                self.assertTrue(process.request("app.confirm_destination", {
+                    "session_id": info["session_id"],
+                    "destination_id": info["destination"]["destination_id"],
+                })["ok"])
+                sent = self._send(process, info, self._conversation(process, info), "合成问题", "upgrade")
+                self.assertTrue(sent["ok"], sent)
+                self.assertEqual("completed", self._wait_turn(process, info, sent["result"]["turn_id"])["state"])
+                process.close()
 
     def test_duplicate_request_id_is_reused_and_conflict_is_refused(self) -> None:
         process, info = self._start(script=[reply("唯一答")])

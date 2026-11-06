@@ -1142,6 +1142,7 @@ class Bridge:
                 LOGGER.exception("model authorization renewal failed")
                 self._send_error(request_id, ERROR_INTERNAL, "authorization renewal could not be confirmed")
             else:
+                self.config = self.runtime.config
                 self._send_ok(request_id, {"renewed": True})
             finally:
                 self._settings_pending = False

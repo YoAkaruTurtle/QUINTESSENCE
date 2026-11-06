@@ -636,6 +636,10 @@ pub async fn renew_model_authorization(
     destination_id: String,
     authorization_id: String,
 ) -> Result<HostReply, String> {
+    let _saving = match begin_settings_save() {
+        Some(guard) => guard,
+        None => return Ok(HostReply::error(HostError::new("BUSY", "正在保存设置"))),
+    };
     Ok(call(
         &state,
         "model.renew_authorization",

@@ -170,6 +170,8 @@ def _memory_info(path: Path) -> dict:
 
 
 def default_document() -> dict:
+    from quintessence_pcs.runtime.manifest import DEFAULT_DESKTOP_MAX_CALLS
+
     return {
         "schema": "desktop.host.v1", "app": {"profile": "production", "label": "QUINTESSENCE", "persona_control": {"publish": True, "activate": True}},
         "store": {}, "budget": {"request_budget_units": 2000000, "output_reserve_units": 4096},
@@ -178,7 +180,7 @@ def default_document() -> dict:
                  "disclose": True, "retention": "standard", "policy_ref": "policy:collab.v1"},
         "destination": {"provider": "deepseek", "model": "deepseek-flash", "model_protocol": "collab.v2", "external": True,
                         "manifest": {"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-flash",
-                                     "api_key_env": "QUINTESSENCE_DESKTOP_MODEL_KEY", "max_calls": 1000,
+                                     "api_key_env": "QUINTESSENCE_DESKTOP_MODEL_KEY", "max_calls": DEFAULT_DESKTOP_MAX_CALLS,
                                      "max_output_tokens_per_call": 8192, "max_wall_seconds": 120, "thinking": "enabled",
                                      "reasoning_effort": "high", "protocol_version": "EXP-01-THINKING-CANDIDATE-v1"}},
         "consult": {"max_question_chars": 8000, "query_plan": {"kind": "belief_current", "claim_types": ["capability"], "scope": {"scene": "quintessence.general"}, "limit": 5}},

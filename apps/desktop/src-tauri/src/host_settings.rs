@@ -322,6 +322,18 @@ pub fn ensure_managed_config(
         .as_ref()
         .and_then(|document| document.get("memory").cloned());
     let mut document = managed_config(settings, &root, &database, request, reserve);
+    // Keep an existing instance's manifest binding until an explicit renewal.
+    if let Some(previous) = previous.as_ref().filter(|prior| {
+        prior.pointer("/store/root") == document.pointer("/store/root")
+    }) {
+        if let Some(calls) = previous
+            .pointer("/destination/manifest/max_calls")
+            .and_then(Value::as_u64)
+            .filter(|calls| (1..=1000).contains(calls))
+        {
+            document["destination"]["manifest"]["max_calls"] = json!(calls);
+        }
+    }
     // The managed document now owns the web switch, but never the whole block:
     // a user's allowlist, timeout or capture mode must survive every rewrite.
     // Without a settings switch (legacy settings file) the whole block is kept
@@ -578,7 +590,7 @@ pub(crate) fn managed_config(
                 "base_url": settings.base_url,
                 "model": settings.model,
                 "api_key_env": KEY_ENV,
-                "max_calls": 64,
+                "max_calls": 999,
                 "max_output_tokens_per_call": settings.max_output_tokens,
                 "max_wall_seconds": 120,
                 "thinking": "enabled",
@@ -713,6 +725,8 @@ mod tests {
 
         let mut document: Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["destination"]["manifest"]["max_calls"], 999);
+        document["destination"]["manifest"]["max_calls"] = json!(64);
         document["web"] = json!({
             "enabled": true,
             "search": true,
@@ -728,6 +742,7 @@ mod tests {
         let rewritten: Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(rewritten["web"]["enabled"], true);
+        assert_eq!(rewritten["destination"]["manifest"]["max_calls"], 64);
         assert_eq!(rewritten["web"]["allowed_hosts"][0], "example.com");
         assert_eq!(rewritten["app"]["profile"], "production");
         // Legacy settings without the switch keep the hand-edited block,

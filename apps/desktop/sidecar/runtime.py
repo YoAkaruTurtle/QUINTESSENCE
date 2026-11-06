@@ -173,6 +173,7 @@ from quintessence_pcs.runtime.model_port import (
     ModelNotAuthorizedError,
 )
 from quintessence_pcs.collaboration.generation import phase_label
+from quintessence_pcs.runtime.manifest import DEFAULT_DESKTOP_MAX_CALLS
 from dataclasses import asdict, replace
 
 from quintessence_pcs.adapters.scope_recall import SubprocessCaptureAdapter
@@ -5081,7 +5082,10 @@ class DesktopRuntime:
         self.ready, self.reason_code, self.reason_detail = self._readiness()
         grant = self._renewable_model_grant()
         self.model_renewal = (
-            {"authorization_id": grant.authorization_id, "max_calls": grant.max_calls}
+            {
+                "authorization_id": grant.authorization_id,
+                "max_calls": self._renewal_calls(grant.max_calls),
+            }
             if grant is not None else None
         )
 
@@ -5099,6 +5103,10 @@ class DesktopRuntime:
             return None
         return grant
 
+    @staticmethod
+    def _renewal_calls(previous_calls: int) -> int:
+        return DEFAULT_DESKTOP_MAX_CALLS if previous_calls == 64 else previous_calls
+
     def renew_model_authorization(self, authorization_id: str) -> None:
         self.refresh_readiness()
         grant = self._renewable_model_grant()
@@ -5106,17 +5114,57 @@ class DesktopRuntime:
             raise ReviewRequestError(
                 "MODEL_RENEWAL_UNAVAILABLE", "模型授权状态已变化，请刷新设置",
             )
-        self.store.grant_model_authorization(
-            namespace=grant.namespace,
-            authorization_ref=f"desktop-user-confirmed-renewal:{grant.authorization_id}",
-            provider=grant.provider,
-            model=grant.model,
-            manifest_hash=grant.manifest_hash,
-            max_calls=grant.max_calls,
-            max_output_tokens_per_call=grant.max_output_tokens_per_call,
-            max_wall_seconds=grant.max_wall_seconds,
-        )
-        self.refresh_readiness()
+        calls = self._renewal_calls(grant.max_calls)
+        updated = self.config
+        document = None
+        if calls > updated.model.manifest.max_calls:
+            from host_config import _parse
+            from instance_manager import _atomic, _read
+
+            document = _read(updated.path)
+            if _parse(document, updated.path, bind_instance=False) != updated:
+                raise ReviewRequestError(
+                    "MODEL_RENEWAL_UNAVAILABLE", "实例配置已变化，请重新连接",
+                )
+            document["destination"]["manifest"]["max_calls"] = calls
+            updated = _parse(document, updated.path, bind_instance=False)
+        manifest_hash = updated.model.manifest.manifest_hash
+        reference = f"desktop-user-confirmed-renewal:{grant.authorization_id}"
+        existing = next((
+            item for item in self.store.model_authorizations(namespace=grant.namespace)
+            if item.authorization_ref == reference
+        ), None)
+        if existing is None:
+            self.store.grant_model_authorization(
+                namespace=grant.namespace,
+                authorization_ref=reference,
+                provider=grant.provider,
+                model=grant.model,
+                manifest_hash=manifest_hash,
+                max_calls=calls,
+                max_output_tokens_per_call=grant.max_output_tokens_per_call,
+                max_wall_seconds=grant.max_wall_seconds,
+            )
+        elif (
+            existing.status != "active"
+            or existing.provider != grant.provider
+            or existing.model != grant.model
+            or existing.manifest_hash != manifest_hash
+            or existing.max_calls != calls
+            or existing.max_output_tokens_per_call != grant.max_output_tokens_per_call
+            or existing.max_wall_seconds != grant.max_wall_seconds
+            or existing.expires_at is not None
+        ):
+            raise ReviewRequestError(
+                "MODEL_RENEWAL_UNAVAILABLE", "已有续领记录与当前配置不匹配",
+            )
+        if document is not None:
+            # The new grant is durable before the manifest starts using it.
+            # A retry after a failed config write reuses that grant.
+            _atomic(updated.path, document)
+            self.apply_generation_settings(updated)
+        else:
+            self.refresh_readiness()
 
     def _readiness(self) -> tuple[bool, str | None, str | None]:
         config = self.config
