@@ -81,6 +81,7 @@ class AuthorityTests(DesktopCase):
         self.assertNotIn("QUINTESSENCE_DESKTOP_LAB_MODEL_KEY", text)
         self.assertNotIn("sk-", text)
         self.assertIsNone(re.search(r"lab-[0-9a-f]{40,}", text))
+        self.assertIsNone(info["capabilities"]["model_renewal"])
         self.assertEqual(
             sorted(info["methods"]),
             [
@@ -102,6 +103,7 @@ class AuthorityTests(DesktopCase):
                 "memory.bridge.deliver",
                 "memory.bridge.sync",
                 "memory.search",
+                "model.renew_authorization",
                 "model.test_connection",
                 "postprocess.retry",
                 "postprocess.status",
