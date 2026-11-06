@@ -38,6 +38,7 @@ from ..runtime.collab_protocol import (
     parse_collab_output,
     repair_feedback,
 )
+from ..runtime.model_port import ModelBudgetExceededError, ModelNotAuthorizedError
 
 _ATTEMPT_REF_KEYS = frozenset(
     {"authorization_id", "attempt_id", "attempt_no", "request_hash"}
@@ -233,6 +234,15 @@ def repair_feedback_for(
 
 
 def phase_label(exc: BaseException) -> str:
+    if isinstance(exc, ModelNotAuthorizedError):
+        return {
+            "authorization_expired": "MODEL_AUTHORIZATION_EXPIRED",
+            "authorization_mismatch": "MODEL_AUTHORIZATION_MISMATCH",
+            "authorization_missing": "MODEL_AUTHORIZATION_MISSING",
+            "key_missing": "MODEL_KEY_MISSING",
+        }.get(exc.reason, "MODEL_NOT_AUTHORIZED")
+    if isinstance(exc, ModelBudgetExceededError) and exc.reason == "calls_exhausted":
+        return "MODEL_CALLS_EXHAUSTED"
     code = getattr(exc, "code", None)
     label = code if isinstance(code, str) and code else type(exc).__name__
     return label

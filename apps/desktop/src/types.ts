@@ -107,6 +107,7 @@ export interface AppInfo {
     persona?: PersonaCapabilities;
     preferences?: PreferenceCapabilities;
     web?: WebCapabilities;
+    model_renewal?: { authorization_id: string; max_calls: number } | null;
   };
   limits: {
     frame_bytes: number;

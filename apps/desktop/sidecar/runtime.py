@@ -172,6 +172,7 @@ from quintessence_pcs.runtime.model_port import (
     ModelBudgetExceededError,
     ModelNotAuthorizedError,
 )
+from quintessence_pcs.collaboration.generation import phase_label
 from dataclasses import asdict, replace
 
 from quintessence_pcs.adapters.scope_recall import SubprocessCaptureAdapter
@@ -947,7 +948,7 @@ class DesktopRuntime:
                 f"the trusted runtime could not be built ({type(exc).__name__})",
             ) from exc
 
-        self.ready, self.reason_code, self.reason_detail = self._readiness()
+        self.refresh_readiness()
 
     # ------------------------------------------------------------------ seed
 
@@ -1050,9 +1051,7 @@ class DesktopRuntime:
             )
 
         manifest = config.model.manifest
-        grants = self.store.model_authorizations(
-            namespace=namespace, status="active"
-        )
+        grants = self.store.model_authorizations(namespace=namespace)
         matching = [
             grant
             for grant in grants
@@ -1116,13 +1115,12 @@ class DesktopRuntime:
             self._ensure_self_view(namespace)
 
         manifest = config.model.manifest
-        authorization = self.store.active_model_authorization(
-            namespace=namespace,
-            provider=config.model.provider,
-            model=config.model.model,
-            manifest_hash=manifest.manifest_hash,
+        already_provisioned = any(
+            (grant.provider, grant.model, grant.manifest_hash) ==
+            (config.model.provider, config.model.model, manifest.manifest_hash)
+            for grant in self.store.model_authorizations(namespace=namespace)
         )
-        if authorization is None:
+        if not already_provisioned:
             self.store.grant_model_authorization(
                 namespace=namespace,
                 authorization_ref=config.authority.access_ref,
@@ -4608,7 +4606,7 @@ class DesktopRuntime:
             host_is_lab=config.is_lab,
         )
         self.config = config
-        self.ready, self.reason_code, self.reason_detail = self._readiness()
+        self.refresh_readiness()
 
     def cognition_candidates(self, *, limit: int = 20) -> dict[str, Any]:
         """List visible pending cognition candidates; never a body or a prompt."""
@@ -5079,6 +5077,47 @@ class DesktopRuntime:
 
     # -------------------------------------------------------------- readiness
 
+    def refresh_readiness(self) -> None:
+        self.ready, self.reason_code, self.reason_detail = self._readiness()
+        grant = self._renewable_model_grant()
+        self.model_renewal = (
+            {"authorization_id": grant.authorization_id, "max_calls": grant.max_calls}
+            if grant is not None else None
+        )
+
+    def _renewable_model_grant(self):
+        config = self.config
+        if (
+            self.reason_code != "MODEL_CALLS_EXHAUSTED"
+            or config.path != config.instance_root / "instance-host.json"
+            or not config.authority.disclose
+            or "consult" not in config.authority.purposes
+        ):
+            return None
+        grant = self.model.latest_matching_authorization(config.authority.namespace)
+        if grant is None or grant.status != "exhausted" or grant.expires_at is not None:
+            return None
+        return grant
+
+    def renew_model_authorization(self, authorization_id: str) -> None:
+        self.refresh_readiness()
+        grant = self._renewable_model_grant()
+        if grant is None or grant.authorization_id != authorization_id:
+            raise ReviewRequestError(
+                "MODEL_RENEWAL_UNAVAILABLE", "模型授权状态已变化，请刷新设置",
+            )
+        self.store.grant_model_authorization(
+            namespace=grant.namespace,
+            authorization_ref=f"desktop-user-confirmed-renewal:{grant.authorization_id}",
+            provider=grant.provider,
+            model=grant.model,
+            manifest_hash=grant.manifest_hash,
+            max_calls=grant.max_calls,
+            max_output_tokens_per_call=grant.max_output_tokens_per_call,
+            max_wall_seconds=grant.max_wall_seconds,
+        )
+        self.refresh_readiness()
+
     def _readiness(self) -> tuple[bool, str | None, str | None]:
         config = self.config
         namespace = config.authority.namespace
@@ -5110,27 +5149,14 @@ class DesktopRuntime:
                 "PROFILE_MISSING",
                 "the store has no active host profile",
             )
-        authorization = self.store.active_model_authorization(
-            namespace=namespace,
-            provider=config.model.provider,
-            model=config.model.model,
-            manifest_hash=config.model.manifest.manifest_hash,
-        )
-        if authorization is None:
-            return (
-                False,
-                "MODEL_AUTHORIZATION_MISSING",
-                "no active host authorization matches the configured destination",
-            )
         preflight = getattr(self.model, "preflight", None)
         if callable(preflight):
             try:
                 preflight(namespace=namespace)
             except Exception as exc:  # noqa: BLE001 - preflight refusal is a state
-                code = getattr(exc, "code", None)
                 return (
                     False,
-                    str(code) if isinstance(code, str) else type(exc).__name__,
+                    phase_label(exc),
                     "the configured model cannot start a call",
                 )
         return True, None, None

@@ -630,6 +630,25 @@ pub async fn generation_settings(state: State<'_, AppState>) -> Result<HostReply
 }
 
 #[tauri::command]
+pub async fn renew_model_authorization(
+    state: State<'_, AppState>,
+    session_id: String,
+    destination_id: String,
+    authorization_id: String,
+) -> Result<HostReply, String> {
+    Ok(call(
+        &state,
+        "model.renew_authorization",
+        json!({
+            "session_id": session_id,
+            "destination_id": destination_id,
+            "authorization_id": authorization_id,
+        }),
+        Duration::from_secs(30),
+    ).await)
+}
+
+#[tauri::command]
 pub async fn save_generation_settings(
     state: State<'_, AppState>,
     sdrpe_mode: String,

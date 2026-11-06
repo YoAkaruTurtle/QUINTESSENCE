@@ -10,7 +10,7 @@ import json
 import time
 import unittest
 
-from tests.desktop.support import DesktopCase, config_document
+from tests.desktop.support import DesktopCase, config_document, write_config
 
 
 def reply(text: str) -> dict:
@@ -135,6 +135,70 @@ class ConversationBridgeTests(DesktopCase):
             2,
             int(self.scalar("SELECT COUNT(*) FROM collab_turns")),
         )
+
+    def test_instance_grant_exhaustion_and_explicit_renewal(self) -> None:
+        document = config_document(
+            self.db_path, script=[{"action": "final", "reply": "合成答复"}],
+        )
+        document["destination"]["model_protocol"] = "collab.v2"
+        document["destination"]["manifest"]["max_calls"] = 1
+        document["conversation"] = {"sdrpe": {"mode": "on"}}
+        path = write_config(self.tmp_path, document, name="instance-host.json")
+        process = self.start(config_path=path)
+        info = process.request("app.info")["result"]
+        confirmation = {
+            "session_id": info["session_id"],
+            "destination_id": info["destination"]["destination_id"],
+        }
+        self.assertTrue(process.request("app.confirm_destination", confirmation)["ok"])
+        conversation = self._conversation(process, info)
+        sent = self._send(process, info, conversation, "合成问题", "budget-1")
+        self.assertTrue(sent["ok"], sent)
+        turn_id = sent["result"]["turn_id"]
+        result = self._wait_turn(process, info, turn_id)
+        self.assertEqual("completed", result["state"])
+        self.assertEqual("合成答复", result["final"]["text"])
+        events = process.request(
+            "turn.events", {"session_id": info["session_id"], "turn_id": turn_id},
+        )["result"]["events"]
+        self.assertTrue(any(
+            event["type"] == "stage_failed"
+            and event["stage"] == "expression"
+            and event["reason"] == "model:MODEL_CALLS_EXHAUSTED"
+            for event in events
+        ))
+        exhausted = process.request("app.info")["result"]
+        self.assertFalse(exhausted["host"]["ready"])
+        self.assertEqual("MODEL_CALLS_EXHAUSTED", exhausted["host"]["reason_code"])
+        self.assertEqual(1, exhausted["capabilities"]["model_renewal"]["max_calls"])
+        denied = self._send(process, info, conversation, "第二个合成问题", "budget-2")
+        self.assertEqual("MODEL_CALLS_EXHAUSTED", denied["error"]["code"])
+        self.assertEqual(1, len(self._get(process, info, conversation)["turns"]))
+
+        process.close()
+        process = self.start(config_path=path)
+        info = process.request("app.info")["result"]
+        self.assertEqual("MODEL_CALLS_EXHAUSTED", info["host"]["reason_code"])
+        self.assertEqual(1, len(self.query("select 1 from model_authorizations")))
+        confirmation = {
+            "session_id": info["session_id"],
+            "destination_id": info["destination"]["destination_id"],
+        }
+        params = {**confirmation, "authorization_id": info["capabilities"]["model_renewal"]["authorization_id"]}
+        self.assertFalse(process.request("model.renew_authorization", {**params, "max_calls": 99})["ok"])
+        self.assertFalse(process.request("model.renew_authorization", {**params, "destination_id": "other"})["ok"])
+        self.assertTrue(process.request("model.renew_authorization", params)["ok"])
+        self.assertFalse(process.request("model.renew_authorization", params)["ok"])
+        self.assertTrue(process.request("app.info")["result"]["host"]["ready"])
+        self.assertTrue(process.request("app.confirm_destination", confirmation)["ok"])
+        sent = self._send(process, info, conversation, "第二个合成问题", "budget-2")
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual("completed", self._wait_turn(process, info, sent["result"]["turn_id"])["state"])
+        self.assertEqual(
+            [(1, "exhausted"), (1, "exhausted")],
+            [tuple(row) for row in self.query("select max_calls, status from model_authorizations order by granted_at")],
+        )
+        self.assertEqual(2, len(self.query("select 1 from model_attempts")))
 
     def test_duplicate_request_id_is_reused_and_conflict_is_refused(self) -> None:
         process, info = self._start(script=[reply("唯一答")])

@@ -150,6 +150,7 @@ IMPLEMENTED_METHODS = frozenset(
         "turn.cancel",
         "bridge.ping",
         "settings.reload",
+        "model.renew_authorization",
         "memory.bridge.sync",
         "memory.bridge.deliver",
         "memory.search",
@@ -435,6 +436,10 @@ class _RuntimeWorker:
                     job()
                 except BaseException:  # noqa: BLE001 - a job must not kill the DB thread
                     LOGGER.exception("consult job failed outside its handler")
+                try:
+                    runtime.refresh_readiness()
+                except Exception:  # noqa: BLE001 - preserve the worker on store failure
+                    LOGGER.exception("runtime readiness refresh failed")
         finally:
             runtime.close()
 
@@ -1009,6 +1014,9 @@ class Bridge:
         if self._settings_pending and method not in {"turn.cancel", "turn.events", "turn.result", "profile.status"}:
             self._send_error(request_id, ERROR_BUSY, "settings will apply after the running turn")
             return
+        if method == "model.renew_authorization":
+            self._dispatch_model_renewal(request_id, params)
+            return
         if method == "app.confirm_destination":
             self._dispatch_confirm(request_id, params)
             return
@@ -1107,6 +1115,40 @@ class Bridge:
         finally:
             self._settings_pending = False
 
+    def _dispatch_model_renewal(self, request_id: str, params: dict[str, Any]) -> None:
+        if set(params) != {"session_id", "destination_id", "authorization_id"}:
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "renewal confirmation required")
+            return
+        if self.worker is None or self.runtime is None or self.config is None or self.data_locked:
+            self._send_error(request_id, ERROR_HOST_NOT_READY, "the trusted host is unavailable")
+            return
+        if params["session_id"] != self.session_id:
+            self._send_error(request_id, ERROR_SESSION_MISMATCH, "the host session changed")
+            return
+        if params["destination_id"] != self.config.destination.destination_id:
+            self._send_error(request_id, ERROR_DESTINATION_MISMATCH, "the destination changed")
+            return
+        authorization_id = params["authorization_id"]
+        if not _valid_id(authorization_id):
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "invalid authorization identifier")
+            return
+
+        def renew() -> None:
+            try:
+                self.runtime.renew_model_authorization(authorization_id)
+            except ReviewRequestError as exc:
+                self._send_error(request_id, exc.code, exc.message)
+            except Exception:
+                LOGGER.exception("model authorization renewal failed")
+                self._send_error(request_id, ERROR_INTERNAL, "authorization renewal could not be confirmed")
+            else:
+                self._send_ok(request_id, {"renewed": True})
+            finally:
+                self._settings_pending = False
+
+        self._settings_pending = True
+        self.worker.submit(renew)
+
     def _ready(self) -> bool:
         return self.runtime is not None and self.runtime.ready
 
@@ -1168,7 +1210,7 @@ class Bridge:
             ),
             "workspace": {
                 "consult": ready,
-                "conversation": ready,
+                "conversation": ready or reason_code == "MODEL_CALLS_EXHAUSTED",
                 "review": review_caps["read"],
                 "review_reason": review_reason,
             },
@@ -1194,6 +1236,7 @@ class Bridge:
                 },
                 "cognition": self._cognition_capabilities(),
                 "expression": self._expression_capabilities(),
+                "model_renewal": self.runtime.model_renewal if self.runtime else None,
                 "preferences": self._preference_capabilities(),
                 "web": self._web_capabilities(),
             },
@@ -2972,7 +3015,7 @@ class Bridge:
         if not self.runtime.ready:
             self._send_error(
                 request_id,
-                ERROR_HOST_NOT_READY,
+                "MODEL_CALLS_EXHAUSTED" if self.runtime.reason_code == "MODEL_CALLS_EXHAUSTED" else ERROR_HOST_NOT_READY,
                 "the trusted host is not ready for a conversation turn",
             )
             return
@@ -3151,7 +3194,15 @@ class Bridge:
                 "another process owns this data instance",
             )
             return False
-        if self.config is None or self.runtime is None or not self.runtime.ready:
+        readable_when_exhausted = method in {
+            "conversation.list", "conversation.get", "conversation.search",
+            "conversation.usage", "turn.result", "turn.events", "turn.steps",
+            "turn.trace", "postprocess.status",
+        }
+        if self.config is None or self.runtime is None or (
+            not self.runtime.ready
+            and not (readable_when_exhausted and self.runtime.reason_code == "MODEL_CALLS_EXHAUSTED")
+        ):
             self._send_error(
                 request_id, ERROR_HOST_NOT_READY, "the trusted host is not ready"
             )

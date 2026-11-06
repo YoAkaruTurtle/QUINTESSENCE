@@ -118,6 +118,9 @@ export function reasonLabel(code: string | null, detail: string | null): string 
   if (code === "MODEL_AUTHORIZATION_MISSING") {
     return "没有匹配当前目的地的模型授权";
   }
+  if (code === "MODEL_CALLS_EXHAUSTED") {
+    return "模型调用次数已用尽，请在设置中续领授权";
+  }
   if (code === "MODEL_KEY_MISSING") {
     return "尚未保存模型 API Key";
   }

@@ -79,6 +79,42 @@ export function generationSettings(refresh: () => Promise<void>, info?: AppInfo 
   };
   showEffective(info);
   box.append(actual, el("p", { text: t("persisted") }));
+  const offer = info?.capabilities.model_renewal;
+  if (info?.destination && offer) {
+    const destination = info.destination;
+    const chinese = language === "zh-CN";
+    const renew = el("button", {
+      class: "quiet-button",
+      text: chinese ? `续领 ${offer.max_calls} 次模型调用` : `Authorize ${offer.max_calls} more model calls`,
+      attrs: { type: "button" },
+    });
+    renew.onclick = async () => {
+      const target = `${destination.provider} / ${destination.model}`;
+      const prompt = chinese
+        ? `为当前实例的 ${target} 再授权 ${offer.max_calls} 次调用？每次输出及运行时长上限沿用上一份授权。`
+        : `Authorize ${offer.max_calls} more calls to ${target} for this instance? The previous output and run-time limits apply.`;
+      if (!window.confirm(prompt)) return;
+      renew.disabled = true;
+      try {
+        const reply = await invoke<HostReply>("renew_model_authorization", {
+          sessionId: info.session_id,
+          destinationId: destination.destination_id,
+          authorizationId: offer.authorization_id,
+        });
+        if (!reply.ok) {
+          feedback.textContent = reply.error?.message ?? t("failed");
+          return;
+        }
+        feedback.textContent = chinese ? "新的模型授权已生效" : "Model authorization renewed";
+        renew.remove();
+      } catch {
+        feedback.textContent = t("unknown");
+      } finally {
+        await refresh();
+      }
+    };
+    box.append(renew);
+  }
   const expression = (info?.capabilities as { expression?: { resolved_reason: string | null } } | undefined)?.expression;
   if (expression?.resolved_reason === "protocol_v1") box.append(el("p", { text: t("protocol") }));
   void (async () => {

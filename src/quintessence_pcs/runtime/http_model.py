@@ -86,6 +86,8 @@ from ..store.model import (
     MODEL_ATTEMPT_MALFORMED,
     MODEL_ATTEMPT_OK,
     MODEL_ATTEMPT_TIMEOUT,
+    MODEL_AUTHORIZATION_ACTIVE,
+    MODEL_AUTHORIZATION_EXHAUSTED,
     ModelAttempt,
     ModelAttemptConflict,
     ModelAttemptReservation,
@@ -93,6 +95,7 @@ from ..store.model import (
     ModelAuthorizationExpired,
     ModelAuthorizationMismatch,
     ModelBudgetExceeded,
+    ModelCallsExhausted,
     ModelLedgerError,
     ModelNotAuthorized,
 )
@@ -1302,6 +1305,14 @@ class DirectHttpModel:
             )
         return version
 
+    def latest_matching_authorization(self, namespace: str) -> ModelAuthorization | None:
+        return next(
+            (grant for grant in self._store.model_authorizations(namespace=namespace)
+             if (grant.provider, grant.model, grant.manifest_hash) ==
+             (self._manifest.provider, self._manifest.model, self._manifest.manifest_hash)),
+            None,
+        )
+
     def _authorization(self, namespace: str) -> ModelAuthorization:
         authorization = self._store.active_model_authorization(
             namespace=namespace,
@@ -1310,8 +1321,19 @@ class DirectHttpModel:
             manifest_hash=self._manifest.manifest_hash,
         )
         if authorization is None:
+            latest = self.latest_matching_authorization(namespace)
+            if latest is not None and latest.status == MODEL_AUTHORIZATION_EXHAUSTED:
+                raise ModelBudgetExceededError(
+                    "model authorization has used all allowed calls",
+                    reason="calls_exhausted",
+                )
+            if latest is not None and latest.status == MODEL_AUTHORIZATION_ACTIVE:
+                raise ModelNotAuthorizedError(
+                    "model authorization has expired", reason="authorization_expired",
+                )
             raise ModelNotAuthorizedError(
-                "no active model authorization covers this provider/model/manifest"
+                "no active model authorization covers this provider/model/manifest",
+                reason="authorization_missing",
             )
         return authorization
 
@@ -1319,7 +1341,8 @@ class DirectHttpModel:
         value = os.environ.get(self._manifest.api_key_env)
         if value is None or value == "":
             raise ModelNotAuthorizedError(
-                f"{self._manifest.api_key_env} is not set; refusing to call a provider"
+                f"{self._manifest.api_key_env} is not set; refusing to call a provider",
+                reason="key_missing",
             )
         if value != value.strip():
             raise ModelConfigurationError(
@@ -1756,6 +1779,8 @@ def _redact(text: str | None, api_key: str) -> str | None:
 
 
 def _translate_store_error(exc: ModelLedgerError) -> ModelAdapterError:
+    if isinstance(exc, ModelCallsExhausted):
+        return ModelBudgetExceededError(str(exc), reason="calls_exhausted")
     if isinstance(exc, ModelBudgetExceeded):
         return ModelBudgetExceededError(str(exc), reason="calls_or_walltime")
     if isinstance(exc, ModelAuthorizationExpired):

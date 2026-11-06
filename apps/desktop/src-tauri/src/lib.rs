@@ -305,6 +305,7 @@ pub fn run() {
             commands::set_conversation_display_preference,
             commands::model_status,
             commands::generation_settings,
+            commands::renew_model_authorization,
             commands::save_generation_settings,
             commands::web_settings,
             commands::save_web_settings,

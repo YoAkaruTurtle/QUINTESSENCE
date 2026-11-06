@@ -126,6 +126,10 @@ class ModelBudgetExceeded(ModelLedgerError):
     code = "BUDGET_EXCEEDED"
 
 
+class ModelCallsExhausted(ModelBudgetExceeded):
+    """The grant has used every permitted call."""
+
+
 class ModelAttemptConflict(ModelLedgerError):
     """An attempt is already finished, or a concurrent writer won the slot."""
 
@@ -538,7 +542,7 @@ class ModelLedgerMixin:
                 .fetchone()["calls"]
             )
             if used >= effective_calls:
-                raise ModelBudgetExceeded(
+                raise ModelCallsExhausted(
                     f"model authorization {aid} has used {used} of "
                     f"{effective_calls} allowed call(s)"
                 )

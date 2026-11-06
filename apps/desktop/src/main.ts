@@ -4985,6 +4985,7 @@ function startChatPolling(turnId: string): void {
       chatPollTimer = null;
       await openConversation(result.conversation_id);
       await refreshConversationList();
+      await refreshHost();
       if (keptEvents.length > 0) {
         chat = chatReduce(chat, {
           type: "events",
@@ -6281,7 +6282,10 @@ function chatWorkspace(): HTMLElement {
     const answers = messages.filter(message => message.kind === "final" || message.kind === "wait_question");
     for (const message of answers) group.append(...answerBubbles(message, animate));
     if (turn && !answers.length && !["accepted", "running"].includes(turn.state)) {
-      group.append(el("div", { class: "chat-turn-state", text: `${document.documentElement.lang === "en" ? "Turn status" : "本轮状态"}: ${turn.state}${turn.failure_reason ? " · " + turn.failure_reason : ""}` }));
+      const reason = turn.failure_reason === "model:MODEL_CALLS_EXHAUSTED"
+        ? reasonLabel("MODEL_CALLS_EXHAUSTED", null)
+        : turn.failure_reason;
+      group.append(el("div", { class: "chat-turn-state", text: `${document.documentElement.lang === "en" ? "Turn status" : "本轮状态"}: ${turn.state}${reason ? " · " + reason : ""}` }));
     }
     if (turn && terminalTurn(turn)) group.append(postprocessChips(turn));
     thread.append(group);
