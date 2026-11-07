@@ -1,9 +1,13 @@
-"""RG08: the style-text limits a private persona may publish under.
+"""The style-text limits a private persona may publish under.
 
-``style.tone`` was 128 and ``style.verbosity_by_context.casual`` was 64; the
-V16 author text needs 132 and 76.  The limits are now 256 / 128 while the
-other fields keep their old bounds, so the test pins both ends: the new values
-pass, one character more still fails, and ``technical`` is unchanged.
+History: ``style.tone`` was 128 and ``style.verbosity_by_context.casual`` was
+64; the V16 author text needed 132 and 76, so they became 256 / 128 while
+``technical`` kept its old bound of 64.  The V17 author text needs 726 / 412 /
+204, so the J11 ceiling is 1024 / 512 / 256.
+
+The tests pin both ends for every field: the approved lengths pass, the exact
+ceiling passes, one character more is rejected, and an empty string is still
+rejected — a wider bound is not "no bound".
 """
 
 from __future__ import annotations
@@ -17,6 +21,10 @@ from quintessence_pcs.foundation.errors import InvalidInput
 NS = "example.persona.test"
 PROFILE_ID = "example.persona.p0"
 EVENT_ID = "a5ae43a5-ac4e-488f-a517-ce61b2516ef1"
+
+TONE_CEILING = 1024
+CASUAL_CEILING = 512
+TECHNICAL_CEILING = 256
 
 
 def _body(*, tone: int, casual: int, technical: int = 10) -> dict:
@@ -57,20 +65,36 @@ class StyleLimitTests(unittest.TestCase):
             _body(**kwargs), profile_id=PROFILE_ID, review_ref=_value(), schema_version="3"
         )
 
-    def test_the_v16_lengths_are_accepted(self) -> None:
-        self.validate(tone=132, casual=76)  # actual V16 values
-        self.validate(tone=256, casual=128)  # exact new ceilings
+    def test_the_approved_texts_are_accepted(self) -> None:
+        self.validate(tone=132, casual=76, technical=32)  # V16
+        self.validate(tone=726, casual=412, technical=204)  # V17
 
-    def test_one_character_past_the_ceiling_is_rejected(self) -> None:
-        with self.assertRaises(InvalidInput):
-            self.validate(tone=257, casual=76)
-        with self.assertRaises(InvalidInput):
-            self.validate(tone=132, casual=129)
+    def test_the_exact_ceilings_are_accepted(self) -> None:
+        self.validate(tone=TONE_CEILING, casual=CASUAL_CEILING, technical=TECHNICAL_CEILING)
 
-    def test_technical_keeps_its_old_bound(self) -> None:
-        self.validate(tone=132, casual=76, technical=64)
+    def test_one_character_past_each_ceiling_is_rejected(self) -> None:
         with self.assertRaises(InvalidInput):
-            self.validate(tone=132, casual=76, technical=65)
+            self.validate(tone=TONE_CEILING + 1, casual=76)
+        with self.assertRaises(InvalidInput):
+            self.validate(tone=132, casual=CASUAL_CEILING + 1)
+        with self.assertRaises(InvalidInput):
+            self.validate(tone=132, casual=76, technical=TECHNICAL_CEILING + 1)
+
+    def test_an_empty_style_text_is_still_rejected(self) -> None:
+        with self.assertRaises(InvalidInput):
+            self.validate(tone=0, casual=76)
+        with self.assertRaises(InvalidInput):
+            self.validate(tone=132, casual=0)
+        with self.assertRaises(InvalidInput):
+            self.validate(tone=132, casual=76, technical=0)
+
+    def test_the_other_style_fields_keep_their_bounds(self) -> None:
+        body = _body(tone=132, casual=76)
+        body["style"]["language"] = "l" * 129
+        with self.assertRaises(InvalidInput):
+            validate_profile_body(
+                body, profile_id=PROFILE_ID, review_ref=_value(), schema_version="3"
+            )
 
 
 if __name__ == "__main__":

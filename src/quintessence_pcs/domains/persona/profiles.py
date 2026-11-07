@@ -664,11 +664,14 @@ def _validate_style(style: Any) -> None:
     if not isinstance(style, Mapping):
         raise InvalidInput("profile body style must be a JSON object")
     _require_text(style.get("language"), "style.language", 128)
-    _require_text(style.get("tone"), "style.tone", 256)
+    # J11: raised once more for an approved author text (V17 needs 726 / 412 /
+    # 204).  These stay upper bounds, not targets: the non-empty check and every
+    # other field's limit are untouched.
+    _require_text(style.get("tone"), "style.tone", 1024)
     verbosity = style.get("verbosity_by_context")
     if not isinstance(verbosity, Mapping):
         raise InvalidInput("profile body style.verbosity_by_context must be an object")
-    limits = {"casual": 128, "technical": 64}
+    limits = {"casual": 512, "technical": 256}
     for context, limit in limits.items():
         _require_text(
             verbosity.get(context), f"style.verbosity_by_context.{context}", limit
