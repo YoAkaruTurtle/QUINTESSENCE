@@ -1,0 +1,178 @@
+/* Approved conversation-first appearance; existing controls and states retained. */
+:root {
+  --bg:#101113; --bg-veil:#161719; --surface:#1c1d20; --surface-2:#242529; --surface-3:#2c2d31;
+  --ink:#f2f1ef; --ink-soft:#dddce0; --muted:#aaa8af; --line:#343438; --line-strong:#68666e;
+  --brand:#c63f4b; --brand-strong:#df5868; --brand-soft:#ed657218; --focus:#f48b96; --on-accent:#ffffff;
+  --sidebar:#161719; --soft:#242529; --radius:18px; --radius-small:10px;
+  --font:"Noto Sans SC","Segoe UI Variable","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+}
+:root[data-theme="light"] {
+  --bg:var(--light-background,#f5f4f1); --ink:var(--light-ink,#252528);
+  --surface:var(--light-surface,#ffffff);
+  --surface-2:color-mix(in srgb,var(--bg) 86%,var(--ink)); --surface-3:color-mix(in srgb,var(--bg) 80%,var(--ink));
+  --bg-veil:var(--surface); --sidebar:color-mix(in srgb,var(--bg) 97%,var(--ink)); --soft:var(--surface-2);
+  --ink-soft:color-mix(in srgb,var(--ink) 90%,var(--bg)); --muted:color-mix(in srgb,var(--ink) 75%,var(--bg));
+  --line:color-mix(in srgb,var(--ink) 18%,var(--bg)); --line-strong:color-mix(in srgb,var(--ink) 40%,var(--bg));
+  --brand:var(--light-accent,#a82e40); --brand-strong:var(--brand); --brand-soft:color-mix(in srgb,var(--brand) 12%,transparent);
+  --focus:var(--ink); --on-accent:var(--light-on-accent,#fff);
+}
+.sol-shell { overflow:hidden; transition:grid-template-columns .36s cubic-bezier(.22,1,.36,1); }
+.sol-sidebar { background-image:linear-gradient(160deg,color-mix(in srgb,var(--surface) 70%,transparent),transparent 65%); padding-top:22px; }
+.sol-sidebar button { border-radius:11px; }
+.sol-sidebar .new-conversation { clip-path:none; border:1px solid var(--line); border-radius:13px; padding-block:13px; }
+.sol-sidebar button.is-active { border-left:1px solid transparent; padding-left:12px; background:var(--brand-soft); color:var(--ink); }
+.sol-shell .brand-mark { overflow:hidden; border-radius:22%; }
+.sol-shell .brand-image { object-fit:cover; }
+.sol-shell .topbar { height:66px; min-height:66px; background:var(--sidebar); }
+.sol-shell .theme-toggle[hidden] { display:none; }
+.sol-shell .topbar::after,.dashboard-card::before,.dashboard-card::after,.sol-shell .composer::before { display:none; }
+.sol-shell .persona-chip { border-radius:7px; }
+.sol-shell .topbar { background:color-mix(in srgb,var(--sidebar) 86%,transparent); backdrop-filter:blur(24px); border-bottom-color:color-mix(in srgb,var(--line) 55%,transparent); }
+.sol-shell .main { background:radial-gradient(ellipse at 50% 0%,color-mix(in srgb,var(--brand) 5%,transparent),transparent 60%),var(--bg); }
+.sol-shell button { transition:background .2s,color .2s,box-shadow .2s,transform .2s; }
+.sol-shell button:active:not(:disabled) { transform:scale(.96); }
+.sol-shell .sol-nav button.is-active { box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--brand) 15%,transparent); }
+.sol-shell .chat-welcome { min-height:45vh; display:flex; flex-direction:column; justify-content:center; align-items:center; gap:26px; text-align:center; padding:55px 0; animation:panel-enter .55s ease-out; }
+.sol-shell .chat-welcome::before { display:none; }
+.sol-shell .chat-welcome .brand-mark { width:76px; height:76px; box-shadow:0 18px 60px color-mix(in srgb,var(--brand) 18%,transparent); }
+.sol-shell .chat-welcome h1 { font-size:clamp(24px,3vw,34px); font-weight:500; letter-spacing:-.8px; margin:0; }
+.sol-shell .chat-text { box-shadow:0 3px 12px #0000000a; }
+.sol-shell .chat-avatar { box-shadow:0 3px 10px #00000015; border:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
+.sol-shell .is-assistant .chat-avatar { background-image:var(--assistant-avatar,url('/brand.png')); color:transparent; }
+.sol-shell .chat-message.is-user .chat-text { color:var(--on-accent); background:var(--brand); }
+.sol-shell .chat-message.is-bubble-continuation .chat-text { border-top-left-radius:7px; }
+.sol-shell .chat-commentary { display:flex; align-items:center; gap:9px; }
+.sol-shell .chat-commentary::before { content:''; width:6px; height:6px; border-radius:50%; background:var(--brand); box-shadow:0 0 0 4px var(--brand-soft); flex-shrink:0; }
+.sol-shell .dashboard-card { background:linear-gradient(145deg,color-mix(in srgb,var(--surface) 94%,var(--ink)),var(--surface) 65%); border-color:color-mix(in srgb,var(--line) 65%,transparent); box-shadow:0 8px 26px #00000008; }
+.sol-shell .composer-shell { border-top:0; background:linear-gradient(transparent,var(--bg) 40%); padding-top:22px; }
+.sol-shell .composer { background:color-mix(in srgb,var(--surface) 90%,transparent); backdrop-filter:blur(24px); box-shadow:0 10px 35px #00000018,inset 0 1px 0 #ffffff05; }
+.sol-shell .composer:focus-within { border-color:color-mix(in srgb,var(--brand) 55%,var(--line)); box-shadow:0 10px 35px #00000018,0 0 0 3px var(--brand-soft); }
+.sol-shell .conversation-inner { width:100%; max-width:1030px; padding:28px 60px 20px; }
+.sol-shell .chat-message { position:relative; width:fit-content; max-width:calc(100% - 56px); margin:0 0 12px 56px; padding:0; }
+.sol-shell .chat-message.is-assistant { width:fit-content; max-width:calc(100% - 56px); padding:0; border:0; background:none; margin:0 0 12px 56px; }
+.sol-shell .chat-text { background:var(--surface); padding:12px 18px; border:1px solid var(--line); border-radius:19px 19px 19px 6px; font-size:15px; line-height:1.8; }
+.sol-shell .chat-message.is-user { background:none; padding:0; max-width:85%; margin:12px 56px 22px 0; border-radius:0; }
+.sol-shell .is-user .chat-text { background:var(--brand); color:var(--on-accent); border-color:transparent; border-radius:19px 19px 6px 19px; }
+.sol-shell .chat-role { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.chat-avatar { display:grid; place-items:center; position:absolute; left:-56px; bottom:0; width:44px; height:44px; border-radius:15px; background-color:var(--surface-2); background-size:cover; background-position:center; font-size:16px; color:var(--ink); }
+.is-assistant .chat-avatar { background-image:var(--assistant-avatar,none); }
+:root:not([data-assistant-avatar="true"]) .sol-shell .is-assistant .chat-avatar { background-image:url('/brand.png'); }
+.is-user .chat-avatar { left:auto; right:-56px; background-image:var(--user-avatar,none); }
+:root[data-assistant-avatar="true"] .is-assistant .chat-avatar,
+:root[data-user-avatar="true"] .is-user .chat-avatar { font-size:0; }
+.sol-shell .chat-message.is-bubble-split { margin-bottom:10px; }
+.sol-shell .chat-commentary { border:0; margin:5px 0 16px 56px; padding:0; font-size:12px; }
+.sol-shell .chat-process { margin-left:56px; }
+.sol-shell .chat-postprocess { margin:0 0 20px 56px; }
+.sol-shell .composer-shell { padding:10px 35px 22px; background:var(--bg); }
+.sol-shell .composer { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:12px; max-width:910px; border:1px solid var(--line); border-radius:22px; padding:12px 16px; box-shadow:0 8px 30px #00000012; }
+.sol-shell .composer-foot { margin:0; padding:0; }
+.sol-shell .composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 3px var(--brand-soft); }
+.sol-shell .composer-input { min-height:34px; max-height:150px; resize:none; }
+.sol-shell .composer-actions .send-button,.sol-shell .composer-actions .cancel-button { border-radius:50%; }
+.sol-shell .send-button,.sol-shell .confirm-button,.sol-shell .primary-button,
+:root[data-theme="light"] .send-button,:root[data-theme="light"] .confirm-button,:root[data-theme="light"] .primary-button { color:var(--on-accent); }
+.sol-shell .composer-meta { font-size:11px; }
+.dashboard-card,.review-pane,.review-detail,.settings-page .drawer-section { border-radius:17px; }
+.dashboard-card { padding:24px; }
+.connection-symbol { border-radius:16px; }
+.scope-badge { border:0; font-size:11px; }
+.quiet-button,.text-action,.review-work-item,.review-candidate-row { border-radius:9px; }
+.session-summary { background:var(--sidebar); }
+.summary-grid { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); overflow:visible; }
+.summary-metric { border:0; }
+.summary-metric strong { font-size:22px; }
+.context-window { position:relative; padding-left:75px; justify-content:center; }
+.context-window .metric-ring { position:absolute; left:0; top:0; width:64px; height:64px; }
+.context-window .ring-caption strong { font-size:13px; }
+.context-window > strong { font-size:13px; }
+.summary-metric small { font-size:11px; }
+.bottom-panel { animation:panel-enter .32s cubic-bezier(.22,1,.36,1); }
+.panel-resize::after { opacity:1; border-radius:2px; }
+.chat-message.bubble-reveal,.chat-commentary.bubble-reveal { animation:bubble-arrive .38s cubic-bezier(.16,1,.3,1) both; }
+@keyframes bubble-arrive { from { opacity:0; transform:translateY(16px) scale(.96); } to { opacity:1; transform:none; } }
+@keyframes panel-enter { from { opacity:0; transform:translateY(35px); } to { opacity:1; transform:none; } }
+.appearance-preview { display:block; width:72px; height:72px; object-fit:cover; border-radius:19px; margin:12px 0; }
+.appearance-preview.is-wallpaper { width:min(100%,360px); height:150px; border-radius:12px; }
+.appearance-preview[hidden] { display:none; }
+.appearance-preview-clickable { cursor:pointer; }
+.appearance-preview-clickable:focus-visible { outline:2px solid var(--focus); outline-offset:3px; }
+.chat-avatar { padding:0; cursor:pointer; }
+.avatar-preview-dialog { border:0; padding:0; background:transparent; }
+.avatar-preview-dialog::backdrop { background:#0008; backdrop-filter:blur(5px); }
+.avatar-preview-card { display:grid; justify-items:center; gap:14px; min-width:260px; padding:28px; border:1px solid var(--line); border-radius:24px; background:var(--surface); box-shadow:var(--shadow); }
+.avatar-preview-dialog .avatar-preview-face { position:static; left:auto; right:auto; bottom:auto; width:180px; height:180px; margin:0; border-radius:42px; font-size:56px; background-size:cover; background-position:center; }
+.avatar-preview-card strong { font-size:15px; font-weight:550; }
+.avatar-preview-card .muted { font-size:11px; }
+.avatar-preview-close { margin-top:4px; }
+.appearance-colors { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.appearance-images { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:16px 0; }
+.appearance-image-field { padding:16px; border:1px solid var(--line); border-radius:13px; background:var(--surface); }
+.appearance-image-field h4 { margin:0 0 12px; font-size:13px; font-weight:500; }
+.appearance-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.appearance-image-field .appearance-actions { margin-top:12px; }
+.appearance-image-field .appearance-preview { max-width:100%; }
+.appearance-actions button { margin:0; }
+.cognition-layout { display:grid; grid-template-columns:minmax(180px, .8fr) minmax(0,2fr); gap:20px; padding:18px; }
+.cognition-queue { display:grid; align-content:start; gap:9px; }
+.cognition-queue-item { display:grid; gap:9px; width:100%; padding:16px; text-align:left; border:1px solid transparent; border-radius:12px; background:transparent; }
+.cognition-queue-item strong { font-size:13px; font-weight:500; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+.cognition-queue-item span { color:var(--muted); font-size:11px; }
+.cognition-queue-item.is-selected { background:var(--surface-2); border-color:var(--line); }
+.cognition-detail .review-work-item { display:flex; flex-direction:column; align-items:stretch; padding:24px; min-height:230px; border:1px solid var(--line); }
+.cognition-detail .review-work-event { font-size:21px; line-height:1.7; }
+.cognition-detail .review-work-meta { margin-top:18px; }
+.cognition-detail .review-work-actions { justify-content:flex-end; margin-top:28px; }
+.sol-shell .review-inner { max-width:1240px; padding:36px 40px; }
+.sol-shell .review-head { border:0; padding:0 0 26px; align-items:center; }
+.sol-shell .review-head .eyebrow { display:none; }
+.sol-shell .review-head h1 { font-size:28px; letter-spacing:-.7px; margin:0; }
+.sol-shell .review-head .quiet-button { margin:0; }
+.sol-shell .review-pane { border-radius:18px; border-color:var(--line); }
+.sol-shell .review-cognitionpane { border:0; background:transparent; overflow:visible; }
+.sol-shell .review-cognitionpane > .review-pane-head { padding:0 0 16px; border:0; justify-content:flex-start; gap:10px; }
+.sol-shell .review-cognitionpane > .review-pane-head .quiet-button { margin-left:auto; }
+.cognition-count { display:grid; place-items:center; min-width:26px; height:26px; padding:0 7px; border-radius:9px; background:var(--brand-soft); color:var(--brand); font-size:12px; font-variant-numeric:tabular-nums; }
+.sol-shell .cognition-layout { grid-template-columns:minmax(220px, .85fr) minmax(0,2fr); gap:24px; padding:0; align-items:start; }
+.sol-shell .cognition-queue { background:var(--sidebar); border:1px solid var(--line); padding:10px; border-radius:18px; min-height:300px; }
+.sol-shell .cognition-queue-item { padding:18px 16px; gap:16px; border-radius:12px; }
+.sol-shell .cognition-queue-item strong { font-size:14px; line-height:1.75; -webkit-line-clamp:3; }
+.sol-shell .cognition-queue-item.is-selected { background:var(--brand-soft); border-color:color-mix(in srgb,var(--brand) 30%,var(--line)); }
+.sol-shell .cognition-queue-item.is-selected span { color:var(--brand); }
+.sol-shell .cognition-detail { padding:0; gap:0; }
+.sol-shell .cognition-detail .review-work-item { padding:32px; min-height:300px; border-radius:20px; background:var(--surface); box-shadow:0 10px 30px #0000000c; cursor:default; animation:panel-enter .24s ease-out; }
+.sol-shell .cognition-detail .review-work-main { display:flex; flex-direction:column-reverse; gap:20px; }
+.sol-shell .cognition-detail .review-work-meta { margin:0; color:var(--muted); font-size:12px; }
+.sol-shell .cognition-detail .review-work-event { font-size:21px; font-weight:500; line-height:1.85; }
+.sol-shell .cognition-detail .review-work-actions { margin-top:auto; padding-top:30px; gap:10px; }
+.sol-shell .cognition-detail .review-work-actions button { padding:11px 22px; border-radius:11px; }
+.sol-shell .cognition-detail .review-empty { display:grid; place-items:center; min-height:300px; padding:36px; background:var(--surface); border:1px dashed var(--line); border-radius:20px; font-size:16px; }
+.sol-shell .review-grid { margin-top:26px; gap:24px; }
+@media(max-width:1000px) { .sol-shell .review-inner { padding:24px; } .sol-shell .cognition-layout { gap:14px; grid-template-columns:minmax(180px,.8fr) minmax(0,1.5fr); } .sol-shell .cognition-detail .review-work-item { padding:22px; } }
+.cognition-confirm { width:min(520px,90vw); border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:20px; padding:28px; box-shadow:var(--shadow); }
+.cognition-confirm::backdrop { background:#0008; backdrop-filter:blur(5px); }
+.cognition-confirm p { line-height:1.8; margin:20px 0; }
+.cognition-confirm .review-work-actions { justify-content:flex-end; gap:12px; }
+.settings-field input[type="color"] { width:80px; height:42px; padding:4px; border:1px solid var(--line); border-radius:9px; }
+:root[data-wallpaper="true"] .sol-shell[data-page="chat"] .main { background-image:linear-gradient(color-mix(in srgb,var(--bg) 28%,transparent),color-mix(in srgb,var(--bg) 28%,transparent)),var(--chat-wallpaper); background-size:cover; background-position:center; }
+:root[data-wallpaper="true"] .chat-commentary,:root[data-wallpaper="true"] .chat-status { width:fit-content; padding:5px 10px; border-radius:10px; background:var(--surface); }
+@media(max-width:1000px) { .sol-shell .conversation-inner { padding-inline:25px; } .sol-shell .composer-shell { padding-inline:25px; } }
+.chat-day { display:flex; align-items:center; gap:14px; margin:6px 0 24px; color:var(--muted); font-size:11px; }
+.chat-day::before,.chat-day::after { content:''; height:1px; flex:1; background:color-mix(in srgb,var(--line) 70%,transparent); }
+.chat-typing { display:flex; align-items:center; gap:9px; margin:4px 0 18px 56px; color:var(--muted); font-size:12px; }
+.chat-typing .thinking-dots { margin-right:2px; }
+.sol-shell .composer-meta { min-width:0; }
+.sol-shell .cognition-layout.is-empty { grid-template-columns:minmax(0,1fr); }
+.cognition-impact { display:grid; gap:7px; padding-top:20px; border-top:1px solid var(--line); }
+.cognition-label { color:var(--muted); font-size:11px; letter-spacing:.06em; }
+.cognition-impact p { margin:0; color:var(--ink-soft); font-size:13px; line-height:1.8; }
+.cognition-source { margin:16px 0 0; color:var(--muted); font-size:11px; }
+.cognition-tech { margin-top:18px; color:var(--muted); font-size:12px; }
+.cognition-tech summary { cursor:pointer; padding:6px 0; color:var(--muted); }
+.cognition-tech .kv { margin-top:10px; grid-template-columns:90px minmax(0,1fr); line-height:1.8; }
+@media(max-width:900px) {
+  .sol-shell .cognition-layout { grid-template-columns:minmax(0,1fr); }
+  .sol-shell .cognition-queue { min-height:0; max-height:38dvh; overflow:auto; }
+  .sol-shell .cognition-detail .review-work-item { min-height:240px; }
+}
+@media(prefers-reduced-motion:reduce) { .sol-shell,.bottom-panel,.chat-message.bubble-reveal,.chat-commentary.bubble-reveal,.chat-typing { animation:none!important; transition:none!important; } }

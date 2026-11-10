@@ -1,4 +1,7 @@
 import { AppShell, type PageId } from "./appShell";
+import { openAvatarPreview } from "./avatarPreview";
+import { chatDayKey, chatDayLabel } from "./chatDay";
+import { cognitionAvailable, runCognitionDecision } from "./cognitionDecision";
 import { dashboard, traceSection } from "./dashboard";
 import { sessionOverview } from "./sessionOverview";
 import { NO_USAGE, usageSummary, type TurnTrace, type UsageLoad } from "./usage";
@@ -6,8 +9,9 @@ import { s as shellText } from "./shellText";
 import { uiText } from "./locale";
 import "./styles.css";
 import "./sol.css";
+import "./appearance.css";
 import { instanceSettingsPanel } from "./instanceSettings";
-import { interfaceSettings, generationSettings, loadInterfacePreferences } from "./settings";
+import { interfaceSettings, generationSettings, loadInterfacePreferences, toggleThemePreference } from "./settings";
 import { maintenanceSettingsPanel } from "./maintenanceSettings";
 import { personaPanel, preferencePanel } from "./adminPanel";
 import { webSettingsPanel } from "./webSettings";
@@ -548,6 +552,7 @@ interface Shell {
   hostIndicator: HTMLSpanElement;
   destinationChip: HTMLButtonElement;
   personaChip: HTMLSpanElement;
+  themeButton: HTMLButtonElement;
   settingsButton: HTMLButtonElement;
   main: HTMLElement;
   footer: HTMLElement;
@@ -664,10 +669,16 @@ function buildShell(): void {
     attrs: { type: "button", id: "settings-button", "aria-label": "设置" },
     children: [icon("gear")],
   });
+  const themeButton = el("button", {
+    class: "icon-button theme-toggle",
+    attrs: { type: "button", id: "theme-toggle" },
+    children: [icon("sun")],
+  });
+  themeButton.addEventListener("click", () => void toggleThemeFromTopbar(themeButton));
 
   const topbarRight = el("div", {
     class: "topbar-right",
-    children: [hostIndicator, personaChip, destinationChip, settingsButton],
+    children: [hostIndicator, personaChip, destinationChip, themeButton, settingsButton],
   });
 
   const topbar = el("header", {
@@ -691,7 +702,7 @@ function buildShell(): void {
     class: "composer-input",
     attrs: {
       id: "question",
-      rows: "2",
+      rows: "1",
       placeholder: "今天想聊些什么？",
       "aria-label": "咨询问题",
       spellcheck: "false",
@@ -732,6 +743,10 @@ function buildShell(): void {
   const composerFoot = el("div", {
     class: "composer-foot",
     children: [
+      el("div", {
+        class: "composer-meta",
+        children: [hint, el("span", { class: "meta-sep", text: "·" }), counter],
+      }),
       el("div", {
         class: "composer-actions",
         children: [cancelButton, sendButton],
@@ -841,6 +856,7 @@ function buildShell(): void {
     hostIndicator,
     destinationChip,
     personaChip,
+    themeButton,
     settingsButton,
     main,
     footer,
@@ -1384,6 +1400,16 @@ function syncTopbar(): void {
         null,
       );
 
+  const light = document.documentElement.dataset.theme === "light";
+  shell.themeButton.hidden = appView.page === "settings";
+  shell.themeButton.replaceChildren(icon(light ? "moon" : "sun"));
+  const themeLabel = document.documentElement.lang === "en"
+    ? light ? "Switch to dark theme" : "Switch to light theme"
+    : light ? "切换到夜间主题" : "切换到日间主题";
+  shell.themeButton.setAttribute("aria-label", themeLabel);
+  shell.themeButton.title = themeLabel;
+  shell.themeButton.setAttribute("aria-pressed", String(light));
+
   shell.consultTab.classList.toggle("is-active", workspace === "consult");
   shell.reviewTab.classList.toggle("is-active", workspace === "review");
   shell.consultTab.setAttribute(
@@ -1396,6 +1422,20 @@ function syncTopbar(): void {
   );
   document.title =
     workspace === "review" ? "QUINTESSENCE · Review" : "QUINTESSENCE · Consult";
+}
+
+async function toggleThemeFromTopbar(trigger: HTMLButtonElement): Promise<void> {
+  const result = await toggleThemePreference();
+  if (!result.ok) {
+    showToast(result.error ?? "主题保存失败");
+    return;
+  }
+  syncTopbar();
+  const light = document.documentElement.dataset.theme === "light";
+  showToast(document.documentElement.lang === "en"
+    ? light ? "Light theme applied" : "Dark theme applied"
+    : light ? "已切换到日间主题" : "已切换到夜间主题");
+  trigger.focus({ preventScroll: true });
 }
 
 function switchWorkspace(next: "consult" | "review"): void {
@@ -2350,6 +2390,8 @@ async function performReviewResult(
 }
 
 interface CognitionViewState {
+  selected: string | null;
+  decisionError: string | null;
   loaded: boolean;
   loading: boolean;
   error: string | null;
@@ -2360,6 +2402,8 @@ interface CognitionViewState {
 }
 
 const cognitionView: CognitionViewState = {
+  selected: null,
+  decisionError: null,
   loaded: false,
   loading: false,
   error: null,
@@ -2417,30 +2461,20 @@ async function decideCognitionCandidate(
   if (cognitionView.busy) return;
   const session = sessionId();
   if (!session) return;
-  cognitionView.busy = candidate.candidate_id;
-  cognitionView.notice = null;
-  cognitionView.error = null;
-  try {
-    const reply = (await chatApi.cognitionCandidateDecide(
+  await runCognitionDecision(
+    cognitionView,
+    candidate.candidate_id,
+    decision,
+    async () => (await chatApi.cognitionCandidateDecide(
       session,
       candidate.candidate_id,
       candidate.artifact_version,
       decision,
-    )) as HostReply;
-    if (!reply.ok) {
-      cognitionView.error = reply.error?.message ?? "提交决定失败";
-    } else if (decision === "approve") {
-      cognitionView.notice = "已提交批准；以实际状态为准。";
-    } else {
-      cognitionView.notice = "已提交拒绝；以实际状态为准。";
-    }
-  } catch (error) {
-    cognitionView.error = invokeError(error).message;
-  } finally {
-    cognitionView.busy = null;
-    cognitionView.loaded = false;
-    await loadCognitionCandidates(true);
-  }
+    )) as HostReply,
+    () => loadCognitionCandidates(true),
+    render,
+    (error) => invokeError(error).message,
+  );
 }
 
 function cognitionPane(info: AppInfo): HTMLElement | null {
@@ -2448,6 +2482,33 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
   if (!caps?.enabled) return null;
   void loadCognitionCandidates();
   const rows: HTMLElement[] = [];
+  const selected = cognitionView.candidates.find(c => c.candidate_id === cognitionView.selected)
+    ?? cognitionView.candidates.find(c => c.requires_human) ?? cognitionView.candidates[0];
+  cognitionView.selected = selected?.candidate_id ?? null;
+  const hasCandidates = cognitionView.candidates.length > 0;
+  const queue = el("div", { class: "cognition-queue", attrs: { "aria-label": "认知候选列表" } });
+  for (const candidate of cognitionView.candidates) {
+    const item = el("button", { class: `cognition-queue-item${candidate === selected ? " is-selected" : ""}`,
+      attrs: { type: "button", "aria-pressed": String(candidate === selected) },
+      children: [el("strong", { text: candidate.claim }), el("span", { text: cognitionStateLabel(candidate) })],
+    });
+    item.onclick = () => { cognitionView.selected = candidate.candidate_id; render(); };
+    queue.append(item);
+  }
+  const queueButtons = Array.from(queue.querySelectorAll<HTMLButtonElement>(".cognition-queue-item"));
+  queueButtons.forEach((button, index) => {
+    button.addEventListener("keydown", event => {
+      const offset = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+      if (!offset && event.key !== "Home" && event.key !== "End") return;
+      event.preventDefault();
+      const next = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? queueButtons.length - 1
+          : (index + offset + queueButtons.length) % queueButtons.length;
+      queueButtons[next]?.focus();
+    });
+  });
   if (cognitionView.loading && !cognitionView.loaded) {
     rows.push(el("p", { class: "muted", text: uiText("正在读取认知候选…") }));
   } else if (cognitionView.error) {
@@ -2463,24 +2524,62 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
     );
   } else {
     for (const candidate of cognitionView.candidates) {
+      if (candidate !== selected) continue;
       const actions: HTMLElement[] = [];
-      if (candidate.requires_human && cognitionView.pendingReview) {
+      // Workless chat candidates use cognition.candidate.decide; pendingReview
+      // describes the separate managed-work review permissions.
+      if (candidate.requires_human && cognitionAvailable(info)) {
         for (const [decision, label] of [
           ["approve", "批准"],
           ["reject", "拒绝"],
         ] as const) {
           const button = el("button", {
-            class: "quiet-button",
+            class: decision === "approve" ? "primary-button cognition-approve" : "quiet-button",
             text: cognitionView.busy === candidate.candidate_id ? "提交中…" : label,
             attrs: { type: "button" },
           });
           button.disabled = cognitionView.busy !== null;
-          button.addEventListener("click", () =>
-            void decideCognitionCandidate(candidate, decision),
-          );
+          button.addEventListener("click", () => confirmCognitionDecision(candidate, decision, button));
           actions.push(button);
         }
       }
+      const extras: HTMLElement[] = [];
+      const impact = candidate.impact?.trim();
+      if (impact) {
+        extras.push(
+          el("div", {
+            class: "cognition-impact",
+            children: [
+              el("span", { class: "cognition-label", text: "影响" }),
+              el("p", { text: impact }),
+            ],
+          }),
+        );
+      }
+      if (candidate.turn_id) {
+        extras.push(el("p", { class: "cognition-source", text: "来源：本轮对话" }));
+      }
+      const created = Number.isNaN(new Date(candidate.created_at).getTime())
+        ? candidate.created_at
+        : new Date(candidate.created_at).toLocaleString(document.documentElement.lang);
+      extras.push(
+        el("details", {
+          class: "cognition-tech",
+          children: [
+            el("summary", { text: "技术信息" }),
+            el("dl", {
+              class: "kv",
+              children: [
+                kv("类型", candidate.claim_type ?? "—"),
+                kv("状态", candidate.state),
+                kv("原因", candidate.reason_code ?? "—"),
+                kv("版本", String(candidate.artifact_version)),
+                kv("创建", created),
+              ],
+            }),
+          ],
+        }),
+      );
       rows.push(
         el("div", {
           class: "review-work-item",
@@ -2491,12 +2590,12 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
                 el("span", { class: "review-work-event", text: candidate.claim }),
                 el("span", {
                   class: "review-work-meta",
-                  text: `${cognitionStateLabel(candidate)} · ${
-                    candidate.claim_type ?? "未分类"
-                  } · ${candidate.created_at}`,
+                  text: `${cognitionStateLabel(candidate)} · ${candidate.claim_type ?? "未分类"}`,
+                  attrs: { title: candidate.created_at },
                 }),
               ],
             }),
+            ...extras,
             el("div", { class: "review-work-actions", children: actions }),
           ],
         }),
@@ -2512,24 +2611,49 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
     cognitionView.loaded = false;
     void loadCognitionCandidates(true);
   });
+  const detail = el("div", { class: "review-work-list cognition-detail", children: rows });
+  const decisionError = cognitionView.decisionError ? callout(cognitionView.decisionError, "danger") : null;
+  if (decisionError) decisionError.setAttribute("role", "alert");
+  const notice = cognitionView.notice ? callout(cognitionView.notice, "info") : null;
+  if (notice) {
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+  }
   return el("aside", {
     class: "review-pane review-cognitionpane",
     attrs: { "aria-label": "认知候选" },
     children: [
       el("div", {
         class: "review-pane-head",
-        children: [el("h2", { text: uiText("认知候选") }), refresh],
+        children: [el("h2", { text: uiText("认知候选") }), el("span", { class: "cognition-count", text: String(cognitionView.candidates.filter(c => c.requires_human).length), attrs: { title: "待人工确认" } }), refresh],
       }),
-      el("p", {
-        class: "review-pane-note",
-        text: uiText("候选由聊天中的模型建议形成，未生效前不是正式认识；只有待人工的候选可以在这里批准或拒绝。"),
+      decisionError,
+      notice,
+      el("div", {
+        class: `cognition-layout${hasCandidates ? "" : " is-empty"}`,
+        children: hasCandidates ? [queue, detail] : [detail],
       }),
-      cognitionView.notice
-        ? callout(cognitionView.notice, "info")
-        : null,
-      el("div", { class: "review-work-list", children: rows }),
     ],
   });
+}
+
+function confirmCognitionDecision(candidate: CognitionCandidate, decision: "approve" | "reject", trigger: HTMLButtonElement): void {
+  if (cognitionView.busy || document.querySelector(".cognition-confirm")) return;
+  const session = sessionId();
+  const dialog = el("dialog", { class: "cognition-confirm", attrs: { "aria-labelledby": "cognition-confirm-title" } });
+  const cancel = el("button", { class: "quiet-button", text: "返回检查", attrs: { type: "button", autofocus: "" } });
+  const confirm = el("button", { class: "primary-button", text: decision === "approve" ? "确认批准" : "确认拒绝", attrs: { type: "button" } });
+  dialog.append(el("h2", { text: decision === "approve" ? "采纳这条认识？" : "拒绝这条候选？", attrs: { id: "cognition-confirm-title" } }),
+    el("p", { text: candidate.claim }), el("div", { class: "review-work-actions", children: [cancel, confirm] }));
+  cancel.onclick = () => dialog.close();
+  confirm.onclick = () => {
+    dialog.close();
+    if (session !== sessionId()) return;
+    void decideCognitionCandidate(candidate, decision);
+  };
+  dialog.addEventListener("close", () => { dialog.remove(); if (trigger.isConnected) trigger.focus(); }, { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 function reviewWorkspace(): HTMLElement {
@@ -2541,6 +2665,11 @@ function reviewWorkspace(): HTMLElement {
     return notReadyCard();
   }
   if (!reviewAvailable(info)) {
+    if (cognitionAvailable(info)) {
+      return el("section", { class: "review", children: [reviewHeader(info), cognitionPane(info),
+        el("details", { children: [el("summary", { text: "工作审查" }), reviewUnavailableCard(info)] }),
+      ] });
+    }
     return reviewUnavailableCard(info);
   }
   const section = el("section", {
@@ -2604,12 +2733,11 @@ function reviewUnavailableCard(info: AppInfo): HTMLElement {
 
 function reviewHeader(info: AppInfo): HTMLElement {
   const refresh = el("button", { class: "quiet-button", text: uiText("刷新"), attrs: { type: "button", id: "review-refresh" } });
-  refresh.onclick = () => void refreshReviewData();
+  refresh.onclick = () => void Promise.allSettled([refreshReviewData(), loadCognitionCandidates(true)]);
   const english = document.documentElement.lang === "en";
   return el("header", { class: "review-head page-heading", children: [
     el("div", { children: [el("div", { class: "eyebrow", text: shellText("instance") }),
-      el("h1", { text: english ? "Decisions, with context." : "待你确认的事项。" }),
-      el("p", { class: "page-subtitle", text: english ? "Inspect pending work and review proposals before accepting them." : "查看待审查事项与候选，再决定是否接受。" }),
+      el("h1", { text: english ? "Decisions, with context." : "把决定留给你。" }),
     ] }), refresh,
   ] });
 }
@@ -4156,6 +4284,8 @@ function syncComposer(): void {
   if (shell.textarea.value !== state.question) {
     shell.textarea.value = state.question;
   }
+  shell.textarea.style.height = "34px";
+  shell.textarea.style.height = `${Math.min(150, Math.max(34, shell.textarea.scrollHeight))}px`;
   const placeholder =
     state.phase === "sending"
       ? "正在处理本次咨询…"
@@ -4166,14 +4296,17 @@ function syncComposer(): void {
   shell.target.textContent = destinationLabel(state.destination);
   shell.target.classList.toggle("is-not-ready", !state.destination);
   shell.counter.textContent = `${countCharacters(state.question)} / ${maxQuestionChars(state)}`;
+  const chatWaiting = chatMode && (chat.sending || chat.pendingTurnId !== null);
   shell.hint.textContent = uiText(
-    state.phase === "sending"
-      ? "正在等待权威结果；本次无法取消或重发"
-      : state.phase === "not-ready" || !state.host?.host.ready
-        ? "宿主未就绪；发送已禁用"
-        : state.result
-          ? "发送新问题会替换当前结果"
-          : "Enter 发送 · Shift+Enter 换行");
+    chatWaiting
+      ? "正在处理本轮…"
+      : state.phase === "sending"
+        ? "正在等待权威结果；本次无法取消或重发"
+        : state.phase === "not-ready" || !state.host?.host.ready
+          ? "宿主未就绪；发送已禁用"
+          : state.result
+            ? "发送新问题会替换当前结果"
+            : "Enter 发送 · Shift+Enter 换行");
   const showCancel =
     chatMode && chat.pendingTurnId !== null && processEnabled();
   shell.cancelButton.classList.toggle("hidden", !showCancel);
@@ -5043,13 +5176,45 @@ function chatBubble(message: ChatMessage, bodyOverride?: string): HTMLElement {
     ? "（这段内容已因删除或权限变化不可用）"
     : (bodyOverride ?? message.text ?? "");
   if (message.kind === "commentary") return el("div", { class: "chat-commentary", text: body });
+  const name = assistant ? uiAssistantName() : uiText("你");
+  const letter = assistant ? avatarLetter(uiAssistantName()) : uiText("你");
+  const avatar = el("button", {
+    class: "chat-avatar",
+    text: letter,
+    attrs: {
+      type: "button",
+      "aria-label": document.documentElement.lang === "en" ? "View avatar" : "查看头像",
+    },
+  });
+  avatar.addEventListener("click", () => openAvatarPreview({
+    kind: assistant ? "assistant" : "user",
+    label: name,
+    letter,
+    trigger: avatar,
+  }));
   return el("div", {
     class: `chat-message ${assistant ? "is-assistant" : "is-user"}${
       message.redacted ? " is-redacted" : ""
     }`,
     children: [
-      el("div", { class: "chat-role", text: assistant ? uiAssistantName() : uiText("你") }),
+      avatar,
+      el("div", { class: "chat-role", text: name }),
       el("div", { class: "chat-text", text: body }),
+    ],
+  });
+}
+
+function chatTypingIndicator(): HTMLElement {
+  return el("div", {
+    class: "chat-typing",
+    attrs: { role: "status", "aria-live": "polite" },
+    children: [
+      el("span", {
+        class: "thinking-dots",
+        attrs: { "aria-hidden": "true" },
+        children: [el("span"), el("span"), el("span")],
+      }),
+      el("span", { text: shellText("typing") }),
     ],
   });
 }
@@ -6245,8 +6410,11 @@ function chatWorkspace(): HTMLElement {
   } else if (chat.messages.length === 0 && pendingBubble === null) {
     thread.appendChild(
       el("div", {
-        class: "chat-empty",
-        text: shellText("empty"),
+        class: "chat-empty chat-welcome",
+        children: [
+          brandMark("lg"),
+          el("h1", { text: shellText("empty") }),
+        ],
       }),
     );
   }
@@ -6258,9 +6426,20 @@ function chatWorkspace(): HTMLElement {
   const turnIds = orderedTurnIds(chat);
   const pendingInside =
     pendingTurnId !== null && turnIds.includes(pendingTurnId);
+  let lastDay: string | null = null;
   for (const turnId of turnIds) {
     const turn = chat.turns.find(item => item.turn_id === turnId) ?? null;
     const messages = chat.messages.filter(message => message.turn_id === turnId);
+    const firstMessage = messages.find(message => message.created_at);
+    const day = firstMessage ? chatDayKey(firstMessage.created_at) : null;
+    if (firstMessage && day && day !== lastDay) {
+      lastDay = day;
+      thread.appendChild(el("div", {
+        class: "chat-day",
+        text: chatDayLabel(firstMessage.created_at, new Date(), document.documentElement.lang),
+        attrs: { role: "separator" },
+      }));
+    }
     const group = el("div", { class: "chat-turn-group", attrs: { "data-turn-id": turnId } });
     const animate = shouldRevealTurn(turnId, newest);
     // Card C: the projection occupies the user slot of its own turn, before
@@ -6300,9 +6479,14 @@ function chatWorkspace(): HTMLElement {
     group.append(pendingBubble);
     thread.append(group);
   }
-  const status = turnStatusLabel(chat);
-  if (status) {
-    thread.appendChild(el("div", { class: "chat-status", text: status }));
+  const waiting = chat.sending || chat.pendingTurnId !== null;
+  if (waiting) {
+    thread.appendChild(chatTypingIndicator());
+  } else {
+    const status = turnStatusLabel(chat);
+    if (status) {
+      thread.appendChild(el("div", { class: "chat-status", text: status }));
+    }
   }
   if (chat.error) {
     thread.appendChild(
@@ -7340,9 +7524,16 @@ function sleep(ms: number): Promise<void> {
 // start
 // --------------------------------------------------------------------------
 
-buildShell();
-void loadInterfacePreferences()
-  .catch(() => undefined)
-  .then(() => loadDisplayPreferencesFromHost())
-  .catch(() => undefined)
-  .finally(() => boot());
+async function start(): Promise<void> {
+  // Keep the boot splash until the saved theme/appearance is known, but never
+  // let a slow preferences read hold the window hostage.
+  await Promise.race([
+    loadInterfacePreferences().catch(() => undefined),
+    sleep(300),
+  ]);
+  buildShell();
+  await loadDisplayPreferencesFromHost().catch(() => undefined);
+  await boot();
+}
+
+void start();

@@ -128,6 +128,7 @@ export interface UsageTurn {
 }
 
 export interface UsageSummary {
+  latest_content_request?: UsageAttempt | null;
   conversation_id: string;
   turns_total: number;
   turns_with_attempts: number;
@@ -214,6 +215,7 @@ export function usageSummary(payload: unknown): UsageSummary | null {
     repairs: Number(counts.repairs ?? 0),
     tokens: value.tokens as UsageTokens,
     latest_request: (value.latest_request ?? null) as UsageAttempt | null,
+    latest_content_request: (value.latest_content_request ?? null) as UsageAttempt | null,
     latest_context: (value.latest_context ?? null) as UsageSummary["latest_context"],
     turn: (value.turn ?? null) as UsageSummary["turn"],
   };

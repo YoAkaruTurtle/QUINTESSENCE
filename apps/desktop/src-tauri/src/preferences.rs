@@ -67,6 +67,8 @@ pub struct ConversationUiView {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiPreferences {
     #[serde(default)]
+    pub appearance: Appearance,
+    #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default = "default_panel_height")]
     pub panel_height: u32,
@@ -90,7 +92,38 @@ fn default_language() -> String { "zh-CN".into() }
 fn default_panel_height() -> u32 { 320 }
 fn default_theme() -> String { "dark".into() }
 impl Default for UiPreferences {
-    fn default() -> Self { Self { sidebar_collapsed: false, panel_height: default_panel_height(), language: default_language(), theme: default_theme(), ai_display_name: None, ai_display_name_explicit: None, conversation_ui: BTreeMap::new() } }
+    fn default() -> Self { Self { appearance: Appearance::default(), sidebar_collapsed: false, panel_height: default_panel_height(), language: default_language(), theme: default_theme(), ai_display_name: None, ai_display_name_explicit: None, conversation_ui: BTreeMap::new() } }
+}
+
+/// Local display assets only; never sent to the model or written to PCS records.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Appearance {
+    pub light_accent: Option<String>,
+    pub light_background: Option<String>,
+    pub wallpaper: Option<String>,
+    pub assistant_avatar: Option<String>,
+    pub user_avatar: Option<String>,
+}
+
+impl Appearance {
+    pub fn validate(&self) -> Result<(), HostError> {
+        for color in [&self.light_accent, &self.light_background].into_iter().flatten() {
+            if color.len() != 7 || !color.starts_with('#') || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit) {
+                return Err(HostError::new("INVALID_PARAMS", "invalid appearance color"));
+            }
+        }
+        for (image, limit) in [(&self.wallpaper, 3_000_000), (&self.assistant_avatar, 400_000), (&self.user_avatar, 400_000)] {
+            if let Some(image) = image {
+                let payload = image.strip_prefix("data:image/png;base64,")
+                    .or_else(|| image.strip_prefix("data:image/jpeg;base64,"));
+                if image.len() > limit || payload.map_or(true, |s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))) {
+                    return Err(HostError::new("INVALID_PARAMS", "invalid or oversized display image"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn path_for(app: &AppHandle) -> PathBuf {
@@ -345,6 +378,7 @@ pub fn load(path: &Path) -> UiPreferences {
     match serde_json::from_str::<UiPreferences>(&text) {
         Ok(preferences) => {
             let preferences = UiPreferences {
+                appearance: if preferences.appearance.validate().is_ok() { preferences.appearance } else { Appearance::default() },
                 sidebar_collapsed: preferences.sidebar_collapsed,
                 panel_height: preferences.panel_height.clamp(240, 1600),
                 ai_display_name: preferences.ai_display_name.and_then(|name| {
@@ -423,6 +457,37 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
+    fn appearance_roundtrips_and_old_files_keep_defaults() {
+        let directory = work_dir("appearance-roundtrip");
+        let path = directory.join(FILE_NAME);
+        let mut preferences = UiPreferences::default();
+        preferences.appearance.light_accent = Some("#4080ff".into());
+        preferences.appearance.light_background = Some("#ffffff".into());
+        preferences.appearance.assistant_avatar = Some("data:image/png;base64,aGVsbG8=".into());
+        save(&path, &preferences).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.appearance.light_accent, preferences.appearance.light_accent);
+        assert_eq!(loaded.appearance.assistant_avatar, preferences.appearance.assistant_avatar);
+        fs::write(&path, r#"{"theme":"light"}"#).unwrap();
+        let old = load(&path);
+        assert_eq!(old.theme, "light");
+        assert!(old.appearance.wallpaper.is_none());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn appearance_rejects_remote_active_and_oversized_images() {
+        for image in ["https://example.test/image.png".to_string(), "data:image/svg+xml;base64,PHN2Zz4=".into(), format!("data:image/png;base64,{}", "A".repeat(400_001))] {
+            let mut value = Appearance::default();
+            value.user_avatar = Some(image);
+            assert!(value.validate().is_err());
+        }
+        let mut value = Appearance::default();
+        value.light_accent = Some("red; background:url(x)".into());
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
     fn display_name_is_trimmed_and_bounded() {
         assert_eq!(validate("  小助手  ").unwrap().as_deref(), Some("小助手"));
         assert_eq!(validate("   ").unwrap(), None);
@@ -497,8 +562,7 @@ mod tests {
     // ------------------------------------------------- UI-F04 conversation UI
 
     fn work_dir(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
+        let dir = std::env::temp_dir()
             .join("preferences-tests")
             .join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

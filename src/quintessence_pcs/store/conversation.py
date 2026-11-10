@@ -1709,6 +1709,14 @@ class ConversationMixin:
             ns, conversation_id=cid
         )
         turns_total, turns_with_attempts = self._turn_coverage_locked(ns, cid)
+        # Expression requests can be much smaller than the conversation prompt.
+        # Keep the latest content measurement separate from overall usage/speed.
+        content = self._latest_attempt_record_locked(ns, cid, content_only=True)
+        content_usage = None
+        if content is not None:
+            content_usage = usage_view.summarize(
+                content, {}, previous=None,
+            ).to_dict()
         result: dict[str, Any] = {
             "conversation_id": cid,
             "turns_total": turns_total,
@@ -1726,6 +1734,7 @@ class ConversationMixin:
             },
             "tokens": usage_view.complete_from_aggregate(aggregate),
             "latest_request": latest_block,
+            "latest_content_request": content_usage,
             "latest_context": latest_context,
             "turn": None,
         }
@@ -2111,13 +2120,14 @@ class ConversationMixin:
         return turn
 
     def _latest_attempt_record_locked(
-        self, ns: str, conversation_id: str
+        self, ns: str, conversation_id: str, *, content_only: bool = False
     ) -> Any | None:
         row = self._require_connection().execute(
             self._ATTEMPT_SELECT
             + self._ATTEMPT_JOIN
             + "WHERE t.namespace = ? AND t.conversation_id = ? "
-            "ORDER BY m.started_at DESC, m.attempt_no DESC, m.attempt_id DESC "
+            + ("AND s.kind = 'content' " if content_only else "")
+            + "ORDER BY m.started_at DESC, m.attempt_no DESC, m.attempt_id DESC "
             "LIMIT 1",
             (ns, conversation_id),
         ).fetchone()

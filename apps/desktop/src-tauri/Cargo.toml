@@ -23,6 +23,7 @@ required-features = ["host-tests"]
 
 [features]
 default = []
+custom-protocol = ["tauri/custom-protocol"]
 host-tests = []
 
 [build-dependencies]

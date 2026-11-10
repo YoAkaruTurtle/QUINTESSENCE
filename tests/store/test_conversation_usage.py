@@ -190,6 +190,7 @@ class ConversationUsageStoreTests(CognitionTestCase):
         self.assertEqual(1, usage["turns_with_attempts"])
         self.assertEqual(2, usage["turn"]["attempts_total"])
         self.assertEqual(320, usage["turn"]["tokens"]["total"])
+        self.assertEqual(128, usage["latest_content_request"]["prompt_tokens"])
 
     def test_unknown_usage_and_reservations_are_never_zero(self) -> None:
         creation, context, _iid, _stage = self.build_turn()
@@ -203,6 +204,8 @@ class ConversationUsageStoreTests(CognitionTestCase):
         self.assertFalse(usage["tokens"]["complete"])
         self.assertIsNone(usage["tokens"]["total"])
         self.assertEqual(0, usage["attempts_known"])
+        self.assertFalse(usage["latest_content_request"]["usage_known"])
+        self.assertIsNone(usage["latest_content_request"]["prompt_tokens"])
 
     def test_repair_marker_same_body_and_unmarked_attempts(self) -> None:
         creation, context, _iid, _stage = self.build_turn()
@@ -358,6 +361,9 @@ class ConversationUsageStoreTests(CognitionTestCase):
 
         trace = self.trace(creation.turn.turn_id)
         self.assertEqual("expression", trace["final"]["source"])
+        usage = self.usage(creation.turn.turn_id)
+        self.assertEqual(content_attempt, usage["latest_content_request"]["attempt_id"])
+        self.assertEqual("content", usage["latest_content_request"]["stage"])
         self.assertFalse(trace["final"]["fallback"])
         self.assertEqual(320, trace["tokens"]["total"])
         self.assertEqual(2, len(trace["stages"]))

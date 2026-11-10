@@ -2,6 +2,7 @@ import { el } from "./dom";
 import { s } from "./shellText";
 import type { SessionOverview } from "./sessionOverview";
 import type { TurnTrace, UsageAttempt, UsageContext } from "./usage";
+import { contextMeasurement } from "./contextWindow";
 
 export interface CandidateOverview { configured: boolean; loaded: boolean; loading: boolean; error: string | null; human: number; other: number }
 function conversationName(model: SessionOverview): string {
@@ -66,13 +67,31 @@ function contextValue(model: SessionOverview): string {
 
 export function metricsSummary(model: SessionOverview): HTMLElement {
   const scope = conversationName(model);
+  const context = contextMeasurement(model.usage, model.contextCapacity ?? null);
+  const unknownModel = context.capacity === null;
+  const ringCount = context.ratio === null ? "—" : `${(context.ratio * 100).toFixed(1)}%`;
+  const contextRing = ring(context.ratio === null ? null : Math.min(context.ratio, 1), "", ringCount);
+  contextRing.setAttribute("aria-label", `${s("contextWindow")}: ${unknownModel ? s("unknown") : ringCount}`);
+  const contextPanel = el("div", { class: "summary-metric context-window", attrs: {
+    title: unknownModel ? s("contextWindowUnknownHelp") : s("contextWindowHelp"),
+    role: "group",
+    "aria-label": s("contextWindow"),
+  }, children: [
+    el("span", { text: s("contextWindow") }),
+    contextRing,
+    el("strong", {
+      text: unknownModel
+        ? s("contextWindowUnknown")
+        : `${context.used?.toLocaleString() ?? "—"} / ${context.capacity!.toLocaleString()}`,
+    }),
+  ] });
   const summary = el("div", { class: "session-summary", children: [
     el("div", { class: "summary-title", children: [el("span", { text: s("scope") }), el("strong", { text: scope })] }),
-    el("div", { class: "summary-grid", children: [
+    el("div", { class: "summary-grid", children: [contextPanel, ...[
       [s("tokens"), tokenValue(model), tokenHelp(model)],
       [s("speed"), speedValue(model), s("speedHelp")],
       [s("context"), contextValue(model), s("contextHelp")],
-    ].map(([label, number, help]) => el("div", { class: "summary-metric", children: [el("span", { text: label }), el("strong", { text: number }), el("small", { text: help })] })) }),
+    ].map(([label, number, help]) => el("div", { class: "summary-metric", attrs: { title: help }, children: [el("span", { text: label }), el("strong", { text: number })] }))] }),
   ] });
   return summary;
 }

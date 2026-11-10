@@ -1,8 +1,10 @@
 import type { AppInfo } from "./types";
 import type { ChatState, MemoryState } from "./chat";
 import { NO_USAGE, type UsageLoad, type UsageSummary } from "./usage";
+import { modelWindow } from "./contextWindow";
 
 export interface SessionOverview {
+  contextCapacity?: number | null;
   id: string | null; title: string | null; createdAt: string | null; ready: boolean; noRequests: boolean;
   tasks: { state: MemoryState; count: number }[] | null; loadedTurns: number; taskCoverage: number;
   model: string | null; hostReady: boolean;
@@ -32,6 +34,7 @@ export function sessionOverview(
     tasks: loaded.length ? [...counts].map(([state, count]) => ({ state, count })) : null,
     loadedTurns: chat.turns.length, taskCoverage: loaded.length,
     model: info?.destination?.model ?? null, hostReady: Boolean(info?.host.ready),
+    contextCapacity: modelWindow(info?.destination?.provider ?? null, info?.destination?.model ?? null),
     usageAvailable: Boolean(info?.methods?.includes("conversation.usage")),
     usage: usage.data, usageLoading: usage.loading, usageError: usage.error, usageBusy: usage.busy,
   };

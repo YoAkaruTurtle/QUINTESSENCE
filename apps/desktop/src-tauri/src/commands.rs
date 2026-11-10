@@ -1071,7 +1071,7 @@ pub async fn set_ai_display_name(
 #[tauri::command]
 pub async fn ui_preferences(state: State<'_, AppState>) -> Result<HostReply, String> {
     let value = state.preferences.lock().map_err(|_| "preferences unavailable")?;
-    Ok(HostReply::ok(json!({"language": value.language, "theme": value.theme, "sidebar_collapsed": value.sidebar_collapsed, "panel_height": value.panel_height})))
+    Ok(HostReply::ok(json!({"language": value.language, "theme": value.theme, "appearance": value.appearance, "sidebar_collapsed": value.sidebar_collapsed, "panel_height": value.panel_height})))
 }
 
 #[tauri::command]
@@ -1089,7 +1089,7 @@ pub async fn save_layout_preferences(state: State<'_, AppState>, sidebar_collaps
 }
 
 #[tauri::command]
-pub async fn save_ui_preferences(state: State<'_, AppState>, language: String, theme: String) -> Result<HostReply, String> {
+pub async fn save_ui_preferences(state: State<'_, AppState>, language: String, theme: String, appearance: Option<preferences::Appearance>) -> Result<HostReply, String> {
     if !["zh-CN", "en"].contains(&language.as_str()) || !["light", "dark"].contains(&theme.as_str()) {
         return Ok(HostReply::error(HostError::new("INVALID_PARAMS", "unsupported language or theme")));
     }
@@ -1097,9 +1097,13 @@ pub async fn save_ui_preferences(state: State<'_, AppState>, language: String, t
     let mut updated = current.clone();
     updated.language = language;
     updated.theme = theme;
+    if let Some(appearance) = appearance {
+        if let Err(error) = appearance.validate() { return Ok(HostReply::error(error)); }
+        updated.appearance = appearance;
+    }
     if let Err(error) = preferences::save(&state.preferences_path, &updated) { return Ok(HostReply::error(error)); }
     *current = updated;
-    Ok(HostReply::ok(json!({"language": current.language, "theme": current.theme})))
+    Ok(HostReply::ok(json!({"language": current.language, "theme": current.theme, "appearance": current.appearance})))
 }
 
 fn now_ms() -> u64 {

@@ -3,11 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { el } from "./dom";
 import { ChoiceControl } from "./choice";
 import type { AppInfo, HostReply } from "./types";
+import { applyAppearance, DEFAULT_APPEARANCE, importDisplayImage, type Appearance } from "./appearance";
+import { openAvatarPreview } from "./avatarPreview";
 
 const messages = {
   "zh-CN": {
     appearance: "界面偏好", language: "界面语言", theme: "主题", light: "日间", dark: "夜间", effective: "当前实际：模型 / SDRPE", persisted: "以下为已保存值",
-    immediate: "应用范围 · 立即生效；不改变对话内容", save: "保存", saved: "已保存", saving: "正在保存；生成配置会等待当前轮次结束…", unknown: "保存结果未知；请重新读取当前值，不要盲目重试。",
+    immediate: "应用范围 · 立即生效；不改变对话内容", save: "保存", saved: "已保存", unsaved: "未保存", saving: "正在保存；生成配置会等待当前轮次结束…", unknown: "保存结果未知；请重新读取当前值，不要盲目重试。",
     generation: "生成设置", next: "当前实例 · 下一轮生效；正在执行的轮次保持原配置",
     model: "模型", tokens: "每次请求最大输出 Token", fixed: "当前协议：temperature 固定为 0；不支持 top-p 调节。输出同时受预算与授权上限约束。", thinking: "当前宿主使用思考模式；temperature 不参与请求，暂不提供 top-p 调节。输出同时受预算与授权上限约束。",
     external: "模型与输出上限由外部宿主管理；当前仅可保存 SDRPE。", auto: "历史配置为 auto，尚未实现，实际为 off。请选择 off 或 on。",
@@ -15,7 +17,7 @@ const messages = {
   },
   en: {
     appearance: "Interface preferences", language: "Interface language", theme: "Theme", light: "Light", dark: "Dark", effective: "Currently active: model / SDRPE", persisted: "Saved values below",
-    immediate: "Application · Immediate; conversation content stays unchanged", save: "Save", saved: "Saved", saving: "Saving; generation changes wait for the current turn…", unknown: "Save outcome unknown. Reload current values before retrying.",
+    immediate: "Application · Immediate; conversation content stays unchanged", save: "Save", saved: "Saved", unsaved: "Unsaved", saving: "Saving; generation changes wait for the current turn…", unknown: "Save outcome unknown. Reload current values before retrying.",
     generation: "Generation settings", next: "Current instance · Next turn; running turns keep their configuration",
     model: "Model", tokens: "Maximum output tokens per request", fixed: "Current protocol: temperature is fixed at 0; top-p is unavailable. Budget and authorization limits also apply.", thinking: "This host uses thinking mode. Temperature is not sent; top-p adjustment is unavailable. Budget and authorization limits still apply.",
     external: "The external host manages model and output limits. Only SDRPE can be saved here.", auto: "Legacy auto mode is unavailable; effective mode is off. Choose off or on.",
@@ -26,45 +28,143 @@ type Language = keyof typeof messages;
 let language: Language = "zh-CN";
 let theme = "dark";
 let preferenceSaved = false;
+let savedAppearance: Appearance = { ...DEFAULT_APPEARANCE };
 const t = (key: keyof typeof messages.en): string => messages[language][key];
-function applyPreferences(value: { language: Language; theme: string }): void {
+function applyPreferences(value: { language: Language; theme: string; appearance?: Appearance }): void {
   language = value.language;
   theme = value.theme;
   document.documentElement.lang = language;
   document.documentElement.dataset.theme = theme;
+  savedAppearance = { ...DEFAULT_APPEARANCE, ...value.appearance };
+  applyAppearance(savedAppearance, theme);
 }
 export async function loadInterfacePreferences(): Promise<void> {
   const reply = await invoke<HostReply>("ui_preferences");
-  if (reply.ok) applyPreferences(reply.result as { language: Language; theme: string });
+  if (reply.ok) applyPreferences(reply.result as { language: Language; theme: string; appearance?: Appearance });
+}
+
+/** Quick day/night switch used by the topbar. Keeps the saved appearance intact. */
+export async function toggleThemePreference(): Promise<{ ok: boolean; error?: string }> {
+  const next = theme === "light" ? "dark" : "light";
+  try {
+    const reply = await invoke<HostReply>("save_ui_preferences", {
+      language,
+      theme: next,
+      appearance: savedAppearance,
+    });
+    if (!reply.ok) {
+      return { ok: false, error: reply.error?.message ?? "保存主题失败" };
+    }
+    applyPreferences(reply.result as { language: Language; theme: string; appearance?: Appearance });
+    preferenceSaved = true;
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "保存主题失败" };
+  }
 }
 function row(label: string, input: HTMLElement): HTMLElement {
   input.setAttribute("aria-label", label);
   const field = el("div", { class: "settings-field", children: [el("span", { class: "settings-label", text: label }), input] });
   return field;
 }
-function select(values: [string, string][], value: string): ChoiceControl { return new ChoiceControl(values, value); }
+function select(values: [string, string][], value: string, onChange?: (value: string) => void): ChoiceControl {
+  return new ChoiceControl(values, value, onChange);
+}
 function section(title: string): HTMLElement {
   return el("section", { class: "drawer-section", children: [el("h3", { text: title })] });
 }
 function status(): HTMLParagraphElement { return el("p", { attrs: { role: "status", "aria-live": "polite" } }); }
 export function interfaceSettings(refresh: () => void): HTMLElement {
   const box = section(t("appearance"));
-  const lang = select([["zh-CN", "简体中文"], ["en", "English"]], language);
-  const appearance = select([["light", t("light")], ["dark", t("dark")]], theme);
   const feedback = status();
+  const markDirty = (): void => {
+    preferenceSaved = false;
+    feedback.textContent = t("unsaved");
+  };
   if (preferenceSaved) feedback.textContent = t("saved");
+  const lang = select([["zh-CN", "简体中文"], ["en", "English"]], language, markDirty);
+  const appearance = select([["light", t("light")], ["dark", t("dark")]], theme, markDirty);
+  const draft = { ...savedAppearance };
+  let importsInProgress = 0;
   const save = el("button", { class: "quiet-button", text: t("save"), attrs: { type: "button" } });
   save.onclick = async () => {
     save.disabled = true;
+    feedback.textContent = t("saving");
     try {
-      const reply = await invoke<HostReply>("save_ui_preferences", { language: lang.value, theme: appearance.value });
+      const reply = await invoke<HostReply>("save_ui_preferences", { language: lang.value, theme: appearance.value, appearance: draft });
       if (!reply.ok) throw new Error();
-      applyPreferences(reply.result as { language: Language; theme: string });
+      applyPreferences(reply.result as { language: Language; theme: string; appearance?: Appearance });
       preferenceSaved = true;
       refresh();
     } catch { feedback.textContent = t("failed"); } finally { save.disabled = false; }
   };
-  box.append(row(t("language"), lang.element), row(t("theme"), appearance.element), el("p", { text: t("immediate") }), save, feedback);
+  box.append(row(t("language"), lang.element), row(t("theme"), appearance.element));
+  const colors = el("div", { class: "appearance-colors" });
+  for (const [key, label, fallback] of [
+    ["light_accent", "日间主题色", "#a82e40"],
+    ["light_background", "日间背景色", "#f5f4f1"],
+  ] as const) {
+    const input = el("input", { attrs: { type: "color" } });
+    input.value = draft[key] ?? fallback;
+    input.oninput = () => { draft[key] = input.value; markDirty(); };
+    colors.append(row(label, input));
+  }
+  box.append(colors);
+  const images = el("div", { class: "appearance-images" });
+  for (const [key, label] of [
+    ["wallpaper", "聊天背景"], ["assistant_avatar", "助手头像"], ["user_avatar", "我的头像"],
+  ] as const) {
+    const input = el("input", { attrs: { type: "file", accept: "image/png,image/jpeg,image/webp" } });
+    input.className = "visually-hidden";
+    input.setAttribute("aria-label", label);
+    const choose = el("button", { class: "quiet-button", text: "选择图片", attrs: { type: "button" } });
+    choose.onclick = () => input.click();
+    const preview = el("img", { class: `appearance-preview ${key === "wallpaper" ? "is-wallpaper" : ""}`, attrs: { alt: label } });
+    const update = () => { preview.hidden = !draft[key]; if (draft[key]) preview.src = draft[key]!; else preview.removeAttribute("src"); };
+    update();
+    if (key !== "wallpaper") {
+      const showPreview = () => openAvatarPreview({
+        kind: key === "assistant_avatar" ? "assistant" : "user",
+        label,
+        letter: key === "assistant_avatar" ? "助" : "你",
+        image: draft[key],
+        trigger: preview,
+      });
+      preview.classList.add("appearance-preview-clickable");
+      preview.tabIndex = 0;
+      preview.setAttribute("role", "button");
+      preview.setAttribute("aria-label", `查看${label}`);
+      preview.onclick = showPreview;
+      preview.onkeydown = event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          showPreview();
+        }
+      };
+    }
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      importsInProgress++; input.disabled = true; choose.disabled = true; remove.disabled = true; save.disabled = true;
+      try { draft[key] = await importDisplayImage(file, key !== "wallpaper"); update(); markDirty(); }
+      catch (error) { feedback.textContent = error instanceof Error ? error.message : "无法载入图片"; }
+      finally { importsInProgress--; input.disabled = false; choose.disabled = false; remove.disabled = false; save.disabled = importsInProgress > 0; }
+    };
+    const remove = el("button", { class: "quiet-button", text: "恢复默认", attrs: { type: "button" } });
+    remove.onclick = () => { draft[key] = null; input.value = ""; update(); markDirty(); };
+    images.append(el("div", { class: "appearance-image-field", children: [el("h4", { text: label }), preview, input,
+      el("div", { class: "appearance-actions", children: [choose, remove] }),
+    ] }));
+  }
+  box.append(images);
+  const resetColors = el("button", { class: "quiet-button", text: "恢复默认配色", attrs: { type: "button" } });
+  resetColors.onclick = () => {
+    draft.light_accent = null; draft.light_background = null;
+    const inputs = box.querySelectorAll<HTMLInputElement>('input[type="color"]');
+    inputs[0].value = "#a82e40"; inputs[1].value = "#f5f4f1";
+    markDirty();
+  };
+  box.append(el("div", { class: "appearance-actions", children: [resetColors, save] }), feedback);
   return box;
 }
 interface GenerationSettings { managed: boolean; model: string; model_choices: string[]; sdrpe_mode: string; max_output_tokens: number; thinking?: string }

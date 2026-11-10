@@ -6,22 +6,31 @@ export class ChoiceControl {
   private selected = "";
   private blocked = false;
   private buttons: HTMLButtonElement[] = [];
-  constructor(private options: [string, string][], value: string) {
+  constructor(
+    private options: [string, string][],
+    value: string,
+    private onChange?: (value: string) => void,
+  ) {
     this.element.style.setProperty("--choice-count", String(options.length));
     this.buttons = options.map(([id, label], index) => {
       const button = el("button", { class: "choice-option", text: label, attrs: { type: "button", role: "radio" } });
-      button.onclick = () => { this.value = id; };
+      button.onclick = () => { this.select(id); };
       button.onkeydown = event => {
         const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
         if (!offset && event.key !== "Home" && event.key !== "End") return;
         event.preventDefault();
         const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : (index + offset + options.length) % options.length;
-        this.value = options[next][0]; this.buttons[next].focus();
+        this.select(options[next][0]); this.buttons[next].focus();
       };
       this.element.append(button);
       return button;
     });
     this.value = value;
+  }
+
+  private select(value: string): void {
+    this.value = value;
+    this.onChange?.(value);
   }
   get value(): string { return this.selected; }
   set value(value: string) {
