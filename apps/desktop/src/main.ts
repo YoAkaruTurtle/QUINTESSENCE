@@ -119,7 +119,6 @@ import {
   orderedTurnIds,
   pendingUserMessageVisible,
   requestIdFor,
-  turnStatusLabel,
   type ChatMessage,
   type ChatState,
   type ConversationSummary,
@@ -506,6 +505,9 @@ let state: UiState = INITIAL_STATE;
 let chat: ChatState = INITIAL_CHAT_STATE;
 // RG08: a bubble animates once; polling re-renders and same-id reloads are quiet.
 const bubbleReveal = new BubbleRevealTracker();
+const BUBBLE_ANIMATION_MS = 460;
+let bubbleHoldUntil = 0;
+let bubbleHoldTimer: number | null = null;
 let chatPollTimer: number | null = null;
 let postprocessLoading = false;
 // RG05-F01: bounded status refresh while an idle delivery can still finish.
@@ -560,9 +562,7 @@ interface Shell {
   textarea: HTMLTextAreaElement;
   sendButton: HTMLButtonElement;
   cancelButton: HTMLButtonElement;
-  counter: HTMLSpanElement;
   target: HTMLElement;
-  hint: HTMLElement;
   sourcesButton: HTMLButtonElement;
   drawer: HTMLElement;
   drawerBackdrop: HTMLElement;
@@ -605,6 +605,8 @@ const conversationScroll = new Map<string, number>();
 const conversationDrafts = new Map<string, string>();
 let renderedConversation: string | null = null;
 const processExpansion = new Map<string, boolean>();
+/** Keep one live process panel per turn while its visible content is unchanged. */
+const processPanelCache = new Map<string, { signature: string; node: HTMLElement; terminal: boolean; loading: boolean }>();
 let lastActivityKey = "";
 /** UI-F04 display-only conversation state; never a business record. */
 let displayPreferences: DisplayPreferences = EMPTY_DISPLAY_PREFERENCES;
@@ -696,8 +698,6 @@ function buildShell(): void {
     attrs: { id: "confirm-banner" },
   });
   const target = el("strong", { attrs: { id: "composer-target" }, text: uiText("目的地未就绪") });
-  const counter = el("span", { class: "counter", attrs: { id: "char-count" }, text: "0 / 8000" });
-  const hint = el("span", { class: "composer-hint", attrs: { id: "composer-hint" } });
   const textarea = el("textarea", {
     class: "composer-input",
     attrs: {
@@ -743,10 +743,6 @@ function buildShell(): void {
   const composerFoot = el("div", {
     class: "composer-foot",
     children: [
-      el("div", {
-        class: "composer-meta",
-        children: [hint, el("span", { class: "meta-sep", text: "·" }), counter],
-      }),
       el("div", {
         class: "composer-actions",
         children: [cancelButton, sendButton],
@@ -864,9 +860,7 @@ function buildShell(): void {
     textarea,
     sendButton,
     cancelButton,
-    counter,
     target,
-    hint,
     sourcesButton,
     drawer,
     drawerBackdrop,
@@ -884,6 +878,7 @@ function buildShell(): void {
   };
   appView = new AppShell(root, { brand, header: topbar, main, footer, settings: settingsButton }, {
     route(page: PageId) {
+      cancelBubbleHold();
       state = reduce(state, { type: "drawer-close" });
       if (page === "settings") {
         // UI-F02: the settings page shows live instance/conversation state
@@ -1303,7 +1298,30 @@ function conversationDisplaySection(): HTMLElement {
   ]);
 }
 
+function scheduleBubbleRevealRender(): void {
+  if (bubbleHoldTimer !== null) return;
+  const delay = Math.max(0, bubbleHoldUntil - Date.now()) + 24;
+  bubbleHoldTimer = window.setTimeout(() => {
+    bubbleHoldTimer = null;
+    render();
+  }, delay);
+}
+
+function cancelBubbleHold(): void {
+  bubbleHoldUntil = 0;
+  if (bubbleHoldTimer !== null) {
+    window.clearTimeout(bubbleHoldTimer);
+    bubbleHoldTimer = null;
+  }
+}
+
 function render(): void {
+  // A polling render would replace the animating DOM mid-flight.  Hold the
+  // next paint until the staggered entrance has finished, then render once.
+  if (Date.now() < bubbleHoldUntil) {
+    scheduleBubbleRevealRender();
+    return;
+  }
   shell.settingsButton.setAttribute("aria-label", uiText("设置"));
   shell.drawerClose.setAttribute("aria-label", uiText("关闭"));
   shell.drawerClose.textContent = uiText("关闭");
@@ -1442,6 +1460,7 @@ function switchWorkspace(next: "consult" | "review"): void {
   if (workspace === next) {
     return;
   }
+  cancelBubbleHold();
   workspace = next;
   state = reduce(state, { type: "drawer-close" });
   if (next === "review") {
@@ -2415,13 +2434,13 @@ const cognitionView: CognitionViewState = {
 
 function cognitionStateLabel(candidate: CognitionCandidate): string {
   if (candidate.requires_human) {
-    return candidate.state === "ESCALATED" ? "需你判断" : "待你确认";
+    return uiText(candidate.state === "ESCALATED" ? "需你判断" : "待你确认");
   }
-  if (candidate.state === "COMMITTED") return "已生效";
-  if (candidate.state === "REJECTED") return "未通过";
-  if (candidate.state === "DEFERRED") return "证据不足";
-  if (candidate.state === "NOT_AUTHORIZED") return "等待授权";
-  return "等待授权";
+  if (candidate.state === "COMMITTED") return uiText("已生效");
+  if (candidate.state === "REJECTED") return uiText("未通过");
+  if (candidate.state === "DEFERRED") return uiText("证据不足");
+  if (candidate.state === "NOT_AUTHORIZED") return uiText("等待授权");
+  return uiText("等待授权");
 }
 
 async function loadCognitionCandidates(force = false): Promise<void> {
@@ -2439,7 +2458,7 @@ async function loadCognitionCandidates(force = false): Promise<void> {
   try {
     const reply = (await chatApi.cognitionCandidates(session, 20)) as HostReply;
     if (!reply.ok) {
-      cognitionView.error = reply.error?.message ?? "读取认知候选失败";
+      cognitionView.error = reply.error?.message ?? uiText("读取认知候选失败");
     } else {
       const result = reply.result as CognitionCandidateList;
       cognitionView.candidates = result.candidates ?? [];
@@ -2474,6 +2493,10 @@ async function decideCognitionCandidate(
     () => loadCognitionCandidates(true),
     render,
     (error) => invokeError(error).message,
+    uiText("提交决定失败"),
+    decision => uiText(decision === "approve"
+      ? "已提交批准；以实际状态为准。"
+      : "已提交拒绝；以实际状态为准。"),
   );
 }
 
@@ -2486,7 +2509,7 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
     ?? cognitionView.candidates.find(c => c.requires_human) ?? cognitionView.candidates[0];
   cognitionView.selected = selected?.candidate_id ?? null;
   const hasCandidates = cognitionView.candidates.length > 0;
-  const queue = el("div", { class: "cognition-queue", attrs: { "aria-label": "认知候选列表" } });
+  const queue = el("div", { class: "cognition-queue", attrs: { "aria-label": uiText("认知候选列表") } });
   for (const candidate of cognitionView.candidates) {
     const item = el("button", { class: `cognition-queue-item${candidate === selected ? " is-selected" : ""}`,
       attrs: { type: "button", "aria-pressed": String(candidate === selected) },
@@ -2517,9 +2540,9 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
     rows.push(
       el("p", {
         class: "review-empty",
-        text: caps.propose
+        text: uiText(caps.propose
           ? "没有待处理的认知候选。"
-          : "本实例未开启候选形成（cognition.propose=false）。",
+          : "本实例未开启候选形成（cognition.propose=false）。"),
       }),
     );
   } else {
@@ -2535,7 +2558,7 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
         ] as const) {
           const button = el("button", {
             class: decision === "approve" ? "primary-button cognition-approve" : "quiet-button",
-            text: cognitionView.busy === candidate.candidate_id ? "提交中…" : label,
+            text: cognitionView.busy === candidate.candidate_id ? uiText("提交中…") : uiText(label),
             attrs: { type: "button" },
           });
           button.disabled = cognitionView.busy !== null;
@@ -2550,14 +2573,14 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
           el("div", {
             class: "cognition-impact",
             children: [
-              el("span", { class: "cognition-label", text: "影响" }),
+              el("span", { class: "cognition-label", text: uiText("影响") }),
               el("p", { text: impact }),
             ],
           }),
         );
       }
       if (candidate.turn_id) {
-        extras.push(el("p", { class: "cognition-source", text: "来源：本轮对话" }));
+        extras.push(el("p", { class: "cognition-source", text: uiText("来源：本轮对话") }));
       }
       const created = Number.isNaN(new Date(candidate.created_at).getTime())
         ? candidate.created_at
@@ -2566,15 +2589,15 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
         el("details", {
           class: "cognition-tech",
           children: [
-            el("summary", { text: "技术信息" }),
+            el("summary", { text: uiText("技术信息") }),
             el("dl", {
               class: "kv",
               children: [
-                kv("类型", candidate.claim_type ?? "—"),
-                kv("状态", candidate.state),
-                kv("原因", candidate.reason_code ?? "—"),
-                kv("版本", String(candidate.artifact_version)),
-                kv("创建", created),
+                kv(uiText("类型"), candidate.claim_type ?? "—"),
+                kv(uiText("状态"), candidate.state),
+                kv(uiText("原因"), candidate.reason_code ?? "—"),
+                kv(uiText("版本"), String(candidate.artifact_version)),
+                kv(uiText("创建"), created),
               ],
             }),
           ],
@@ -2590,7 +2613,7 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
                 el("span", { class: "review-work-event", text: candidate.claim }),
                 el("span", {
                   class: "review-work-meta",
-                  text: `${cognitionStateLabel(candidate)} · ${candidate.claim_type ?? "未分类"}`,
+                  text: `${cognitionStateLabel(candidate)} · ${candidate.claim_type ?? uiText("未分类")}`,
                   attrs: { title: candidate.created_at },
                 }),
               ],
@@ -2621,11 +2644,11 @@ function cognitionPane(info: AppInfo): HTMLElement | null {
   }
   return el("aside", {
     class: "review-pane review-cognitionpane",
-    attrs: { "aria-label": "认知候选" },
+    attrs: { "aria-label": uiText("认知候选") },
     children: [
       el("div", {
         class: "review-pane-head",
-        children: [el("h2", { text: uiText("认知候选") }), el("span", { class: "cognition-count", text: String(cognitionView.candidates.filter(c => c.requires_human).length), attrs: { title: "待人工确认" } }), refresh],
+        children: [el("h2", { text: uiText("认知候选") }), el("span", { class: "cognition-count", text: String(cognitionView.candidates.filter(c => c.requires_human).length), attrs: { title: uiText("待人工确认") } }), refresh],
       }),
       decisionError,
       notice,
@@ -2641,9 +2664,9 @@ function confirmCognitionDecision(candidate: CognitionCandidate, decision: "appr
   if (cognitionView.busy || document.querySelector(".cognition-confirm")) return;
   const session = sessionId();
   const dialog = el("dialog", { class: "cognition-confirm", attrs: { "aria-labelledby": "cognition-confirm-title" } });
-  const cancel = el("button", { class: "quiet-button", text: "返回检查", attrs: { type: "button", autofocus: "" } });
-  const confirm = el("button", { class: "primary-button", text: decision === "approve" ? "确认批准" : "确认拒绝", attrs: { type: "button" } });
-  dialog.append(el("h2", { text: decision === "approve" ? "采纳这条认识？" : "拒绝这条候选？", attrs: { id: "cognition-confirm-title" } }),
+  const cancel = el("button", { class: "quiet-button", text: uiText("返回检查"), attrs: { type: "button", autofocus: "" } });
+  const confirm = el("button", { class: "primary-button", text: uiText(decision === "approve" ? "确认批准" : "确认拒绝"), attrs: { type: "button" } });
+  dialog.append(el("h2", { text: uiText(decision === "approve" ? "采纳这条认识？" : "拒绝这条候选？"), attrs: { id: "cognition-confirm-title" } }),
     el("p", { text: candidate.claim }), el("div", { class: "review-work-actions", children: [cancel, confirm] }));
   cancel.onclick = () => dialog.close();
   confirm.onclick = () => {
@@ -2667,7 +2690,7 @@ function reviewWorkspace(): HTMLElement {
   if (!reviewAvailable(info)) {
     if (cognitionAvailable(info)) {
       return el("section", { class: "review", children: [reviewHeader(info), cognitionPane(info),
-        el("details", { children: [el("summary", { text: "工作审查" }), reviewUnavailableCard(info)] }),
+        el("details", { children: [el("summary", { text: uiText("工作审查") }), reviewUnavailableCard(info)] }),
       ] });
     }
     return reviewUnavailableCard(info);
@@ -2806,7 +2829,7 @@ function reviewCallouts(): HTMLElement {
 function reviewWorkPane(info: AppInfo): HTMLElement {
   const tabs = el("div", {
     class: "review-tabs",
-    attrs: { role: "tablist", "aria-label": "审查工作列表" },
+    attrs: { role: "tablist", "aria-label": uiText("审查工作列表") },
   });
   const managedTab = el("button", {
     class: `review-tab ${review.tab === "managed" ? "is-active" : ""}`,
@@ -2868,7 +2891,7 @@ function reviewWorkPane(info: AppInfo): HTMLElement {
   }
   return el("aside", {
     class: "review-pane review-workpane",
-    attrs: { "aria-label": "审查工作项" },
+    attrs: { "aria-label": uiText("审查工作项") },
     children: [
       el("div", {
         class: "review-pane-head",
@@ -4295,18 +4318,6 @@ function syncComposer(): void {
   shell.textarea.placeholder = uiText(placeholder);
   shell.target.textContent = destinationLabel(state.destination);
   shell.target.classList.toggle("is-not-ready", !state.destination);
-  shell.counter.textContent = `${countCharacters(state.question)} / ${maxQuestionChars(state)}`;
-  const chatWaiting = chatMode && (chat.sending || chat.pendingTurnId !== null);
-  shell.hint.textContent = uiText(
-    chatWaiting
-      ? "正在处理本轮…"
-      : state.phase === "sending"
-        ? "正在等待权威结果；本次无法取消或重发"
-        : state.phase === "not-ready" || !state.host?.host.ready
-          ? "宿主未就绪；发送已禁用"
-          : state.result
-            ? "发送新问题会替换当前结果"
-            : "Enter 发送 · Shift+Enter 换行");
   const showCancel =
     chatMode && chat.pendingTurnId !== null && processEnabled();
   shell.cancelButton.classList.toggle("hidden", !showCancel);
@@ -4376,7 +4387,6 @@ function renderBanner(): void {
 function onQuestionInput(event: Event): void {
   const textarea = event.target as HTMLTextAreaElement;
   state = reduce(state, { type: "draft", question: textarea.value });
-  shell.counter.textContent = `${countCharacters(state.question)} / ${maxQuestionChars(state)}`;
   shell.sendButton.disabled = !sendEnabled(state);
   autoSizeTextarea();
 }
@@ -4545,6 +4555,7 @@ async function openConversation(conversationId: string): Promise<void> {
   if (!conversationEnabled() || !canSwitchConversation(chat)) {
     return;
   }
+  cancelBubbleHold();
   const switching = chat.activeId !== conversationId;
   const savedScroll = switching
     ? conversationScroll.get(conversationId)
@@ -4926,6 +4937,7 @@ async function openTranscriptResult(item: TranscriptSearchItem): Promise<void> {
 
 async function createConversation(): Promise<void> {
   if (!conversationEnabled() || !canSwitchConversation(chat) || creatingConversation) return;
+  cancelBubbleHold();
   creatingConversation = true;
   const priorDraft = state.question;
   if (chat.activeId) conversationDrafts.set(`${sessionId()}:${chat.activeId}`, priorDraft);
@@ -5170,12 +5182,23 @@ function uiAssistantName(): string {
   const name = aiDisplayName(state.host);
   return document.documentElement.lang === "en" && name === "助手" && state.host?.ui?.source !== "preference" ? "Assistant" : name;
 }
+function commentaryBubble(text: string): HTMLElement {
+  return chatBubble({
+    message_id: "",
+    turn_id: "",
+    seq: 0,
+    kind: "commentary",
+    text,
+    redacted: false,
+    created_at: "",
+  });
+}
+
 function chatBubble(message: ChatMessage, bodyOverride?: string): HTMLElement {
   const assistant = message.kind !== "user";
   const body = message.redacted
     ? "（这段内容已因删除或权限变化不可用）"
     : (bodyOverride ?? message.text ?? "");
-  if (message.kind === "commentary") return el("div", { class: "chat-commentary", text: body });
   const name = assistant ? uiAssistantName() : uiText("你");
   const letter = assistant ? avatarLetter(uiAssistantName()) : uiText("你");
   const avatar = el("button", {
@@ -5183,7 +5206,7 @@ function chatBubble(message: ChatMessage, bodyOverride?: string): HTMLElement {
     text: letter,
     attrs: {
       type: "button",
-      "aria-label": document.documentElement.lang === "en" ? "View avatar" : "查看头像",
+      "aria-label": uiText("查看头像"),
     },
   });
   avatar.addEventListener("click", () => openAvatarPreview({
@@ -5204,17 +5227,36 @@ function chatBubble(message: ChatMessage, bodyOverride?: string): HTMLElement {
   });
 }
 
-function chatTypingIndicator(): HTMLElement {
+function activeToolForTurn(turnId: string): string | null {
+  const running = turnStepsCache.get(turnId)?.steps.find(step => step.status === "running");
+  if (running?.tool_name) return running.tool_name;
+  const events = chat.eventsTurnId === turnId
+    ? chat.events
+    : turnEventsCache.get(turnId)?.events ?? [];
+  const active = new Map<number, string>();
+  for (const event of events) {
+    if (typeof event.step_no !== "number") continue;
+    if (event.type === "tool_started") active.set(event.step_no, event.tool ?? "工具");
+    else if (event.type === "tool_finished" || event.type === "tool_rejected") {
+      active.delete(event.step_no);
+    }
+  }
+  return [...active.values()].pop() ?? null;
+}
+
+function chatThinkingIndicator(turnId?: string): HTMLElement {
+  const tool = turnId ? activeToolForTurn(turnId) : null;
+  const label = tool
+    ? document.documentElement.lang === "en"
+      ? `Using ${tool}…`
+      : `正在使用 ${tool}…`
+    : shellText("thinking");
   return el("div", {
-    class: "chat-typing",
+    class: "chat-thinking",
     attrs: { role: "status", "aria-live": "polite" },
     children: [
-      el("span", {
-        class: "thinking-dots",
-        attrs: { "aria-hidden": "true" },
-        children: [el("span"), el("span"), el("span")],
-      }),
-      el("span", { text: shellText("typing") }),
+      el("span", { class: "chat-thinking-dot", attrs: { "aria-hidden": "true" } }),
+      el("span", { text: label }),
     ],
   });
 }
@@ -5224,8 +5266,16 @@ function revealBubble(element: HTMLElement, key: string, index: number): void {
   if (!bubbleReveal.claim(key)) {
     return;
   }
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    return;
+  }
+  const delay = bubbleDelayMs(index);
   element.classList.add(BUBBLE_REVEAL_CLASS);
-  element.style.animationDelay = `${bubbleDelayMs(index)}ms`;
+  element.style.animationDelay = `${delay}ms`;
+  bubbleHoldUntil = Math.max(
+    bubbleHoldUntil,
+    Date.now() + delay + BUBBLE_ANIMATION_MS + 40,
+  );
 }
 
 /**
@@ -5679,7 +5729,7 @@ function toolHeadText(
   status: string | undefined,
   durationMs: number | null,
 ): string {
-  const parts = [`${stepNo}. ${tool}`, toolStatusLabel(status)];
+  const parts = [tool, toolStatusLabel(status)];
   if (durationMs !== null) {
     parts.push(`${durationMs} ms`);
   }
@@ -5848,6 +5898,7 @@ function renderToolRow(
     attrs: { "data-step-no": String(stepNo), "data-tool-name": tool },
   }) as HTMLDetailsElement;
   item.open = processExpansion.get(expansionKey) ?? false;
+  item.setAttribute("data-status", status ?? "planned");
   item.addEventListener("toggle", () =>
     processExpansion.set(expansionKey, item.open),
   );
@@ -5890,21 +5941,7 @@ function renderProcessEvents(
   rows: Map<number, ToolRow>,
 ): Set<number> {
   const used = new Set<number>();
-  const commentary = chat.messages.filter(
-    (message) =>
-      message.turn_id === turnId && message.kind === "commentary",
-  );
   for (const event of events) {
-    if (event.type === "message_published" && event.kind === "commentary") {
-      const text = commentaryText(event, commentary);
-      parent.appendChild(
-        el("div", {
-          class: "process-commentary",
-          text: text === null || text === "" ? "（这条说明未公开）" : text,
-        }),
-      );
-      continue;
-    }
     if (event.type === "tool_planned") {
       if (typeof event.step_no !== "number") {
         parent.appendChild(
@@ -5942,6 +5979,7 @@ function renderProcessEvents(
             startedStep?.status ?? "running",
             startedStep ? stepDurationMs(startedStep) : null,
           );
+          row.details.setAttribute("data-status", startedStep?.status ?? "running");
         }
       }
       continue;
@@ -5970,6 +6008,7 @@ function renderProcessEvents(
           "rejected",
           null,
         );
+        row.details.setAttribute("data-status", "rejected");
         row.details.open = true;
         // A rejected call publishes only its name and stable class; its
         // arguments and result body stay out of the process panel.
@@ -6011,6 +6050,10 @@ function renderProcessEvents(
         );
         used.add(event.step_no);
       }
+      rows.get(event.step_no)?.details.setAttribute(
+        "data-status",
+        event.status ?? step?.status ?? "planned",
+      );
       if (event.reason) {
         const settled = rows.get(event.step_no);
         if (settled) {
@@ -6106,6 +6149,9 @@ function chatProcessPanel(turn: ConversationTurn | null, turnId: string): HTMLEl
   const stepsEntry = turnStepsCache.get(turnId);
   const steps = stepsEntry?.steps ?? [];
   const stepsState: LoadState = turnStepsState.get(turnId) ?? "idle";
+  const panelLoading = eventsState === "loading" ||
+    stepsState === "loading" ||
+    (terminal && (eventsState === "idle" || stepsState === "idle"));
   const view = classifyProcess({
     turn,
     events,
@@ -6115,6 +6161,46 @@ function chatProcessPanel(turn: ConversationTurn | null, turnId: string): HTMLEl
     processEnabled: true,
     terminal,
   });
+
+  const signature = JSON.stringify({
+    live,
+    terminal,
+    turnState: turn?.state ?? null,
+    pending: chat.pendingTurnId === turnId,
+    eventsState,
+    stepsState,
+    events: events.map(event => [
+      event.type,
+      event.step_no ?? null,
+      event.status ?? null,
+      event.reason ?? null,
+      event.kind ?? null,
+      event.tool ?? null,
+      event.duration_ms ?? null,
+    ]),
+    steps: steps.map(step => [step.step_no, step.status, step.tool_name, step.error_label ?? null]),
+    toolCount: view.toolCount,
+    gap: view.gap ?? null,
+    eventsGap: view.eventsGap ?? null,
+    stepsGap: view.stepsGap ?? null,
+    lang: document.documentElement.lang,
+    traceState: traceState.get(turnId) ?? null,
+    traceLoaded: traceCache.has(turnId),
+  });
+  const cachedPanel = processPanelCache.get(turnId);
+  const panelOpen = processExpansion.get(turnId) === true;
+  // An open panel is a frozen snapshot.  Rebuilding its live event list on
+  // every poll made the native <details> flash; closing and reopening refreshes
+  // it.  The terminal state still gets one final rebuild.
+  if (cachedPanel !== undefined && (
+    (panelOpen && !cachedPanel.loading && !panelLoading && cachedPanel.terminal === terminal) ||
+    (!panelOpen && cachedPanel.signature === signature)
+  )) {
+    if (cachedPanel.node instanceof HTMLDetailsElement && cachedPanel.node.open) {
+      ensureTurnProcess(turn, turnId);
+    }
+    return cachedPanel.node;
+  }
 
   const panel = el("details", { class: "chat-process" }) as HTMLDetailsElement;
   panel.open = processExpansion.get(turnId) ?? false;
@@ -6215,22 +6301,31 @@ function chatProcessPanel(turn: ConversationTurn | null, turnId: string): HTMLEl
   const running = turn === null
     ? chat.pendingTurnId === turnId
     : ["accepted", "running"].includes(turn.state);
-  if (running) {
-    panel.appendChild(traceSection(null, "busy"));
-  } else {
-    const cached = traceCache.get(turnId) ?? null;
-    const detailState = cached !== null
-      ? "ready"
-      : traceState.get(turnId) === "error"
-        ? "error"
-        : traceState.get(turnId) === "busy"
-          ? "busy"
-          : "loading";
-    panel.appendChild(traceSection(cached, detailState));
-  }
+  const trace = running
+    ? traceSection(null, "busy")
+    : (() => {
+        const cached = traceCache.get(turnId) ?? null;
+        const detailState = cached !== null
+          ? "ready"
+          : traceState.get(turnId) === "error"
+            ? "error"
+            : traceState.get(turnId) === "busy"
+              ? "busy"
+              : "loading";
+        return traceSection(cached, detailState);
+      })();
+  panel.appendChild(el("details", {
+    class: "chat-process-trace",
+    children: [
+      el("summary", { text: shellText("executionDetail") }),
+      trace,
+    ],
+  }));
   if (panel.open) {
     ensureTurnProcess(turn, turnId);
   }
+  processPanelCache.set(turnId, { signature, node: panel, terminal, loading: panelLoading });
+  trimTurnCache(processPanelCache, () => undefined);
   return panel;
 }
 
@@ -6452,10 +6547,40 @@ function chatWorkspace(): HTMLElement {
       if (animate) revealBubble(bubble, bubbleRevealKey(message.message_id, 0), 0);
       group.append(bubble);
     }
-    for (const message of messages.filter(message => message.kind === "commentary")) {
+    const persistedCommentary = messages
+      .filter(message => message.kind === "commentary")
+      .sort((a, b) => a.seq - b.seq);
+    const persistedIds = new Set(persistedCommentary.map(message => message.message_id));
+    const liveCommentary: Array<{ event: ProcessEvent; text: string }> = [];
+    if (turnId === chat.eventsTurnId) {
+      for (const event of chat.events) {
+        if (event.type !== "message_published" || event.kind !== "commentary") continue;
+        if (event.message_id && persistedIds.has(event.message_id)) continue;
+        const text = commentaryText(event, messages);
+        if (text === null || text.trim() === "") continue;
+        liveCommentary.push({ event, text });
+      }
+    }
+    let commentaryIndex = 0;
+    for (const message of persistedCommentary) {
       const bubble = chatBubble(message);
-      if (animate) revealBubble(bubble, bubbleRevealKey(message.message_id, 0), 0);
+      if (animate) {
+        revealBubble(bubble, bubbleRevealKey(message.message_id, 0), commentaryIndex++);
+      }
       group.append(bubble);
+    }
+    for (const { event, text } of liveCommentary) {
+      const bubble = commentaryBubble(text);
+      if (animate) {
+        const key = event.message_id
+          ? bubbleRevealKey(event.message_id, 0)
+          : `live-comment:${event.event_id}`;
+        revealBubble(bubble, key, commentaryIndex++);
+      }
+      group.append(bubble);
+    }
+    if (turn ? ["accepted", "running"].includes(turn.state) : pendingTurnId === turnId) {
+      group.append(chatThinkingIndicator(turnId));
     }
     group.append(chatProcessPanel(turn, turnId));
     const answers = messages.filter(message => message.kind === "final" || message.kind === "wait_question");
@@ -6477,16 +6602,10 @@ function chatWorkspace(): HTMLElement {
       attrs: { "data-pending": "true" },
     });
     group.append(pendingBubble);
-    thread.append(group);
-  }
-  const waiting = chat.sending || chat.pendingTurnId !== null;
-  if (waiting) {
-    thread.appendChild(chatTypingIndicator());
-  } else {
-    const status = turnStatusLabel(chat);
-    if (status) {
-      thread.appendChild(el("div", { class: "chat-status", text: status }));
+    if (chat.sending || chat.pendingTurnId !== null) {
+      group.append(chatThinkingIndicator(chat.pendingTurnId ?? undefined));
     }
+    thread.append(group);
   }
   if (chat.error) {
     thread.appendChild(
@@ -7129,29 +7248,29 @@ function renderModelSettings(): HTMLElement {
     const error = replyError(reply);
     switch (error.code) {
       case "MODEL_KEY_MISSING":
-        return "尚未保存 API Key。";
+        return uiText("尚未保存 API Key。");
       case "MODEL_KEY_INVALID":
-        return "保存的 API Key 格式无效，请重新输入。";
+        return uiText("保存的 API Key 格式无效，请重新输入。");
       case "MODEL_AUTH_FAILED":
-        return "DeepSeek 鉴权失败：API Key 无效或已被撤销。";
+        return uiText("DeepSeek 鉴权失败：API Key 无效或已被撤销。");
       case "MODEL_RATE_LIMITED":
-        return "DeepSeek 限流或配额不足，请稍后再试。";
+        return uiText("DeepSeek 限流或配额不足，请稍后再试。");
       case "MODEL_NETWORK":
-        return "无法连接 DeepSeek，请检查网络。";
+        return uiText("无法连接 DeepSeek，请检查网络。");
       case "MODEL_TIMEOUT":
-        return "DeepSeek 连接超时。";
+        return uiText("DeepSeek 连接超时。");
       case "MODEL_PROVIDER_ERROR":
-        return "DeepSeek 服务端错误，请稍后再试。";
+        return uiText("DeepSeek 服务端错误，请稍后再试。");
       case "MODEL_INVALID_RESPONSE":
-        return "DeepSeek 返回了无效响应。";
+        return uiText("DeepSeek 返回了无效响应。");
       case "MODEL_REQUEST_REJECTED":
-        return "DeepSeek 拒绝了请求；请确认模型名称和账户状态。";
+        return uiText("DeepSeek 拒绝了请求；请确认模型名称和账户状态。");
       case "KEY_STORE_UNAVAILABLE":
       case "KEY_STORE_INVALID":
       case "KEY_STORE_FAILED":
-        return "Windows 凭据管理器不可用，无法安全保存 API Key。";
+        return uiText("Windows 凭据管理器不可用，无法安全保存 API Key。");
       case "MODEL_CONFIG_EXTERNAL":
-        return "当前宿主配置由外部管理，模型选择不能在软件内修改。";
+        return uiText("当前宿主配置由外部管理，模型选择不能在软件内修改。");
       default:
         return error.message;
     }
@@ -7169,17 +7288,17 @@ function renderModelSettings(): HTMLElement {
     );
     keyStatus.className = "setting-status";
     if (value.key_store_error) {
-      keyStatus.textContent = "无法读取 Windows 凭据管理器，API Key 状态未知。";
+      keyStatus.textContent = uiText("无法读取 Windows 凭据管理器，API Key 状态未知。");
       keyStatus.classList.add("is-error");
     } else {
-      keyStatus.textContent = value.key_saved
+      keyStatus.textContent = uiText(value.key_saved
         ? "API Key 已保存（不会在界面显示，也不会写入配置文件或 PCS 数据）。"
-        : "尚未保存 API Key。";
+        : "尚未保存 API Key。");
     }
-    if (value.credential_source === "environment") keyStatus.textContent = "正在使用部署环境提供的凭据；未写入实例文件夹。";
+    if (value.credential_source === "environment") keyStatus.textContent = uiText("正在使用部署环境提供的凭据；未写入实例文件夹。");
     deleteKey.disabled = !value.key_saved;
     testConnection.disabled = !(value.key_available ?? value.key_saved) || Boolean(value.credential_restart_required);
-    if (value.credential_restart_required) keyStatus.textContent = "凭据更改已保存；重启应用后生效。";
+    if (value.credential_restart_required) keyStatus.textContent = uiText("凭据更改已保存；重启应用后生效。");
   };
 
   const load = async (): Promise<void> => {
@@ -7202,12 +7321,12 @@ function renderModelSettings(): HTMLElement {
   saveKey.addEventListener("click", () => {
     const value = keyInput.value;
     if (!value) {
-      keyStatus.textContent = "请输入 API Key。";
+      keyStatus.textContent = uiText("请输入 API Key。");
       keyStatus.classList.add("is-error");
       return;
     }
     void (async () => {
-      keyStatus.textContent = "正在安全保存…";
+      keyStatus.textContent = uiText("正在安全保存…");
       keyStatus.className = "setting-status";
       try {
         const reply = await saveModelApiKey(value);
@@ -7219,7 +7338,7 @@ function renderModelSettings(): HTMLElement {
         keyInput.value = "";
         await refreshHost();
         openDrawer("settings");
-        showToast("API Key 已保存到 Windows 凭据管理器；重启应用后生效，当前轮次不受影响");
+        showToast(uiText("API Key 已保存到 Windows 凭据管理器；重启应用后生效，当前轮次不受影响"));
       } catch (error) {
         keyStatus.textContent = invokeError(error).message;
         keyStatus.classList.add("is-error");
@@ -7229,7 +7348,7 @@ function renderModelSettings(): HTMLElement {
 
   deleteKey.addEventListener("click", () => {
     void (async () => {
-      keyStatus.textContent = "正在删除…";
+      keyStatus.textContent = uiText("正在删除…");
       keyStatus.className = "setting-status";
       try {
         const reply = await deleteModelApiKey();
@@ -7241,7 +7360,7 @@ function renderModelSettings(): HTMLElement {
         keyInput.value = "";
         await refreshHost();
         openDrawer("settings");
-        showToast("凭据已删除；当前进程中的旧凭据需重启应用后清除");
+        showToast(uiText("凭据已删除；当前进程中的旧凭据需重启应用后清除"));
       } catch (error) {
         keyStatus.textContent = invokeError(error).message;
         keyStatus.classList.add("is-error");
@@ -7252,33 +7371,33 @@ function renderModelSettings(): HTMLElement {
   testConnection.addEventListener("click", () => {
     const sessionId = state.host?.session_id;
     if (!sessionId) {
-      connectionStatus.textContent = "宿主会话尚未建立。";
+      connectionStatus.textContent = uiText("宿主会话尚未建立。");
       connectionStatus.classList.add("is-error");
       return;
     }
     if (
       !window.confirm(
-        "这会向 DeepSeek 发起一次真实 API 请求，可能产生少量费用。继续吗？",
+        uiText("这会向 DeepSeek 发起一次真实 API 请求，可能产生少量费用。继续吗？"),
       )
     ) {
       return;
     }
     void (async () => {
       connectionStatus.className = "setting-status";
-      connectionStatus.textContent = "正在测试真实 DeepSeek 连接…";
+      connectionStatus.textContent = uiText("正在测试真实 DeepSeek 连接…");
       try {
         const reply = await testModelConnection(sessionId);
         if (!reply.ok) {
-          connectionStatus.textContent = `连接失败：${errorText(reply)}`;
+          connectionStatus.textContent = `${uiText("连接失败：")}${errorText(reply)}`;
           connectionStatus.classList.add("is-error");
           return;
         }
         const result = reply.result as { latency_ms?: number };
-        connectionStatus.textContent = `真实连接成功${
+        connectionStatus.textContent = `${uiText("真实连接成功")}${
           typeof result.latency_ms === "number"
-            ? `（${Math.round(result.latency_ms)} ms）`
+            ? ` (${Math.round(result.latency_ms)} ms)`
             : ""
-        }。`;
+        }${document.documentElement.lang === "en" ? "." : "。"}`;
       } catch (error) {
         connectionStatus.textContent = invokeError(error).message;
         connectionStatus.classList.add("is-error");
@@ -7382,7 +7501,7 @@ function renderSettingsTab(target: HTMLElement = shell.drawerBody): void {
     }),
     conversationDisplaySection(),
     generationSettings(async () => { await refreshHost(); }, info),
-    maintenanceSettingsPanel(info?.session_id ?? null, async () => { await refreshHost(); }),
+    maintenanceSettingsPanel(info?.session_id ?? null),
     personaPanel({
       api: chatApi,
       info,

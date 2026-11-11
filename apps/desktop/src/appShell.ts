@@ -194,6 +194,13 @@ export class AppShell {
     window.requestAnimationFrame(() => { this.pages.scrollTop = this.pageScroll.get(page) ?? 0; });
   }
   setDashboard(content: HTMLElement): void { if (this.page === "dashboard") this.pages.replaceChildren(content); }
+  toggleTerminalPanel(): void {
+    this.terminalOpen = !this.terminalOpen;
+    if (this.terminalOpen) this.openTerminal(); else this.closeTerminal();
+    this.applyLayout();
+    this.refreshLabels();
+    this.toggleMobile(false);
+  }
   setNewActivity(show: boolean): void { this.newActivity.classList.toggle("hidden", !show); }
   setBlockingOverlay(open: boolean): void {
     this.blockingOverlay = open;
@@ -266,13 +273,8 @@ export class AppShell {
       const button = el("button", { class: active ? "is-active" : "", attrs: { type: "button", title: s(item.label), "aria-label": s(item.label) }, children: [glyph(item.path), el("span", { text: s(item.label) })] });
       if (item.id === "terminal") button.setAttribute("aria-expanded", String(this.terminalOpen)); else if (active) button.setAttribute("aria-current", "page");
       button.onclick = () => {
-        if (item.id === "terminal") {
-          this.terminalOpen = !this.terminalOpen;
-          if (this.terminalOpen) this.openTerminal(); else this.closeTerminal();
-          this.applyLayout();
-          this.refreshLabels();
-          this.toggleMobile(false);
-        } else this.navigate(item.id);
+        if (item.id === "terminal") this.toggleTerminalPanel();
+        else this.navigate(item.id);
       };
       this.nav.append(button);
     }

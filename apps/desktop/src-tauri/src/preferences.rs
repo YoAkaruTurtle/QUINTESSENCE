@@ -99,6 +99,7 @@ impl Default for UiPreferences {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Appearance {
+    pub font: Option<String>,
     pub light_accent: Option<String>,
     pub light_background: Option<String>,
     pub wallpaper: Option<String>,
@@ -108,6 +109,11 @@ pub struct Appearance {
 
 impl Appearance {
     pub fn validate(&self) -> Result<(), HostError> {
+        if let Some(font) = &self.font {
+            if !["system", "humanist", "serif"].contains(&font.as_str()) {
+                return Err(HostError::new("INVALID_PARAMS", "invalid appearance font"));
+            }
+        }
         for color in [&self.light_accent, &self.light_background].into_iter().flatten() {
             if color.len() != 7 || !color.starts_with('#') || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit) {
                 return Err(HostError::new("INVALID_PARAMS", "invalid appearance color"));
@@ -461,11 +467,13 @@ mod tests {
         let directory = work_dir("appearance-roundtrip");
         let path = directory.join(FILE_NAME);
         let mut preferences = UiPreferences::default();
+        preferences.appearance.font = Some("serif".into());
         preferences.appearance.light_accent = Some("#4080ff".into());
         preferences.appearance.light_background = Some("#ffffff".into());
         preferences.appearance.assistant_avatar = Some("data:image/png;base64,aGVsbG8=".into());
         save(&path, &preferences).unwrap();
         let loaded = load(&path);
+        assert_eq!(loaded.appearance.font, preferences.appearance.font);
         assert_eq!(loaded.appearance.light_accent, preferences.appearance.light_accent);
         assert_eq!(loaded.appearance.assistant_avatar, preferences.appearance.assistant_avatar);
         fs::write(&path, r#"{"theme":"light"}"#).unwrap();
@@ -484,6 +492,9 @@ mod tests {
         }
         let mut value = Appearance::default();
         value.light_accent = Some("red; background:url(x)".into());
+        assert!(value.validate().is_err());
+        let mut value = Appearance::default();
+        value.font = Some("comic".into());
         assert!(value.validate().is_err());
     }
 

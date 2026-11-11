@@ -121,7 +121,7 @@ export function memoryRecallSettingsPanel(refresh: () => Promise<void>): HTMLEle
       toggle,
       numberInput(
         "memory-recall-max-items",
-        "最多条数",
+        lang === "en" ? "Max items" : "最多条数",
         model.values.max_items,
         1,
         4,
@@ -129,7 +129,7 @@ export function memoryRecallSettingsPanel(refresh: () => Promise<void>): HTMLEle
       ),
       numberInput(
         "memory-recall-budget",
-        "预算 (PCS U)",
+        lang === "en" ? "Budget (PCS U)" : "预算 (PCS U)",
         model.values.budget_units,
         64,
         2048,
@@ -137,7 +137,7 @@ export function memoryRecallSettingsPanel(refresh: () => Promise<void>): HTMLEle
       ),
       numberInput(
         "memory-recall-timeout",
-        "整轮超时 (ms)",
+        lang === "en" ? "Turn timeout (ms)" : "整轮超时 (ms)",
         model.values.timeout_ms,
         250,
         2000,
@@ -161,7 +161,7 @@ export function memoryRecallSettingsPanel(refresh: () => Promise<void>): HTMLEle
     controls.append(
       el("label", {
         class: "setting-row",
-        children: [el("span", { text: "时区" }), select],
+        children: [el("span", { text: lang === "en" ? "Time zone" : "时区" }), select],
       }),
     );
     const save = el("button", {

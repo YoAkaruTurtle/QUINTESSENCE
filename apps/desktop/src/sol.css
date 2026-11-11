@@ -30,7 +30,7 @@ button, input, textarea, select { font: inherit; }
 .sol-sidebar .new-conversation { color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-bottom: 2px solid var(--brand); margin-bottom: 16px; border-radius: 0; clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%); }
 .sol-nav { display: grid; gap: 5px; }
 .sol-sidebar button.is-active { background: var(--soft); border-left: 3px solid var(--brand); color: var(--ink); padding-left: 10px; }
-.sol-sidebar .sidebar-search { font-size: 12px; margin-top: 7px; }
+.sol-sidebar .sidebar-search { font-size: 14px; margin-top: 7px; }
 .sol-sidebar .eyebrow { margin: 27px 12px 6px; font-size: 10px; letter-spacing: 1px; }
 .recent-conversations { flex: 1; min-height: 36px; overflow: auto; margin: 0 -4px; padding: 0 4px; }
 .recent-conversations button { min-height: 35px; font-size: 12px; padding: 9px 12px; margin-bottom: 3px; }

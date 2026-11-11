@@ -1,5 +1,6 @@
 /** Local presentation preferences; no model or instance business data. */
 export interface Appearance {
+  font: string | null;
   light_accent: string | null;
   light_background: string | null;
   wallpaper: string | null;
@@ -7,17 +8,34 @@ export interface Appearance {
   user_avatar: string | null;
 }
 export const DEFAULT_APPEARANCE: Appearance = {
-  light_accent: null, light_background: null, wallpaper: null,
+  font: null, light_accent: null, light_background: null, wallpaper: null,
   assistant_avatar: null, user_avatar: null,
 };
+const FONT_STACKS = {
+  system: '"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Noto Sans SC",system-ui,sans-serif',
+  humanist: '"Noto Sans SC","Source Han Sans SC","Microsoft YaHei UI","Segoe UI",system-ui,sans-serif',
+  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",Georgia,serif',
+} as const;
+export function fontStack(value: unknown): string {
+  return value === "humanist" || value === "serif" ? FONT_STACKS[value] : FONT_STACKS.system;
+}
 export function validColor(value: unknown): value is string {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
 }
-export function foreground(background: string): string {
+function luminance(background: string): number {
   const rgb = [1, 3, 5].map(i => parseInt(background.slice(i, i + 2), 16) / 255)
     .map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
-  const luminance = rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
-  return (luminance + .05) / .05 >= 1.05 / (luminance + .05) ? "#111111" : "#ffffff";
+  return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+}
+export function foreground(background: string): string {
+  const value = validColor(background) ? luminance(background) : .5;
+  return (value + .05) / .05 >= 1.05 / (value + .05) ? "#111111" : "#ffffff";
+}
+export function contrastRatio(first: string, second: string): number | null {
+  if (!validColor(first) || !validColor(second)) return null;
+  const a = luminance(first);
+  const b = luminance(second);
+  return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
 }
 export function displayImage(value: unknown): string | null {
   return typeof value === "string" && value.length <= 3_000_000 &&
@@ -27,6 +45,7 @@ export function applyAppearance(value: Appearance, theme: string): void {
   const root = document.documentElement;
   const accent = validColor(value.light_accent) ? value.light_accent : "#a82e40";
   const background = validColor(value.light_background) ? value.light_background : "#f5f4f1";
+  root.style.setProperty("--font", fontStack(value.font));
   root.style.setProperty("--light-accent", accent);
   root.style.setProperty("--light-background", background);
   root.style.setProperty("--light-ink", foreground(background));

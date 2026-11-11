@@ -3,21 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { el } from "./dom";
 import { ChoiceControl } from "./choice";
 import type { AppInfo, HostReply } from "./types";
-import { applyAppearance, DEFAULT_APPEARANCE, importDisplayImage, type Appearance } from "./appearance";
+import { applyAppearance, contrastRatio, DEFAULT_APPEARANCE, fontStack, foreground, importDisplayImage, type Appearance } from "./appearance";
 import { openAvatarPreview } from "./avatarPreview";
 
 const messages = {
   "zh-CN": {
-    appearance: "界面偏好", language: "界面语言", theme: "主题", light: "日间", dark: "夜间", effective: "当前实际：模型 / SDRPE", persisted: "以下为已保存值",
-    immediate: "应用范围 · 立即生效；不改变对话内容", save: "保存", saved: "已保存", unsaved: "未保存", saving: "正在保存；生成配置会等待当前轮次结束…", unknown: "保存结果未知；请重新读取当前值，不要盲目重试。",
+    appearance: "界面偏好", language: "界面语言", theme: "主题", light: "日间", dark: "夜间", font: "字体", fontSystem: "系统无衬线", fontHumanist: "人文黑体", fontSerif: "宋体阅读", fontPreview: "字体预览 · 从一句话开始。 0123", lightAccent: "日间主题色", lightBackground: "日间背景色", wallpaper: "聊天背景", assistantAvatar: "助手头像", myAvatar: "我的头像", chooseImage: "选择图片", restoreDefault: "恢复默认", restoreColors: "恢复默认配色", viewAvatar: "查看头像", effective: "当前实际：模型 / SDRPE", persisted: "以下为已保存值",
+    immediate: "应用范围 · 立即生效；不改变对话内容", save: "保存", saved: "已保存", unsaved: "未保存", contrastLow: "当前日间配色对比度较低，正文可能不易阅读。", saving: "正在保存；生成配置会等待当前轮次结束…", unknown: "保存结果未知；请重新读取当前值，不要盲目重试。",
     generation: "生成设置", next: "当前实例 · 下一轮生效；正在执行的轮次保持原配置",
     model: "模型", tokens: "每次请求最大输出 Token", fixed: "当前协议：temperature 固定为 0；不支持 top-p 调节。输出同时受预算与授权上限约束。", thinking: "当前宿主使用思考模式；temperature 不参与请求，暂不提供 top-p 调节。输出同时受预算与授权上限约束。",
     external: "模型与输出上限由外部宿主管理；当前仅可保存 SDRPE。", auto: "历史配置为 auto，尚未实现，实际为 off。请选择 off 或 on。",
     pending: "已保存；尚未确认应用。请刷新状态，勿重复提交。", failed: "保存失败；请检查宿主状态和输入值。", protocol: "注意：当前宿主使用 collab.v1，SDRPE 实际为 off；on 仅在支持的双阶段协议中生效。",
   },
   en: {
-    appearance: "Interface preferences", language: "Interface language", theme: "Theme", light: "Light", dark: "Dark", effective: "Currently active: model / SDRPE", persisted: "Saved values below",
-    immediate: "Application · Immediate; conversation content stays unchanged", save: "Save", saved: "Saved", unsaved: "Unsaved", saving: "Saving; generation changes wait for the current turn…", unknown: "Save outcome unknown. Reload current values before retrying.",
+    appearance: "Interface preferences", language: "Interface language", theme: "Theme", light: "Light", dark: "Dark", font: "Font", fontSystem: "System sans", fontHumanist: "Humanist sans", fontSerif: "Serif reading", fontPreview: "Font preview · Start with a message. 0123", lightAccent: "Light accent", lightBackground: "Light background", wallpaper: "Chat background", assistantAvatar: "Assistant avatar", myAvatar: "My avatar", chooseImage: "Choose image", restoreDefault: "Use default", restoreColors: "Reset colors", viewAvatar: "View avatar", effective: "Currently active: model / SDRPE", persisted: "Saved values below",
+    immediate: "Application · Immediate; conversation content stays unchanged", save: "Save", saved: "Saved", unsaved: "Unsaved", contrastLow: "The current light palette has low contrast; body text may be hard to read.", saving: "Saving; generation changes wait for the current turn…", unknown: "Save outcome unknown. Reload current values before retrying.",
     generation: "Generation settings", next: "Current instance · Next turn; running turns keep their configuration",
     model: "Model", tokens: "Maximum output tokens per request", fixed: "Current protocol: temperature is fixed at 0; top-p is unavailable. Budget and authorization limits also apply.", thinking: "This host uses thinking mode. Temperature is not sent; top-p adjustment is unavailable. Budget and authorization limits still apply.",
     external: "The external host manages model and output limits. Only SDRPE can be saved here.", auto: "Legacy auto mode is unavailable; effective mode is off. Choose off or on.",
@@ -98,26 +98,49 @@ export function interfaceSettings(refresh: () => void): HTMLElement {
       refresh();
     } catch { feedback.textContent = t("failed"); } finally { save.disabled = false; }
   };
-  box.append(row(t("language"), lang.element), row(t("theme"), appearance.element));
+  const fontPreview = el("p", { class: "appearance-font-preview", text: t("fontPreview") });
+  const updateFontPreview = (): void => { fontPreview.style.fontFamily = fontStack(draft.font); };
+  const font = select([
+    ["system", t("fontSystem")],
+    ["humanist", t("fontHumanist")],
+    ["serif", t("fontSerif")],
+  ], draft.font ?? "system", value => {
+    draft.font = value;
+    markDirty();
+    updateFontPreview();
+  });
+  updateFontPreview();
+  box.append(row(t("language"), lang.element), row(t("theme"), appearance.element), row(t("font"), font.element), fontPreview);
   const colors = el("div", { class: "appearance-colors" });
+  const contrast = el("p", { class: "appearance-warning", attrs: { role: "status", "aria-live": "polite" } });
+  const updateContrast = (): void => {
+    const accent = draft.light_accent ?? "#a82e40";
+    const background = draft.light_background ?? "#f5f4f1";
+    const accentRatio = contrastRatio(foreground(accent), accent) ?? 0;
+    const backgroundRatio = contrastRatio(foreground(background), background) ?? 0;
+    const low = accentRatio < 4.5 || backgroundRatio < 4.5;
+    contrast.hidden = !low;
+    contrast.textContent = low ? t("contrastLow") : "";
+  };
   for (const [key, label, fallback] of [
-    ["light_accent", "日间主题色", "#a82e40"],
-    ["light_background", "日间背景色", "#f5f4f1"],
+    ["light_accent", t("lightAccent"), "#a82e40"],
+    ["light_background", t("lightBackground"), "#f5f4f1"],
   ] as const) {
     const input = el("input", { attrs: { type: "color" } });
     input.value = draft[key] ?? fallback;
-    input.oninput = () => { draft[key] = input.value; markDirty(); };
+    input.oninput = () => { draft[key] = input.value; markDirty(); updateContrast(); };
     colors.append(row(label, input));
   }
-  box.append(colors);
+  updateContrast();
+  box.append(colors, contrast);
   const images = el("div", { class: "appearance-images" });
   for (const [key, label] of [
-    ["wallpaper", "聊天背景"], ["assistant_avatar", "助手头像"], ["user_avatar", "我的头像"],
+    ["wallpaper", t("wallpaper")], ["assistant_avatar", t("assistantAvatar")], ["user_avatar", t("myAvatar")],
   ] as const) {
     const input = el("input", { attrs: { type: "file", accept: "image/png,image/jpeg,image/webp" } });
     input.className = "visually-hidden";
     input.setAttribute("aria-label", label);
-    const choose = el("button", { class: "quiet-button", text: "选择图片", attrs: { type: "button" } });
+    const choose = el("button", { class: "quiet-button", text: t("chooseImage"), attrs: { type: "button" } });
     choose.onclick = () => input.click();
     const preview = el("img", { class: `appearance-preview ${key === "wallpaper" ? "is-wallpaper" : ""}`, attrs: { alt: label } });
     const update = () => { preview.hidden = !draft[key]; if (draft[key]) preview.src = draft[key]!; else preview.removeAttribute("src"); };
@@ -126,14 +149,14 @@ export function interfaceSettings(refresh: () => void): HTMLElement {
       const showPreview = () => openAvatarPreview({
         kind: key === "assistant_avatar" ? "assistant" : "user",
         label,
-        letter: key === "assistant_avatar" ? "助" : "你",
+        letter: key === "assistant_avatar" ? "Q" : document.documentElement.lang === "en" ? "You" : "你",
         image: draft[key],
         trigger: preview,
       });
       preview.classList.add("appearance-preview-clickable");
       preview.tabIndex = 0;
       preview.setAttribute("role", "button");
-      preview.setAttribute("aria-label", `查看${label}`);
+      preview.setAttribute("aria-label", t("viewAvatar"));
       preview.onclick = showPreview;
       preview.onkeydown = event => {
         if (event.key === "Enter" || event.key === " ") {
@@ -150,19 +173,20 @@ export function interfaceSettings(refresh: () => void): HTMLElement {
       catch (error) { feedback.textContent = error instanceof Error ? error.message : "无法载入图片"; }
       finally { importsInProgress--; input.disabled = false; choose.disabled = false; remove.disabled = false; save.disabled = importsInProgress > 0; }
     };
-    const remove = el("button", { class: "quiet-button", text: "恢复默认", attrs: { type: "button" } });
+    const remove = el("button", { class: "quiet-button", text: t("restoreDefault"), attrs: { type: "button" } });
     remove.onclick = () => { draft[key] = null; input.value = ""; update(); markDirty(); };
     images.append(el("div", { class: "appearance-image-field", children: [el("h4", { text: label }), preview, input,
       el("div", { class: "appearance-actions", children: [choose, remove] }),
     ] }));
   }
   box.append(images);
-  const resetColors = el("button", { class: "quiet-button", text: "恢复默认配色", attrs: { type: "button" } });
+  const resetColors = el("button", { class: "quiet-button", text: t("restoreColors"), attrs: { type: "button" } });
   resetColors.onclick = () => {
     draft.light_accent = null; draft.light_background = null;
     const inputs = box.querySelectorAll<HTMLInputElement>('input[type="color"]');
     inputs[0].value = "#a82e40"; inputs[1].value = "#f5f4f1";
     markDirty();
+    updateContrast();
   };
   box.append(el("div", { class: "appearance-actions", children: [resetColors, save] }), feedback);
   return box;

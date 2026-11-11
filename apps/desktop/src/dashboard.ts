@@ -133,7 +133,6 @@ function usageCard(model: SessionOverview): HTMLElement {
 
 export function traceSection(trace: TurnTrace | null, state: "loading" | "ready" | "busy" | "error"): HTMLElement {
   const section = el("div", { class: "process-detail" });
-  section.appendChild(el("div", { class: "process-label", text: s("executionDetail") }));
   if (state === "busy") { section.appendChild(el("div", { class: "process-note", text: s("runningDetail") })); return section; }
   if (state === "loading") { section.appendChild(el("div", { class: "process-note", text: s("notRead") })); return section; }
   if (state === "error" || trace === null) { section.appendChild(el("div", { class: "process-note", text: s("loadError") })); return section; }

@@ -52,7 +52,6 @@ function statusLine(service: MaintenanceService): string {
 
 export function maintenanceSettingsPanel(
   sessionId: string | null,
-  refresh: () => Promise<void>,
 ): HTMLElement {
   const box = el("section", { class: "drawer-section" });
   const feedback = el("p", { class: "setting-status", attrs: { role: "status", "aria-live": "polite" } });
@@ -95,6 +94,15 @@ export function maintenanceSettingsPanel(
     try {
       const reply = await invoke<HostReply>("maintenance_status", { sessionId });
       if (!reply.ok) {
+        // The sidecar refuses status reads while maintenance is disabled.  That
+        // is the normal "off" state, not an error the user must clear.
+        if (reply.error?.code === "MAINTENANCE_FORBIDDEN") {
+          service = { enabled: false };
+          feedback.textContent = text("自动维护已关闭。", "Automatic maintenance is off.");
+          feedback.classList.remove("is-error");
+          render();
+          return;
+        }
         feedback.textContent = errorText(reply);
         feedback.classList.add("is-error");
         return;
@@ -113,14 +121,31 @@ export function maintenanceSettingsPanel(
   const saveToggle = async (): Promise<void> => {
     if (!sessionId || busy) return;
     const enabled = toggle.checked;
+    const previous = service.enabled;
+    // Keep the user's new choice visible while the save is in flight.  The
+    // previous code re-rendered from the old service value immediately, which
+    // made the checkbox spring back and look fake.
+    service = { ...service, enabled };
     busy = true;
     render();
     try {
+      if (!enabled && service.active?.task_id) {
+        try {
+          await invoke<HostReply>("maintenance_control", {
+            sessionId,
+            taskId: service.active.task_id,
+            action: "yield",
+          });
+        } catch {
+          // The saved setting below still stops future automatic slices.
+        }
+      }
       const reply = await invoke<HostReply>("save_maintenance_enabled", {
         sessionId,
         enabled,
       });
       if (!reply.ok) {
+        service = { ...service, enabled: previous };
         feedback.textContent = errorText(reply);
         feedback.classList.add("is-error");
         return;
@@ -129,11 +154,11 @@ export function maintenanceSettingsPanel(
       const message = result.application?.ok
         ? text("已保存；下一轮起生效。", "Saved; applies from the next turn.")
         : text("已保存；应用确认待刷新。", "Saved; application is not confirmed yet.");
-      await refresh();
       await load();
       feedback.textContent = message;
       feedback.classList.toggle("is-error", !result.application?.ok);
     } catch (error) {
+      service = { ...service, enabled: previous };
       feedback.textContent = error instanceof Error ? error.message : text("保存失败。", "Could not save.");
       feedback.classList.add("is-error");
     } finally {

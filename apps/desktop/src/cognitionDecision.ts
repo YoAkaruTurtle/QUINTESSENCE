@@ -20,6 +20,8 @@ export async function runCognitionDecision(
   refresh: () => Promise<void>,
   render: () => void,
   errorText: (error: unknown) => string,
+  failureText = "提交决定失败",
+  noticeText?: (decision: "approve" | "reject") => string,
 ): Promise<void> {
   if (state.busy) return;
   state.busy = candidateId;
@@ -29,11 +31,13 @@ export async function runCognitionDecision(
   try {
     const reply = await submit();
     if (!reply.ok) {
-      state.decisionError = reply.error?.message ?? "提交决定失败";
+      state.decisionError = reply.error?.message ?? failureText;
     } else {
-      state.notice = decision === "approve"
-        ? "已提交批准；以实际状态为准。"
-        : "已提交拒绝；以实际状态为准。";
+      state.notice = noticeText
+        ? noticeText(decision)
+        : decision === "approve"
+          ? "已提交批准；以实际状态为准。"
+          : "已提交拒绝；以实际状态为准。";
     }
   } catch (error) {
     state.decisionError = errorText(error);

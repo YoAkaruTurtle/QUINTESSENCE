@@ -1,5 +1,6 @@
 /** A small, local-only avatar lightbox shared by chat and settings. */
 import { el } from "./dom";
+import { uiText } from "./locale";
 
 export interface AvatarPreviewOptions {
   kind: "assistant" | "user";
@@ -46,15 +47,15 @@ export function openAvatarPreview(options: AvatarPreviewOptions): void {
         children: [
           face,
           el("strong", { text: options.label, attrs: { id: "avatar-preview-title" } }),
-          el("span", { class: "muted", text: "点击空白处或按 Esc 关闭" }),
+          el("span", { class: "muted", text: uiText("点击空白处或按 Esc 关闭") }),
         ],
       }),
     ],
   });
   const close = el("button", {
     class: "quiet-button avatar-preview-close",
-    text: "关闭",
-    attrs: { type: "button", "aria-label": "关闭头像预览" },
+    text: uiText("关闭"),
+    attrs: { type: "button", "aria-label": uiText("关闭头像预览") },
   });
   dialog.querySelector(".avatar-preview-card")?.appendChild(close);
   close.onclick = () => dialog.close();

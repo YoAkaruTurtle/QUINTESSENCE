@@ -4,7 +4,7 @@
   --ink:#f2f1ef; --ink-soft:#dddce0; --muted:#aaa8af; --line:#343438; --line-strong:#68666e;
   --brand:#c63f4b; --brand-strong:#df5868; --brand-soft:#ed657218; --focus:#f48b96; --on-accent:#ffffff;
   --sidebar:#161719; --soft:#242529; --radius:18px; --radius-small:10px;
-  --font:"Noto Sans SC","Segoe UI Variable","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  --font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Noto Sans SC",system-ui,sans-serif;
 }
 :root[data-theme="light"] {
   --bg:var(--light-background,#f5f4f1); --ink:var(--light-ink,#252528);
@@ -54,15 +54,31 @@
 .sol-shell .chat-message.is-user { background:none; padding:0; max-width:85%; margin:12px 56px 22px 0; border-radius:0; }
 .sol-shell .is-user .chat-text { background:var(--brand); color:var(--on-accent); border-color:transparent; border-radius:19px 19px 6px 19px; }
 .sol-shell .chat-role { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
-.chat-avatar { display:grid; place-items:center; position:absolute; left:-56px; bottom:0; width:44px; height:44px; border-radius:15px; background-color:var(--surface-2); background-size:cover; background-position:center; font-size:16px; color:var(--ink); }
+.chat-avatar { display:grid; place-items:center; position:absolute; left:-56px; top:2px; bottom:auto; width:44px; height:44px; border-radius:15px; background-color:var(--surface-2); background-size:cover; background-position:center; font-size:16px; color:var(--ink); }
 .is-assistant .chat-avatar { background-image:var(--assistant-avatar,none); }
 :root:not([data-assistant-avatar="true"]) .sol-shell .is-assistant .chat-avatar { background-image:url('/brand.png'); }
 .is-user .chat-avatar { left:auto; right:-56px; background-image:var(--user-avatar,none); }
 :root[data-assistant-avatar="true"] .is-assistant .chat-avatar,
 :root[data-user-avatar="true"] .is-user .chat-avatar { font-size:0; }
 .sol-shell .chat-message.is-bubble-split { margin-bottom:10px; }
-.sol-shell .chat-commentary { border:0; margin:5px 0 16px 56px; padding:0; font-size:12px; }
+.sol-shell .chat-commentary { width:fit-content; max-width:calc(100% - 56px); margin:4px 0 10px 56px; padding:8px 13px; border:1px solid var(--line); border-radius:16px 16px 16px 6px; background:var(--surface); color:var(--ink-soft); font-size:12px; box-shadow:0 3px 12px #0000000a; }
 .sol-shell .chat-process { margin-left:56px; }
+.sol-shell .chat-process[open] .chat-process-list { border:0; padding:6px 0 2px; background:transparent; }
+.sol-shell .process-step { border-left:0; border-bottom:1px solid color-mix(in srgb,var(--line) 62%,transparent); padding:9px 0; }
+.sol-shell .process-step:last-child { border-bottom:0; }
+.sol-shell .process-step-head { display:flex; align-items:center; gap:8px; padding:3px 0; font-size:12px; color:var(--muted); }
+.sol-shell .process-step-head::before { content:''; width:6px; height:6px; flex-shrink:0; border-radius:50%; background:var(--muted); }
+.sol-shell .process-step[data-status="succeeded"] .process-step-head::before,
+.sol-shell .process-step[data-status="success"] .process-step-head::before,
+.sol-shell .process-step[data-status="completed"] .process-step-head::before { background:var(--ok); }
+.sol-shell .process-step[data-status="running"] .process-step-head::before,
+.sol-shell .process-step[data-status="started"] .process-step-head::before { background:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
+.sol-shell .process-step[data-status="failed"] .process-step-head::before,
+.sol-shell .process-step[data-status="error"] .process-step-head::before,
+.sol-shell .process-step[data-status="rejected"] .process-step-head::before { background:var(--danger); }
+.sol-shell .chat-process-trace { margin-top:10px; border-top:1px solid var(--line); padding-top:6px; }
+.sol-shell .chat-process-trace > summary { cursor:pointer; padding:5px 0; color:var(--muted); font-size:11px; }
+.sol-shell .chat-process-trace > summary:hover { color:var(--ink); }
 .sol-shell .chat-postprocess { margin:0 0 20px 56px; }
 .sol-shell .composer-shell { padding:10px 35px 22px; background:var(--bg); }
 .sol-shell .composer { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:12px; max-width:910px; border:1px solid var(--line); border-radius:22px; padding:12px 16px; box-shadow:0 8px 30px #00000012; }
@@ -89,7 +105,8 @@
 .summary-metric small { font-size:11px; }
 .bottom-panel { animation:panel-enter .32s cubic-bezier(.22,1,.36,1); }
 .panel-resize::after { opacity:1; border-radius:2px; }
-.chat-message.bubble-reveal,.chat-commentary.bubble-reveal { animation:bubble-arrive .38s cubic-bezier(.16,1,.3,1) both; }
+.chat-message.bubble-reveal,.chat-commentary.bubble-reveal { animation:bubble-arrive .46s cubic-bezier(.16,1,.3,1) both; transform-origin:bottom left; }
+.chat-message.is-user.bubble-reveal { transform-origin:bottom right; }
 @keyframes bubble-arrive { from { opacity:0; transform:translateY(16px) scale(.96); } to { opacity:1; transform:none; } }
 @keyframes panel-enter { from { opacity:0; transform:translateY(35px); } to { opacity:1; transform:none; } }
 .appearance-preview { display:block; width:72px; height:72px; object-fit:cover; border-radius:19px; margin:12px 0; }
@@ -106,10 +123,13 @@
 .avatar-preview-card .muted { font-size:11px; }
 .avatar-preview-close { margin-top:4px; }
 .appearance-colors { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.appearance-font-preview { margin:-4px 0 14px; padding:10px 14px; border-left:2px solid var(--brand); border-radius:0 8px 8px 0; background:var(--surface); color:var(--ink-soft); font-size:14px; line-height:1.7; }
 .appearance-images { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:16px 0; }
 .appearance-image-field { padding:16px; border:1px solid var(--line); border-radius:13px; background:var(--surface); }
 .appearance-image-field h4 { margin:0 0 12px; font-size:13px; font-weight:500; }
 .appearance-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.appearance-warning { margin:-2px 0 10px; color:var(--warn); font-size:12px; line-height:1.7; }
+.appearance-warning[hidden] { display:none; }
 .appearance-image-field .appearance-actions { margin-top:12px; }
 .appearance-image-field .appearance-preview { max-width:100%; }
 .appearance-actions button { margin:0; }
@@ -159,8 +179,9 @@
 @media(max-width:1000px) { .sol-shell .conversation-inner { padding-inline:25px; } .sol-shell .composer-shell { padding-inline:25px; } }
 .chat-day { display:flex; align-items:center; gap:14px; margin:6px 0 24px; color:var(--muted); font-size:11px; }
 .chat-day::before,.chat-day::after { content:''; height:1px; flex:1; background:color-mix(in srgb,var(--line) 70%,transparent); }
-.chat-typing { display:flex; align-items:center; gap:9px; margin:4px 0 18px 56px; color:var(--muted); font-size:12px; }
-.chat-typing .thinking-dots { margin-right:2px; }
+.chat-thinking { display:flex; align-items:center; gap:9px; width:fit-content; margin:2px 0 14px 56px; padding:7px 12px; border:1px solid var(--line); border-radius:999px; background:var(--surface); color:var(--muted); font-size:12px; animation:thinking-breathe 1.8s ease-in-out infinite; }
+.chat-thinking-dot { width:6px; height:6px; flex-shrink:0; border-radius:50%; background:var(--brand); box-shadow:0 0 0 4px var(--brand-soft); }
+@keyframes thinking-breathe { 0%,100%{opacity:.62} 50%{opacity:1} }
 .sol-shell .composer-meta { min-width:0; }
 .sol-shell .cognition-layout.is-empty { grid-template-columns:minmax(0,1fr); }
 .cognition-impact { display:grid; gap:7px; padding-top:20px; border-top:1px solid var(--line); }
@@ -175,4 +196,4 @@
   .sol-shell .cognition-queue { min-height:0; max-height:38dvh; overflow:auto; }
   .sol-shell .cognition-detail .review-work-item { min-height:240px; }
 }
-@media(prefers-reduced-motion:reduce) { .sol-shell,.bottom-panel,.chat-message.bubble-reveal,.chat-commentary.bubble-reveal,.chat-typing { animation:none!important; transition:none!important; } }
+@media(prefers-reduced-motion:reduce) { .sol-shell,.bottom-panel,.chat-message.bubble-reveal,.chat-commentary.bubble-reveal,.chat-thinking { animation:none!important; transition:none!important; } }

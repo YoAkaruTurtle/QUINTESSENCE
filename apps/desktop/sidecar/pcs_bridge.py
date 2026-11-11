@@ -777,6 +777,21 @@ class Bridge:
         except BaseException:  # noqa: BLE001 - a timer must not kill the process
             LOGGER.exception("maintenance review could not be queued")
 
+    def _stop_auto_maintenance(self) -> None:
+        """Disable queued and active maintenance when the setting is turned off."""
+        with self._maintenance_lock:
+            if self._maintenance_timer is not None:
+                self._maintenance_timer.cancel()
+                self._maintenance_timer = None
+            if self._maintenance_resume_timer is not None:
+                self._maintenance_resume_timer.cancel()
+                self._maintenance_resume_timer = None
+            self._maintenance_resume = None
+            self._maintenance_turns.clear()
+        if self.runtime is not None:
+            self.runtime.request_maintenance_yield("maintenance_disabled")
+        LOGGER.info("automatic maintenance stopped: disabled")
+
     def _request_maintenance_yield(self) -> bool:
         """Reader-thread signal; never touches the maintenance worker queue."""
 
@@ -1107,6 +1122,8 @@ class Bridge:
             config = load_config(self.config_path)
             self.runtime.apply_generation_settings(config)
             self.config = config
+            if config.maintenance is None or not config.maintenance.enabled:
+                self._stop_auto_maintenance()
             self._send_ok(request_id, {"applied": True, "effect": "next_turn"})
         except (ConfigError, RuntimeStartupError):
             self._send_error(request_id, "SETTINGS_INVALID", "settings were not applied")
