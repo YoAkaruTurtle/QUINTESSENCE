@@ -28,11 +28,14 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
-from dataclasses import dataclass
-from typing import Any, Mapping
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from typing import Any, Callable, Mapping
 
+from ..domains.memory.time_window import message_time, parse_timestamp
 from ..foundation import identifiers
 from ..foundation.errors import (
+    ContextStale,
     CorruptStore,
     InvalidInput,
     Redacted,
@@ -122,6 +125,24 @@ class ExperienceAccess:
 class ExperiencePage:
     refs: tuple[CollaborationRef, ...]
     next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class DreamingExperienceRef:
+    ref: CollaborationRef
+    occurred_at: datetime
+    time_basis: str
+    event_id: str | None = None
+    conversation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DreamingExperiencePage:
+    refs: tuple[DreamingExperienceRef, ...]
+    next_cursor: str | None
+
+
+DreamingReadAudit = Callable[[ExperienceAccess, CollaborationRef, str, str], None]
 
 
 @dataclass(frozen=True)
@@ -593,21 +614,329 @@ class ExperienceMixin:
         if statement_purpose not in access.purposes:
             return ExperienceUnavailable(normalized)
 
-        if ref_type == COLLAB_INPUT:
-            return self._read_input(
-                access=access,
-                ref=normalized,
-                ref_id=ref_id,
-                ref_version=ref_version,
-                purpose=statement_purpose,
-            )
-        return self._read_artifact(
+        reader = self._read_input if ref_type == COLLAB_INPUT else self._read_artifact
+        view = reader(
             access=access,
             ref=normalized,
             ref_id=ref_id,
             ref_version=ref_version,
-            purpose=statement_purpose,
         )
+        if isinstance(view, ExperienceView):
+            self._record_read(
+                access=access, purpose=statement_purpose, ref_type=ref_type,
+                ref_id=ref_id, ref_version=ref_version, outcome=view.readability,
+            )
+        return view
+
+    def dreaming_experience_page(
+        self,
+        access: ExperienceAccess,
+        *,
+        since: datetime,
+        until: datetime,
+        cursor: str | None = None,
+        latest: bool = False,
+        limit: int = DEFAULT_LIST_LIMIT,
+    ) -> DreamingExperiencePage:
+        """Page candidate metadata by occurrence, then bind each ref to live PCS."""
+
+        _require_access(access)
+        self.require_ready("Dreaming Experience")
+        if (
+            not isinstance(since, datetime) or not isinstance(until, datetime)
+            or since.utcoffset() is None or until.utcoffset() is None or since >= until
+        ):
+            raise InvalidInput("Dreaming needs a nonempty aware time window")
+        if type(limit) is not int or not 1 <= limit <= MAX_LIST_LIMIT:
+            raise InvalidInput("invalid Dreaming Experience page limit")
+        if not access.privacy_classes:
+            return DreamingExperiencePage((), None)
+        privacy = tuple(sorted(access.privacy_classes))
+        privacy_parameters = ", ".join("?" for _ in privacy)
+        direction = "DESC" if latest else "ASC"
+        columns = ("time_key", "ref_type", "ref_id", "ref_version")
+        order = ", ".join(f"{column} {direction}" for column in columns)
+        # RFC3339 UTC strings in the store may omit fractional seconds.
+        # Padding them avoids a float conversion at the window boundaries.
+        query = f"""
+            WITH sources AS (
+                SELECT 'collab_input' AS ref_type, i.input_id AS ref_id,
+                       i.content_version AS ref_version,
+                       coalesce(i.observed_at, i.recorded_at) AS occurrence
+                FROM collab_inputs AS i
+                JOIN collab_interactions AS h ON h.namespace = i.namespace
+                AND h.interaction_id = (
+                    SELECT j.interaction_id FROM collab_interaction_inputs AS l
+                    JOIN collab_interactions AS j ON j.namespace = l.namespace
+                    AND j.interaction_id = l.interaction_id
+                    WHERE l.namespace = i.namespace AND l.input_id = i.input_id
+                    AND l.content_version = i.content_version
+                    ORDER BY j.created_at, j.interaction_id LIMIT 1
+                )
+                WHERE i.namespace = ? AND h.host_instance = ? AND h.access_ref = ?
+                AND (i.recorded_at >= ? OR i.observed_at >= ?)
+                AND i.retention_policy IN ('standard', 'durable')
+                AND i.privacy_class IN ({privacy_parameters})
+                UNION ALL
+                SELECT 'collab_artifact', a.artifact_id, a.artifact_version, a.created_at
+                FROM collab_artifacts AS a
+                JOIN collab_interactions AS h ON h.namespace = a.namespace
+                AND h.interaction_id = a.interaction_id
+                WHERE a.namespace = ? AND h.host_instance = ? AND h.access_ref = ?
+                AND a.created_at >= ? AND a.created_at < ?
+                AND a.retention_policy IN ('standard', 'durable')
+                AND a.kind IN ('reply', 'query_result')
+            ), ordered AS (
+                SELECT ref_type, ref_id, ref_version,
+                       substr(occurrence, 1, 19) || '.' ||
+                       substr(rtrim(substr(occurrence, 21), 'Z') || '000000', 1, 6)
+                       || 'Z' AS time_key
+                FROM sources
+            )
+            SELECT * FROM ordered WHERE time_key >= ? AND time_key < ?
+        """
+        binding = (access.namespace, access.host_instance, access.access_ref)
+        start, end = (
+            moment.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+            for moment in (since, until)
+        )
+        # Coarse second bounds precede the precise sort. Either timestamp may
+        # be the later one on imported input, so retain both possibilities.
+        parameters: list[Any] = [*binding, start[:19], start[:19], *privacy, *binding,
+                                 start[:19], end[:19] + "a", start, end]
+        if cursor is not None:
+            marker = _decode_cursor(cursor)
+            comparison = "<" if latest else ">"
+            query += f" AND ({', '.join(columns)}) {comparison} (?, ?, ?, ?)"
+            parameters.extend((marker.created_at, marker.ref_type, marker.ref_id, marker.ref_version))
+        rows = self._require_connection().execute(
+            query + f" ORDER BY {order} LIMIT ?", (*parameters, limit + 1),
+        ).fetchall()
+        refs = []
+        for row in rows[:limit]:
+            ref = _ref_from_row(access.namespace, row)
+            current = self.dreaming_experience_ref(access, ref=ref)
+            if current is not None and since <= current.occurred_at < until:
+                refs.append(current)
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = _encode_cursor(_ref_from_row(access.namespace, last), last["time_key"])
+        return DreamingExperiencePage(tuple(refs), next_cursor)
+
+    def dreaming_experience_ref(
+        self, access: ExperienceAccess, *, ref: Any,
+    ) -> DreamingExperienceRef | None:
+        """Rebind exact occurrence and optional live event attribution."""
+
+        _require_access(access)
+        self.require_ready("Dreaming Experience")
+        normalized, ref_type, ref_id, ref_version = _normalize_ref(ref)
+        if normalized["namespace"] != access.namespace:
+            return None
+        metadata = self._dreaming_experience_metadata(access, normalized)
+        if metadata is None:
+            return None
+        if ref_type == COLLAB_INPUT:
+            stamp, basis = message_time(metadata["observed_at"], metadata["created_at"])
+            if metadata["observed_at"] is not None and basis != "observed_at":
+                return None
+        else:
+            stamp, basis = metadata["created_at"], "artifact_created_at"
+        moment = parse_timestamp(stamp)
+        if moment is None:
+            return None
+        projection = self.projection_for_ref(
+            access.namespace, ref_type=ref_type, ref_id=ref_id, ref_version=ref_version,
+        )
+        event_id = None
+        if projection is not None and self.projection_is_usable(
+            access.namespace, projection["event_id"],
+        ):
+            event_id = projection["event_id"]
+        return DreamingExperienceRef(
+            normalized, moment.astimezone(UTC), basis, event_id, metadata["conversation_id"],
+        )
+
+    def read_experience_for_dreaming(
+        self,
+        access: ExperienceAccess,
+        *,
+        ref: Any,
+        purpose: str,
+        audit: DreamingReadAudit,
+    ) -> ExperienceView | ExperienceUnavailable:
+        """Revalidate the exact source and audit outside the legacy database."""
+
+        _require_access(access)
+        self.require_ready("Dreaming Experience")
+        normalized, ref_type, ref_id, ref_version = _normalize_ref(ref)
+        purpose = _require_purpose(purpose)
+        if not callable(audit):
+            raise InvalidInput("Dreaming Experience reads require an audit sink")
+        if normalized["namespace"] != access.namespace or purpose not in access.purposes:
+            return ExperienceUnavailable(normalized)
+        result: ExperienceView | ExperienceUnavailable = ExperienceUnavailable(normalized)
+        metadata = self._dreaming_experience_metadata(access, normalized)
+        if metadata is not None:
+            reader = self._read_input if ref_type == COLLAB_INPUT else self._read_artifact
+            view = reader(access=access, ref=normalized, ref_id=ref_id, ref_version=ref_version)
+            if isinstance(view, ExperienceView) and view.readability == READABILITY_AVAILABLE:
+                tool = metadata["tool"]
+                if tool is None:
+                    result = view
+                else:
+                    # Reuse the transcript's instance and payload checks. Only
+                    # its bounded result excerpt is continuity material.
+                    page = self.read_turn_steps(
+                        namespace=access.namespace, host_instance=access.host_instance,
+                        turn_id=tool["turn_id"], access=access,
+                        after_step_no=tool["step_no"] - 1, limit=1,
+                    )
+                    if page.steps:
+                        step = page.steps[0]
+                        if step.step.step_id == tool["step_id"] and step.result_available:
+                            result = replace(view, body=step.result_excerpt)
+        audit(access, normalized, purpose, result.readability)
+        return result
+
+    def _dreaming_experience_metadata(
+        self, access: ExperienceAccess, ref: CollaborationRef,
+    ) -> dict[str, Any] | None:
+        _, kind, ref_id, ref_version = _normalize_ref(ref)
+        meta = self._projection_metadata_locked(access, ref)
+        if (
+            meta is None or meta["unresolvable"] or meta["deleted"]
+            or meta["host_instance"] != access.host_instance
+            or meta["access_ref"] != access.access_ref
+            or meta["retention"] not in ("standard", "durable")
+            or not meta["privacy_classes"].issubset(access.privacy_classes)
+            or self._source_barred_locked(
+                namespace=access.namespace, kind=kind, ref_id=ref_id, version=ref_version,
+            )
+        ):
+            return None
+        connection = self._require_connection()
+        parameters = (access.namespace, ref_id, ref_version)
+        meta["tool"] = None
+        meta["conversation_id"] = None
+        if kind == COLLAB_INPUT:
+            clause, _ = _input_eligibility_sql(None)
+            eligible = connection.execute(
+                "SELECT 1 FROM collab_inputs AS i WHERE i.namespace = ? "
+                "AND i.input_id = ? AND i.content_version = ? " + clause, parameters,
+            ).fetchone()
+            if eligible is None:
+                return None
+            turn = connection.execute(
+                "SELECT t.conversation_id FROM collab_turn_messages m "
+                "JOIN collab_turns t ON t.namespace = m.namespace AND t.turn_id = m.turn_id "
+                "WHERE m.namespace = ? AND m.kind = 'user' AND m.status = 'published' "
+                "AND json_extract(m.input_ref_json, '$.input_id') = ? "
+                "AND json_extract(m.input_ref_json, '$.content_version') = ? "
+                "ORDER BY m.turn_id LIMIT 1", parameters,
+            ).fetchone()
+            if turn is not None:
+                meta["conversation_id"] = turn["conversation_id"]
+            return meta
+        clause, _ = _artifact_eligibility_sql(None)
+        reply = connection.execute(
+            "SELECT 1 FROM collab_artifacts AS a WHERE a.namespace = ? "
+            "AND a.artifact_id = ? AND a.artifact_version = ? AND a.kind = 'reply' "
+            + clause, parameters,
+        ).fetchone()
+        if reply is not None:
+            if not self._dreaming_context_usable(access, ref_id, ref_version):
+                return None
+            turn = connection.execute(
+                "SELECT t.conversation_id FROM collab_turn_messages m "
+                "JOIN collab_turns t ON t.namespace = m.namespace AND t.turn_id = m.turn_id "
+                "WHERE m.namespace = ? AND m.artifact_id = ? AND m.artifact_version = ? "
+                "AND m.status = 'published' ORDER BY m.turn_id LIMIT 1", parameters,
+            ).fetchone()
+            if turn is not None:
+                meta["conversation_id"] = turn["conversation_id"]
+            return meta
+        tool = connection.execute(
+            f"""
+            SELECT s.turn_id, s.step_id, s.step_no, t.conversation_id FROM collab_turn_steps AS s
+            JOIN collab_turns AS t ON t.namespace = s.namespace AND t.turn_id = s.turn_id
+            JOIN collab_conversations AS c ON c.namespace = t.namespace
+            AND c.conversation_id = t.conversation_id
+            JOIN collab_artifacts AS a ON a.namespace = s.namespace
+            AND a.artifact_id = s.result_artifact_id AND a.artifact_version = s.result_artifact_version
+            WHERE s.namespace = ? AND s.result_artifact_id = ? AND s.result_artifact_version = ?
+            AND c.host_instance = ? AND s.status = 'succeeded' AND s.finished_at IS NOT NULL
+            AND t.state IN {_TERMINAL_TURN_SQL} AND a.kind = 'query_result'
+            AND a.origin_kind = 'deterministic_query' AND s.result_digest = a.content_digest
+            ORDER BY s.step_id LIMIT 1
+            """, (*parameters, access.host_instance),
+        ).fetchone()
+        if tool is None or not self._dreaming_context_usable(access, ref_id, ref_version):
+            return None
+        meta["tool"] = tool
+        meta["conversation_id"] = tool["conversation_id"]
+        return meta
+
+    def _dreaming_context_usable(
+        self, access: ExperienceAccess, artifact_id: str, artifact_version: int,
+    ) -> bool:
+        """Reject a cross-session artifact if its Context history is out of scope.
+
+        Normal reply artifacts link the Context's material sources. RG02
+        history instead uses a separate ledger to avoid an artifact chain
+        across turns. Check that ledger too before carrying a reply across
+        sessions, even when the deferred payload cleanup has yet to run.
+        """
+        connection = self._require_connection()
+        ns = access.namespace
+        # Walk both normal artifact links and the Context history ledger.
+        # UNION deduplicates the shared ancestry of successive replies.
+        contexts = connection.execute(
+            """
+            WITH RECURSIVE artifacts(artifact_id, artifact_version, context_id) AS (
+                SELECT artifact_id, artifact_version, context_id FROM collab_artifacts
+                WHERE namespace = ? AND artifact_id = ? AND artifact_version = ?
+                UNION
+                SELECT a.artifact_id, a.artifact_version, a.context_id
+                FROM artifacts f JOIN collab_artifacts a ON a.namespace = ?
+                AND (a.artifact_id, a.artifact_version) IN (
+                    SELECT h.ref_id, h.ref_version FROM collab_context_history h
+                    WHERE h.namespace = a.namespace AND h.context_id = f.context_id
+                    AND h.ref_kind = 'collab_artifact'
+                    UNION ALL
+                    SELECT s.source_id, s.source_version FROM collab_source_links s
+                    WHERE s.namespace = a.namespace AND s.owner_kind = 'artifact'
+                    AND s.owner_id = f.artifact_id AND s.owner_version = f.artifact_version
+                    AND s.source_kind = 'collab_artifact'
+                )
+                LIMIT ?
+            ) SELECT context_id FROM artifacts
+            """, (ns, artifact_id, artifact_version, ns, MAX_LIST_LIMIT + 1),
+        ).fetchall()
+        if not contexts or len(contexts) > MAX_LIST_LIMIT:
+            return False
+        seen = set()
+        for context_id in dict.fromkeys(row["context_id"] for row in contexts):
+            try:
+                self.require_context_history_live(namespace=ns, context_id=context_id, access=access)
+            except ContextStale:
+                return False
+            for history in self.context_history_rows(namespace=ns, context_id=context_id):
+                key = (history["ref_kind"], history["ref_id"], history["ref_version"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                ref = _ref_from_row(ns, dict(zip(("ref_type", "ref_id", "ref_version"), key)))
+                source = self._projection_metadata_locked(access, ref)
+                if (
+                    source is None or source["unresolvable"]
+                    or source["host_instance"] != access.host_instance
+                    or source["access_ref"] != access.access_ref
+                    or source["retention"] not in ("standard", "durable")
+                ):
+                    return False
+        return True
 
     # --------------------------------------------------------- input read
 
@@ -618,7 +947,6 @@ class ExperienceMixin:
         ref: CollaborationRef,
         ref_id: str,
         ref_version: int,
-        purpose: str,
     ) -> ExperienceView | ExperienceUnavailable:
         connection = self._require_connection()
         row = connection.execute(
@@ -660,7 +988,7 @@ class ExperienceMixin:
             if loaded.privacy_class != row["privacy_class"]:
                 raise CorruptStore("collab input privacy_class changed between reads")
 
-        view = ExperienceView(
+        return ExperienceView(
             ref=ref,
             namespace=access.namespace,
             interaction_id=interaction["interaction_id"],
@@ -675,15 +1003,6 @@ class ExperienceMixin:
             source_refs=(),
             created_at=row["recorded_at"],
         )
-        self._record_read(
-            access=access,
-            purpose=purpose,
-            ref_type=COLLAB_INPUT,
-            ref_id=ref_id,
-            ref_version=ref_version,
-            outcome=readability,
-        )
-        return view
 
     def _representative_interaction(
         self, *, namespace: str, input_id: str, content_version: int
@@ -722,7 +1041,6 @@ class ExperienceMixin:
         ref: CollaborationRef,
         ref_id: str,
         ref_version: int,
-        purpose: str,
     ) -> ExperienceView | ExperienceUnavailable:
         connection = self._require_connection()
         row = connection.execute(
@@ -796,7 +1114,7 @@ class ExperienceMixin:
             source_refs = loaded.source_refs
             attempt_ref = loaded.attempt_ref
 
-        view = ExperienceView(
+        return ExperienceView(
             ref=ref,
             namespace=access.namespace,
             interaction_id=row["interaction_id"],
@@ -811,15 +1129,6 @@ class ExperienceMixin:
             source_refs=source_refs,
             created_at=row["created_at"],
         )
-        self._record_read(
-            access=access,
-            purpose=purpose,
-            ref_type=COLLAB_ARTIFACT,
-            ref_id=ref_id,
-            ref_version=ref_version,
-            outcome=readability,
-        )
-        return view
 
     # ---------------------------------------------------------- visibility
 
@@ -1159,6 +1468,8 @@ class ExperienceMixin:
 
 __all__ = [
     "DEFAULT_LIST_LIMIT",
+    "DreamingExperiencePage",
+    "DreamingExperienceRef",
     "ExperienceAccess",
     "ExperienceMixin",
     "ExperiencePage",

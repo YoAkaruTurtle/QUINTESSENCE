@@ -13,6 +13,7 @@ import "./appearance.css";
 import { instanceSettingsPanel } from "./instanceSettings";
 import { interfaceSettings, generationSettings, loadInterfacePreferences, toggleThemePreference } from "./settings";
 import { maintenanceSettingsPanel } from "./maintenanceSettings";
+import { dreamingSettingsPanel } from "./dreamingSettings";
 import { personaPanel, preferencePanel } from "./adminPanel";
 import { webSettingsPanel } from "./webSettings";
 import { memoryRecallSettingsPanel } from "./memoryRecallSettings";
@@ -7502,6 +7503,9 @@ function renderSettingsTab(target: HTMLElement = shell.drawerBody): void {
     conversationDisplaySection(),
     generationSettings(async () => { await refreshHost(); }, info),
     maintenanceSettingsPanel(info?.session_id ?? null),
+    dreamingSettingsPanel(info, () => target === appView.settingsPage
+      ? appView.page === "settings"
+      : state.drawer.open && state.drawer.tab === "settings"),
     personaPanel({
       api: chatApi,
       info,

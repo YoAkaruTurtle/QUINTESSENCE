@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Dreaming</title>
+  </head>
+  <body>
+    <main class="orb" data-state="disconnected">
+      <div class="orb__status" title="拖动悬浮球">
+        <span class="orb__mark" aria-hidden="true">
+          <span class="orb__monogram">Q</span>
+          <img class="orb__brand" src="/brand.png" alt="" draggable="false" />
+        </span>
+        <div class="orb__copy">
+          <span class="orb__name">Dreaming</span>
+          <span class="orb__state"><span class="orb__label" role="status">未连接</span></span>
+        </div>
+      </div>
+      <button class="orb__hide" type="button" aria-label="隐藏悬浮球" title="隐藏悬浮球"></button>
+    </main>
+    <script type="module" src="/src/dreamingOrb.ts"></script>
+  </body>
+</html>

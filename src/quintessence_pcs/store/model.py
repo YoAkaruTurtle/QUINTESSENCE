@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..foundation import identifiers
@@ -86,6 +87,38 @@ _AUTHORIZATION_COLUMNS = (
     "manifest_hash, max_calls, max_output_tokens_per_call, max_wall_seconds, "
     "granted_at, expires_at, status, updated_at"
 )
+
+# The grant DDL is shared with instance-owned runtimes that keep their
+# attempts outside the canonical PCS database. The numbered migration keeps
+# its original checksum and remains the source of the constraints.
+def initialize_model_authorization_table(connection: sqlite3.Connection, migrations_dir: Path) -> None:
+    from ..foundation.migrations import split_sql_statements
+    from ..foundation.sqlite_db import table_exists
+
+    if table_exists(connection, "model_authorizations"):
+        return
+    migration = migrations_dir / "0007_model_ledger.sql"
+    sql = migration.read_text(encoding="utf-8")
+    before_attempts, boundary, _ = sql.partition("CREATE TABLE model_attempts")
+    if not boundary:
+        raise CorruptStore("PCS model authorization schema is unavailable")
+    grants = [
+        statement for statement in split_sql_statements(before_attempts)
+        if "model_authorizations" in statement
+    ]
+    if len(grants) != 4:
+        raise CorruptStore("PCS model authorization schema is unavailable")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if not table_exists(connection, "model_authorizations"):
+            for statement in grants:
+                connection.execute(statement)
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
 
 _ATTEMPT_COLUMNS = (
     "run_id, attempt_no, attempt_id, namespace, context_id, authorization_id, "
@@ -392,11 +425,13 @@ class ModelLedgerMixin:
         provider: str,
         model: str,
         manifest_hash: str,
+        authorization_ref: str | None = None,
+        at: datetime | None = None,
     ) -> ModelAuthorization | None:
         """Newest unexpired active grant matching the exact call scope.
 
-        Expired grants are skipped rather than returned: an older still-valid
-        grant, if one exists, is the one that actually authorizes the call.
+        The optional reference pins a trusted purpose binding. An explicit
+        clock also excludes grants issued after that instant.
         """
 
         ns = identifiers.require_namespace(namespace)
@@ -407,6 +442,7 @@ class ModelLedgerMixin:
             f"SELECT {_AUTHORIZATION_COLUMNS} FROM model_authorizations "
             "WHERE namespace = ? AND provider = ? AND model = ? "
             "AND manifest_hash = ? AND status = ? "
+            "AND (? IS NULL OR authorization_ref = ?) "
             "ORDER BY julianday(granted_at) DESC, granted_at DESC, "
             "authorization_id DESC",
             (
@@ -415,12 +451,14 @@ class ModelLedgerMixin:
                 model_value,
                 manifest,
                 MODEL_AUTHORIZATION_ACTIVE,
+                authorization_ref, authorization_ref,
             ),
         ).fetchall()
-        now = utc_now_rfc3339()
-        now_dt = _parse_timestamp(now, "now")
+        now_dt = at if at is not None else _parse_timestamp(utc_now_rfc3339(), "now")
         for row in rows:
             authorization = _authorization_from_row(row)
+            if at is not None and _parse_timestamp(authorization.granted_at, "granted_at") > now_dt:
+                continue
             if authorization.expires_at is None:
                 return authorization
             if _parse_timestamp(authorization.expires_at, "expires_at") > now_dt:

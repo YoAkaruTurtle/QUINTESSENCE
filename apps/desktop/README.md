@@ -323,19 +323,23 @@ Rust host can run the sidecar from the source checkout or from
 `QUINTESSENCE_DESKTOP_SIDECAR_DIR`; release builds accept only a complete
 one-folder bundle under the install directory.
 
-For the validated packaged-sidecar baseline, use CPython 3.12.10, PyInstaller
-6.16.0 and Scope Recall 3.14.1 from its pinned upstream revision; the core's wider
-Python requirement does not certify a different native distribution. Install the
-upstream project outside this source tree, never vendor its repository here.
-The build also needs locked pnpm dependencies and Cargo sources available for
-original-license collection. `collect_licenses.py` produces a complete original
-notice payload and fails on unreviewed version or notice changes.
+Prepare Scope Recall from the pinned [vendored runtime](../../third_party/scope-recall/)
+with `python tools/setup_scope_recall.py`. Debug desktop startup and the test
+runner can use the prepared checkout environment. To verify the installed
+runtime files, run `python tools/setup_scope_recall.py --check`. To run a specific
+Scope Recall suite and require the runtime, use
+`python tools/run_tests.py --scope-recall --test tests.domain.test_dreaming_scope_recall`.
 
-Build products belong outside the checkout. The scripts default to
-`<repo>/../QUINTESSENCE-Lab/build/c12b` and accept `-LabRoot`, `-RepoRoot`,
-`-CargoTarget` and `-Python` overrides. The Tauri resource mapping is injected
-from the Lab build path at bundle time, so `tauri.conf.json` contains no
-machine-specific path.
+For sidecar packaging, use CPython 3.12.10 and run
+`python tools/setup_scope_recall.py --build` to prepare PyInstaller 6.16.0.
+The build also needs locked pnpm dependencies and Cargo sources for original
+license collection. `collect_licenses.py` retains the original notices and
+checks the validated versions.
+
+Build products belong outside the checkout. The build scripts use a
+per-checkout external directory and accept `-LabRoot`, `-RepoRoot`,
+`-CargoTarget` and `-Python` overrides where applicable. The Tauri resource
+mapping is injected at bundle time.
 
 Generated icons are written by `build.rs` into `src-tauri/icons/` (ignored)
 and are not committed. A formal build first runs
@@ -348,17 +352,13 @@ gets a neutral fallback icon from `build.rs`.
 
 ### Complete development package
 
-From a PowerShell environment authorized to run local project scripts, choose
-an external build directory and prepare its Python venv with the dependencies
-above (Pillow is needed for custom artwork only). Then:
+From a PowerShell environment authorized to run local project scripts, run:
 
 ```powershell
-$RepoRoot = (Get-Location).Path
-$BuildRoot = Join-Path (Split-Path $RepoRoot -Parent) 'quintessence-build'
-$BuildPython = Join-Path $BuildRoot 'build/c12b/venv/Scripts/python.exe'
-pnpm --dir apps/desktop install --frozen-lockfile
-./apps/desktop/scripts/build_sidecar.ps1 -RepoRoot $RepoRoot -LabRoot $BuildRoot -Python $BuildPython
-./apps/desktop/scripts/build_app.ps1 -RepoRoot $RepoRoot -LabRoot $BuildRoot -AllowFallbackIcons
+python tools/setup_scope_recall.py --build
+pnpm.cmd --dir apps/desktop install --frozen-lockfile
+./apps/desktop/scripts/build_sidecar.ps1
+./apps/desktop/scripts/build_app.ps1 -AllowFallbackIcons
 ```
 
 The scripts emit a complete sidecar and NSIS development installer outside the

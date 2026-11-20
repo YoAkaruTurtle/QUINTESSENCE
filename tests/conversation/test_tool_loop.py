@@ -12,7 +12,10 @@ import hashlib
 import json
 import sys
 import unittest
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for _path in (
@@ -62,6 +65,9 @@ from quintessence_pcs.runtime.agent_protocol import ToolCall  # noqa: E402
 from quintessence_pcs.runtime.collab_protocol import (  # noqa: E402
     COLLAB_V2_PROTOCOL_VERSION,
 )
+from quintessence_pcs.runtime.context import ContinuityMaterial  # noqa: E402
+from quintessence_pcs.runtime.dreaming_history import DreamingHistory, HistoryItem  # noqa: E402
+from quintessence_pcs.runtime.http_model import _Timeout  # noqa: E402
 from quintessence_pcs.runtime.web_tools import (  # noqa: E402
     WEB_RATE_LIMITED,
     WEB_TIMEOUT,
@@ -525,6 +531,120 @@ class V2ToolLoopTests(ModelPortTestCase):
         )
 
     # -------------------------------------------------------- T01 + R2
+
+    def test_continuity_uses_one_selection_and_rebinds_for_each_tool_stage(self) -> None:
+        first_conversation = self.store.create_conversation(namespace=NS, host_instance=HOST, mode="chat")
+        self.enqueue(self.call("cognition.belief.read", {"limit": 1}))
+        self.enqueue({"action": "final", "reply": "The synthetic report is awaiting review."})
+        first, original = self.send("Retain the synthetic report task.", conversation=first_conversation)
+        self.assertEqual("completed", original.turn.state)
+        now = datetime.now(UTC) + timedelta(seconds=1)
+        directory = self.tmp_path / "dreaming"
+        directory.mkdir()
+        history = DreamingHistory(directory, instance_id=str(uuid4()), namespace=NS)
+        older = self.store.register_input(
+            namespace=NS, origin_kind="user_statement", body="The original checklist was filed.",
+            privacy_class=PRIVACY, retention="standard",
+            observed_at=(now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+        )
+        older_ref = {
+            "ref_type": "collab_input", "namespace": NS, "input_id": older.input_id,
+            "content_version": older.content_version,
+        }
+        self.store.register_interaction(
+            namespace=NS, mode="consult", activation_kind="user_input", host_instance=HOST,
+            access_ref=ACCESS_REF, policy_ref=POLICY_REF, input_refs=[older_ref], result="answered",
+        )
+        older_source = self.store.dreaming_experience_ref(self.access, ref=older_ref)
+        self.assertIsNotNone(older_source)
+        calls = []
+
+        def continuity(policy, turn, input_ref):
+            calls.append((policy, turn, input_ref))
+            return ContinuityMaterial(
+                recent=history.recent(self.store, self.access, now=now).items,
+                recalled=(HistoryItem(older_source, "untrusted index content", "model_output", "failed", False),),
+                audit=history.audit,
+            )
+
+        model_send = self.model._send
+        expected_provider_requests = len(self.provider.requests) + 1
+
+        def delete_after_first_send(*args, **kwargs):
+            response = model_send(*args, **kwargs)
+            if len(self.provider.requests) == expected_provider_requests:
+                self.store.delete_experience(
+                    namespace=NS, ref_type="collab_input", ref_id=first.input_ref["input_id"],
+                    ref_version=first.input_ref["content_version"], authorization_ref="synthetic-delete",
+                )
+            return response
+
+        self.model._send = delete_after_first_send
+        orchestrator = ConversationOrchestrator(
+            self.store, context_service=self.contexts, model=self.model,
+            protocol_version=COLLAB_V2_PROTOCOL_VERSION, limits=TurnLimits(),
+            tool_runtime_factory=self.factory, continuity=continuity, continuity_policy=lambda: self.policy,
+        )
+        self.enqueue(self.call("cognition.belief.read", {"limit": 1}))
+        self.enqueue({"action": "final", "reply": "The older checklist is available."})
+        second, execution = self.send("Where did we leave off?", orchestrator=orchestrator)
+        self.assertEqual("completed", execution.turn.state)
+        self.assertEqual(1, len(calls))
+        policy, turn, input_ref = calls[0]
+        self.assertEqual(self.policy, policy)
+        self.assertEqual(second.input_ref, input_ref)
+        self.assertEqual(second.turn.turn_id, turn.turn_id)
+        self.assertEqual(self.conversation.conversation_id, turn.conversation_id)
+        self.assertEqual("running", turn.state)
+        sent = [json.loads(row["body"].decode("utf-8"))["messages"][1]["content"]
+                for row in self.provider.requests[-2:]]
+        initial, rebuilt = (json.loads(value)["continuity"] for value in sent)
+        self.assertIn("Retain the synthetic report task.", [item["excerpt"] for item in initial["recent"]])
+        self.assertTrue(any(item["origin_kind"] == "deterministic_query" for item in initial["recent"]))
+        self.assertEqual([], rebuilt["recent"])
+        self.assertEqual("The original checklist was filed.", initial["recalled"][0]["excerpt"])
+        self.assertEqual(initial["recalled"], rebuilt["recalled"])
+        self.assertTrue(initial["recalled"][0]["untrusted"])
+        first_context, second_context = self.context_rows(second.turn.turn_id)
+        self.assertGreater(len(self.store.context_history_rows(
+            namespace=NS, context_id=first_context["context_id"],
+        )), 1)
+        self.assertEqual([older.input_id], [row["ref_id"] for row in self.store.context_history_rows(
+            namespace=NS, context_id=second_context["context_id"],
+        )])
+
+    def test_continuity_refuses_disclosure_revoked_before_physical_retry(self) -> None:
+        self.enqueue({"action": "final", "reply": "Synthetic progress."})
+        prior = self.store.create_conversation(namespace=NS, host_instance=HOST, mode="chat")
+        self.send("Synthetic earlier turn", conversation=prior)
+        directory = self.tmp_path / "dreaming"
+        directory.mkdir()
+        history = DreamingHistory(directory, instance_id=str(uuid4()), namespace=NS)
+        now = datetime.now(UTC) + timedelta(seconds=1)
+        disclosed = True
+        attempts = []
+
+        def live_policy():
+            return replace(self.policy, disclose=disclosed)
+
+        def timeout_then_revoke(*args, **kwargs):
+            nonlocal disclosed
+            attempts.append(1)
+            disclosed = False
+            raise _Timeout()
+
+        self.model._send = timeout_then_revoke
+        orchestrator = ConversationOrchestrator(
+            self.store, context_service=self.contexts, model=self.model,
+            protocol_version=COLLAB_V2_PROTOCOL_VERSION,
+            continuity=lambda *_: ContinuityMaterial(
+                recent=history.recent(self.store, self.access, now=now).items, audit=history.audit,
+            ),
+            continuity_policy=live_policy,
+        )
+        _, result = self.send("Continue", orchestrator=orchestrator)
+        self.assertEqual("failed", result.turn.state)
+        self.assertEqual(1, len(attempts))
 
     def test_two_tools_then_final_keeps_the_send_gate_live(self) -> None:
         self.propose(body=self.belief_body())

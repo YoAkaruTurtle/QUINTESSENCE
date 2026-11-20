@@ -1,0 +1,569 @@
+"""Explicit plan/apply install and receipt-backed uninstall for v1.1 host wrappers."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import uuid
+from pathlib import Path
+from types import ModuleType
+
+from . import install_claude_code, install_codex, install_dsh, install_hermes, install_workbuddy
+from .backup import atomic_write, sha256
+from .doctor import check_host_registration
+from .install_common import (
+    BACKUP_DIRNAME,
+    PACKAGE_VERSION,
+    InstallError,
+    InstallPlan,
+    InstallResult,
+    PlannedChange,
+    UninstallPlan,
+    UninstallResult,
+    normalized_path,
+    require_absolute,
+    require_interpreter,
+    validate_agent_id,
+    validate_host,
+    validate_plugin_name,
+    validate_roots,
+    within,
+)
+from .install_purge import purge_guard, purge_identity, purge_inventory, purge_owned_data
+from .install_receipt import load_receipt, receipt_file, validate_receipt_binding, write_receipt
+
+__all__ = [
+    "PACKAGE_VERSION",
+    "InstallError",
+    "InstallPlan",
+    "InstallResult",
+    "UninstallPlan",
+    "UninstallResult",
+    "apply_install",
+    "apply_uninstall",
+    "plan_install",
+    "plan_uninstall",
+]
+
+# Every host module exposes the same functions; the entry picks one instead of branching.  A host that reads its hooks
+# from its own configuration (WorkBuddy) names those files in ``host_config_files``: its target is then the host's own
+# home, which the host shares, and the install merges its entries into those files (``merged_file``) and takes them
+# out again at uninstall (``unmerged_file``) instead of owning files there.
+_HOSTS: dict[str, ModuleType] = {
+    "codex": install_codex,
+    "claude-code": install_claude_code,
+    "hermes": install_hermes,
+    "workbuddy": install_workbuddy,
+    "dsh": install_dsh,
+}
+
+
+def _instance_files(host: ModuleType, instance_root: Path) -> tuple[Path, Path]:
+    """The adapter-owned manifest and truth database that the receipt also tracks."""
+    return host.config_path(instance_root), host.data_dir(instance_root) / "memory.sqlite3"
+
+
+def _foreign_plugin_entries(target: Path, keep: set[str]) -> list[str]:
+    """Files in the plugin directory the install neither writes nor owns.  The bytecode a host's Python leaves
+    beside an imported wrapper (``__pycache__``) is not one."""
+    if not target.exists():
+        return []
+    return [
+        str(path)
+        for path in sorted(target.rglob("*"))
+        if not path.is_dir() and "__pycache__" not in path.parts and normalized_path(path) not in keep
+    ]
+
+
+def _moved_wrapper(plan: InstallPlan, receipt: dict, home_plugin: Path | None) -> tuple[dict[str, str], Path] | None:
+    """An install whose wrapper moves into the one plugin directory the host reads inside its home (a Hermes that
+    builds its own environment reads the core to install from there): what the receipt still owns, which is
+    everything outside its old wrapper directory, and that directory, which is left as it is.  None for any other
+    mismatch, which stays a conflict."""
+    if home_plugin is None or normalized_path(plan.target_plugin_dir) != normalized_path(home_plugin):
+        return None
+    old = Path(str(receipt.get("target_plugin_dir") or ""))
+    try:
+        owned = validate_receipt_binding(
+            receipt, host=plan.host, instance_root=plan.instance_root, target_plugin_dir=old
+        )
+    except InstallError:
+        return None
+    old_norm = normalized_path(old)
+    return {norm: digest for norm, digest in owned.items() if not within(norm, old_norm)}, old
+
+
+def _receipt_owned(plan: InstallPlan, receipt: dict | None, home_plugin: Path | None) -> dict[str, str]:
+    """The files an earlier install's receipt owns, each with its digest; a receipt that binds another install is a
+    conflict, unless its wrapper only moves into the host's own plugin directory (``_moved_wrapper``)."""
+    if receipt is None:
+        return {}
+    owned: dict[str, str] = {}
+    try:
+        owned = validate_receipt_binding(
+            receipt, host=plan.host, instance_root=plan.instance_root, target_plugin_dir=plan.target_plugin_dir
+        )
+    except InstallError as exc:
+        moved = _moved_wrapper(plan, receipt, home_plugin)
+        if moved is None:
+            plan.conflicts.append(str(exc))
+        else:
+            owned, old = moved
+            plan.changes.append(
+                PlannedChange(
+                    "move", str(old), f"the wrapper moves to {plan.target_plugin_dir}, where the host reads it"
+                )
+            )
+    stored_workspace = receipt.get("agent_workspace")
+    if type(stored_workspace) is str and stored_workspace.strip():
+        if plan.host != "hermes" or stored_workspace.strip() != plan.agent_workspace:
+            plan.conflicts.append("existing receipt agent_workspace mismatch")
+    return owned
+
+
+def _adoptable(adapter: ModuleType, target: Path, home_plugin: Path | None, planned) -> set[str]:
+    """A wrapper put into the host's own plugin directory by hand: those of its files the install writes itself, which
+    it replaces, each copied to the backups first."""
+    adopt = getattr(adapter, "adoptable_wrapper_files", None)
+    if adopt is None or home_plugin is None or normalized_path(target) != normalized_path(home_plugin):
+        return set()
+    return {normalized_path(path) for path in adopt(target)} & {normalized_path(path) for path in planned}
+
+
+def _written_digest(content: str | bytes) -> str:
+    """The digest of what ``atomic_write`` puts on disk for ``content``: text in this platform's line endings."""
+    import hashlib
+
+    data = content if isinstance(content, bytes) else content.replace("\n", os.linesep).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _backup_copy(path: Path, backup_root: Path, plan: InstallPlan | UninstallPlan) -> Path:
+    """Copy a file the install is about to overwrite under plugin/, instance/ or other/."""
+    norm = normalized_path(path)
+    if norm.startswith(normalized_path(plan.target_plugin_dir) + os.sep):
+        rel = Path("plugin") / path.relative_to(plan.target_plugin_dir)
+    elif norm.startswith(normalized_path(plan.instance_root) + os.sep):
+        rel = Path("instance") / path.relative_to(plan.instance_root)
+    else:
+        rel = Path("other") / path.name
+    backup_path = backup_root / rel
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def plan_install(
+    *,
+    target_plugin_dir: Path | str,
+    instance_root: Path | str,
+    project_root: Path | str | None,
+    agent_id: str,
+    python_executable: Path | str,
+    host: str,
+    test_mode: bool = False,
+    agent_workspace: str | None = None,
+    env_file: Path | str | None = None,
+    local_platforms: tuple[str, ...] | list[str] = (),
+    owner_logins: tuple[str, ...] | list[str] = (),
+) -> InstallPlan:
+    host_choice = validate_host(host)
+    adapter = _HOSTS[host_choice]
+    target = require_absolute(Path(target_plugin_dir), "target_plugin_dir")
+    instance = require_absolute(Path(instance_root), "instance_root")
+    project = require_absolute(Path(project_root), "project_root") if project_root is not None else None
+    python = require_interpreter(Path(python_executable), "python_executable")
+    agent = validate_agent_id(agent_id)
+    workspace, credentials = adapter.validate_options(agent_workspace, env_file)
+    approvals = adapter.validate_local_platforms(local_platforms)
+    logins = adapter.validate_owner_logins(owner_logins)
+    if type(test_mode) is not bool:
+        raise InstallError("test_mode must be a boolean")
+    host_files = adapter.host_config_files(target)
+    if not host_files:
+        validate_plugin_name(target.name)
+    roots = ((instance, "instance_root"), *(((project, "project_root"),) if project is not None else ()))
+    home_plugin = adapter.home_plugin_dir(instance)
+    if home_plugin is not None and normalized_path(target) == normalized_path(home_plugin):
+        # The one plugin directory a host reads from inside the home it serves; a project root that
+        # overlapped it would overlap the home too.
+        validate_roots(*roots)
+    else:
+        validate_roots((target, "target_plugin_dir"), *roots)
+
+    plan = InstallPlan(
+        host=host_choice,
+        target_plugin_dir=target,
+        instance_root=instance,
+        project_root=project,
+        agent_id=agent,
+        python_executable=python,
+        test_mode=test_mode,
+        agent_workspace=workspace,
+        env_file=credentials,
+        local_platforms=approvals,
+        owner_logins=logins,
+    )
+    receipt = load_receipt(instance)
+    owned = _receipt_owned(plan, receipt, home_plugin)
+
+    planned = adapter.planned_files(plan)
+    target_norm = normalized_path(target)
+    adoptable = _adoptable(adapter, target, home_plugin, planned)
+    keep = {normalized_path(path) for path in planned} | {norm for norm in owned if within(norm, target_norm)}
+    # A host's own home holds the host's files; only a plugin directory is the installer's alone.
+    for path in _foreign_plugin_entries(target, keep) if not host_files else ():
+        plan.conflicts.append(f"unrelated plugin file: {path}")
+
+    plan.reuse_instance = adapter.config_path(instance).is_file()
+    if plan.reuse_instance:
+        try:
+            adapter.validate_reuse(plan)
+        except Exception as exc:
+            plan.conflicts.append(str(exc))
+        else:
+            plan.changes.append(PlannedChange("validate", str(instance), "reuse initialized instance binding"))
+            for platform in adapter.unapproved_local_platforms(plan):
+                plan.changes.append(
+                    PlannedChange(
+                        "write",
+                        str(adapter.config_path(instance)),
+                        f"approve local platform {platform}: a session there that names no user binds as the local owner",
+                    )
+                )
+            for platform, login in adapter.unapproved_owner_logins(plan):
+                plan.changes.append(
+                    PlannedChange(
+                        "write",
+                        str(adapter.config_path(instance)),
+                        f"approve login {login} on {platform} as the owner: its sessions there bind with the owner's "
+                        "private memory, from any machine that login reaches the host from",
+                    )
+                )
+    else:
+        for path in adapter.foreign_instance_entries(instance):
+            plan.conflicts.append(f"foreign instance content: {path}")
+        plan.changes.append(PlannedChange("initialize", str(instance), "create empty instance via adapter helper"))
+
+    for path in sorted(planned, key=str):
+        norm = normalized_path(path)
+        if path.is_file():
+            if norm in adoptable and norm not in owned:
+                plan.changes.append(PlannedChange("replace", str(path), "a wrapper put here by hand; backed up first"))
+            elif norm not in owned:
+                plan.conflicts.append(f"no-receipt collision: {path}")
+            elif sha256(path) != owned[norm]:
+                # A Hermes agent keeps what it learns in its skills, and may edit its memory skill between two
+                # releases that leave that skill as it was: refused, the upgrade would stop before its apply, leaving
+                # the new package under the old wrapper and receipt.  A skill file whose packaged copy is the one
+                # installed before keeps the agent's edit; one the package changed is a conflict.
+                if path.name.lower() == "skill.md" and _written_digest(planned[path]) == owned[norm]:
+                    plan.kept[norm] = owned[norm]
+                    plan.changes.append(
+                        PlannedChange("keep", str(path), "keep the agent's edit: the package's copy has not changed")
+                    )
+                    continue
+                plan.conflicts.append(f"edited prior file: {path}")
+        plan.changes.append(PlannedChange("write", str(path), "install host wrapper artifact"))
+    _plan_merges(adapter, plan, host_files)
+    plan.changes.append(PlannedChange("write", str(receipt_file(instance)), "install receipt with digest"))
+    if host_files:
+        plan.changes.append(PlannedChange("restart", str(target), adapter.RESTART_NOTE))
+
+    if receipt is not None and receipt.get("host") not in {None, host_choice}:
+        plan.conflicts.append("existing receipt host mismatch")
+    return plan
+
+
+def _plan_merges(adapter: ModuleType, plan: InstallPlan, host_files: tuple[Path, ...]) -> None:
+    """What the install changes in the host's own files, or why it cannot."""
+    if host_files and not plan.target_plugin_dir.is_dir():
+        plan.conflicts.append(
+            f"{plan.target_plugin_dir} does not exist: start the host once, or name its home with --target-plugin-dir"
+        )
+        return
+    for path in host_files:
+        try:
+            merged = adapter.merged_file(plan, path)
+        except InstallError as exc:
+            plan.conflicts.append(str(exc))
+            continue
+        if merged is None:
+            plan.changes.append(
+                PlannedChange("unchanged", str(path), "already holds this entry's entries as they would be written")
+            )
+        else:
+            plan.changes.append(
+                PlannedChange(
+                    "merge",
+                    str(path),
+                    "add or update this entry's entries, keeping every "
+                    "other key; the file is copied to the backups first",
+                )
+            )
+
+
+def _stop_residents(host: str, instance_root: Path) -> None:
+    """Stop the entry's resident recall servers, for a client that may keep one (``adapters/clients/resident_entry``).
+    They write nothing.  One that cannot be stopped (its identity not proven, as on macOS, or this account may not end
+    it) is said on stderr and left to its own end; nothing here fails the install."""
+    if host not in ("codex", "claude-code", "workbuddy", "dsh"):
+        return
+    import sys
+
+    from ..adapters.clients.local_endpoint import live_residents, stop_residents
+
+    try:
+        stop_residents(instance_root, host)
+        left = [int(info["pid"]) for _paths, info, _proven in live_residents(instance_root, host, any_version=True)]
+    except Exception:  # noqa: BLE001 - see above
+        return
+    if left:
+        sys.stderr.write(
+            f"scope-recall: resident recall server {left} of {host} still runs; "
+            f"see scope-recall resident status --home {instance_root} --host {host}\n"
+        )
+
+
+def apply_install(plan: InstallPlan) -> InstallResult:
+    plan = plan_install(
+        target_plugin_dir=plan.target_plugin_dir,
+        instance_root=plan.instance_root,
+        project_root=plan.project_root,
+        agent_id=plan.agent_id,
+        python_executable=plan.python_executable,
+        host=plan.host,
+        test_mode=plan.test_mode,
+        agent_workspace=plan.agent_workspace or None,
+        env_file=plan.env_file,
+        local_platforms=plan.local_platforms,
+        owner_logins=plan.owner_logins,
+    )
+    if plan.conflicts:
+        raise InstallError("; ".join(plan.conflicts))
+    adapter = _HOSTS[plan.host]
+    planned = adapter.planned_files(plan)
+    tracked = _instance_files(adapter, plan.instance_root)
+    backup_root = plan.instance_root / BACKUP_DIRNAME / uuid.uuid4().hex
+    backups: list[str] = []
+    written: list[str] = []
+    merged: list[str] = []
+    touched: list[tuple[Path, Path | None]] = []
+    installation_id = ""
+    instance_initialized = False
+    try:
+        if plan.reuse_instance:
+            installation_id = adapter.installation_id(plan.instance_root)
+            if adapter.unapproved_local_platforms(plan) or adapter.unapproved_owner_logins(plan):
+                # The manifest is the adapter's, not a wrapper: it is rewritten in
+                # place, with the copy the rollback below restores, and the receipt
+                # tracks its new digest like any other state of it.
+                manifest_path = adapter.config_path(plan.instance_root)
+                manifest_backup = _backup_copy(manifest_path, backup_root, plan)
+                backups.append(str(manifest_backup))
+                touched.append((manifest_path, manifest_backup))
+                adapter.approve_local_platforms(plan)
+        else:
+            installation_id = adapter.initialize_instance(plan)
+            instance_initialized = True
+
+        prior_receipt = receipt_file(plan.instance_root)
+        if prior_receipt.is_file():
+            backups.append(str(_backup_copy(prior_receipt, backup_root, plan)))
+        for path, content in planned.items():
+            if normalized_path(path) in plan.kept:
+                continue
+            backup_path = _backup_copy(path, backup_root, plan) if path.is_file() else None
+            if backup_path is not None:
+                backups.append(str(backup_path))
+            atomic_write(path, content)
+            written.append(str(path))
+            touched.append((path, backup_path))
+        # The host's own files are merged afresh from what they hold now, and never enter the receipt: an uninstall
+        # takes this entry's entries out of them rather than removing them.
+        for path in adapter.host_config_files(plan.target_plugin_dir):
+            merged_content = adapter.merged_file(plan, path)
+            if merged_content is None:
+                continue
+            backup_path = _backup_copy(path, backup_root, plan) if path.is_file() else None
+            if backup_path is not None:
+                backups.append(str(backup_path))
+            atomic_write(path, merged_content)
+            merged.append(str(path))
+            touched.append((path, backup_path))
+
+        receipt_path = write_receipt(
+            plan, installation_id=installation_id, written=written, tracked=tracked, kept=plan.kept
+        )
+        written.append(str(receipt_path))
+    except Exception:
+        for path, backup_path in reversed(touched):
+            if backup_path is not None and backup_path.is_file():
+                shutil.copy2(backup_path, path)
+            elif path.is_file():
+                path.unlink()
+        if instance_initialized:
+            # The adapter already created the instance; leave a receipt that
+            # names it so a later uninstall still recognizes those files.
+            partial = [str(path) for path in tracked if path.is_file()]
+            if partial and installation_id:
+                write_receipt(plan, installation_id=installation_id, written=partial, tracked=tracked)
+        raise
+
+    # A resident recall server runs the package it was started from: one of the installation this replaces (another
+    # venv, an older version) would hold the entry's lock against the new one's.  The next prompt or conversation starts
+    # the new version's.
+    _stop_residents(plan.host, plan.instance_root)
+    return InstallResult(
+        files_written=written,
+        # Registration is what the doctor can actually observe; hook trust is a
+        # Codex operator step and full mode is never verified by an install.
+        host_registration_pending=check_host_registration(plan.host, plan.instance_root, plan.python_executable)
+        != "registered",
+        hook_trust_pending=plan.host == "codex",
+        full_mode_unverified=True,
+        receipt_path=str(receipt_path),
+        installation_id=installation_id,
+        backups=backups,
+        files_merged=merged,
+    )
+
+
+def plan_uninstall(
+    *,
+    instance_root: Path | str,
+    target_plugin_dir: Path | str | None = None,
+    purge: bool = False,
+) -> UninstallPlan:
+    instance = require_absolute(Path(instance_root), "instance_root")
+    receipt = load_receipt(instance)
+    if receipt is None:
+        raise InstallError("install receipt is required for uninstall")
+
+    host = validate_host(str(receipt.get("host") or ""))
+    adapter = _HOSTS[host]
+    if target_plugin_dir is None:
+        target_plugin_dir = str(receipt.get("target_plugin_dir") or "")
+    target = require_absolute(Path(target_plugin_dir), "target_plugin_dir")
+    plan = UninstallPlan(host=host, instance_root=instance, target_plugin_dir=target, retain_memory=True)
+
+    try:
+        owned = validate_receipt_binding(receipt, host=host, instance_root=instance, target_plugin_dir=target)
+    except InstallError as exc:
+        plan.conflicts.append(str(exc))
+        return plan
+
+    target_norm = normalized_path(target)
+    wrapper_norms = {normalized_path(path) for path in adapter.instance_wrapper_files(instance)}
+    for norm, expected in owned.items():
+        if not (within(norm, target_norm) or norm in wrapper_norms):
+            continue
+        path = Path(norm)
+        if not path.is_file():
+            continue
+        if sha256(path) != expected:
+            plan.edited_files.append(norm)
+        else:
+            plan.files_to_remove.append(norm)
+    for path in adapter.host_config_files(target):
+        try:
+            if adapter.unmerged_file(instance, path) is not None:
+                plan.unmerged_files.append(str(path))
+        except InstallError as exc:
+            plan.conflicts.append(str(exc))
+
+    if purge:
+        if plan.edited_files:
+            plan.conflicts.append("purge_refused: edited plugin files")
+        else:
+            try:
+                data_directory, _installation_id, _agent_id, _config_path = purge_identity(adapter, plan, receipt)
+                with purge_guard(data_directory):
+                    inventory = purge_inventory(adapter, plan, receipt)
+            except InstallError as exc:
+                plan.conflicts.append(str(exc))
+            else:
+                plan.purge_allowed = True
+                plan.purge_paths = [str(path) for path in inventory.files]
+                plan.retained_backups = [str(path) for path in inventory.retained_backups]
+                plan.retain_memory = False
+    return plan
+
+
+def _disable_autostart(data_dir: Path) -> None:
+    """Remove the Windows wake task bound to this instance before its wrappers go."""
+    registration_path = data_dir / "runtime-autostart.json"
+    if not registration_path.is_file():
+        return
+    from ..runtime.worker_entry import load_config
+    from .autostart import disable
+
+    registration = json.loads(registration_path.read_text(encoding="utf-8"))
+    config = load_config(registration["config_path"])
+    if config.binding.data_directory.resolve() != data_dir.resolve():
+        raise InstallError("autostart_binding_mismatch")
+    disable(registration["config_path"], remove=True)
+
+
+def apply_uninstall(plan: UninstallPlan, *, purge: bool = False) -> UninstallResult:
+    plan = plan_uninstall(instance_root=plan.instance_root, target_plugin_dir=plan.target_plugin_dir, purge=purge)
+    if plan.conflicts:
+        raise InstallError("; ".join(plan.conflicts))
+    adapter = _HOSTS[plan.host]
+    data_dir = adapter.data_dir(plan.instance_root)
+    _disable_autostart(data_dir)
+    # A resident recall server of this entry runs from the package (``adapters/clients/resident_entry``): with the hooks
+    # taken out nothing would ask it, and it would hold the package until its idle end.
+    _stop_residents(plan.host, plan.instance_root)
+    # This entry's entries come out of the host's own files, each copied to the backups first; the rest stays.
+    unmerged: list[str] = []
+    backups: list[str] = []
+    backup_root = plan.instance_root / BACKUP_DIRNAME / uuid.uuid4().hex
+    for path_text in plan.unmerged_files:
+        path = Path(path_text)
+        content = adapter.unmerged_file(plan.instance_root, path)
+        if content is None:
+            continue
+        backups.append(str(_backup_copy(path, backup_root, plan)))
+        atomic_write(path, content)
+        unmerged.append(path_text)
+
+    purged_paths: list[str] = []
+    retained_backups = list(plan.retained_backups)
+    if purge:
+        if not plan.purge_allowed:
+            raise InstallError("purge_refused:plan_not_authorized")
+        receipt = load_receipt(plan.instance_root)
+        if receipt is None:
+            raise InstallError("install receipt is required for uninstall")
+        purged_paths, retained_backups = purge_owned_data(adapter, plan, receipt)
+
+    removed: list[str] = []
+    for path_text in plan.files_to_remove:
+        path = Path(path_text)
+        if not path.is_file():
+            continue
+        path.unlink()
+        removed.append(path_text)
+        parent = path.parent
+        while parent != plan.target_plugin_dir and parent != plan.instance_root:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+            else:
+                break
+
+    return UninstallResult(
+        files_removed=removed,
+        # An entry of a shared store keeps its memory in the store, which its pointer still names.
+        memory_retained=False
+        if purge
+        else any((data_dir / name).is_file() for name in ("memory.sqlite3", "attachment.json")),
+        purged=bool(purge and purged_paths),
+        edited_files=list(plan.edited_files),
+        purged_paths=purged_paths,
+        retained_backups=retained_backups,
+        unmerged_files=unmerged,
+        backups=backups,
+    )

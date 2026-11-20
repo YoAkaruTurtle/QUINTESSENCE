@@ -361,7 +361,7 @@ class HostConfig:
 # --------------------------------------------------------------------------
 
 
-def load_config(path: str | Path) -> HostConfig:
+def load_config(path: str | Path, *, bind_instance: bool = True) -> HostConfig:
     """Read and validate one private host configuration file."""
 
     resolved = Path(path).expanduser()
@@ -389,7 +389,7 @@ def load_config(path: str | Path) -> HostConfig:
         raise ConfigError("CONFIG_INVALID", "host configuration is not JSON") from exc
     if not isinstance(document, dict):
         raise ConfigError("CONFIG_INVALID", "host configuration must be an object")
-    return _parse(document, resolved)
+    return _parse(document, resolved, bind_instance=bind_instance)
 
 
 def _parse(document: Mapping[str, Any], path: Path, *, bind_instance: bool = True) -> HostConfig:
@@ -1224,28 +1224,32 @@ def _bind_instance(config_path: Path, namespace: str, root: Path) -> None:
     lock_path = config_path.parent / ".instances.lock"
     with _registry_lock(lock_path):
         bindings = _load_registry(registry_path)
-        normalized_root = _normalize_root(str(root))
-        for other_namespace, other_binding in bindings.items():
-            if other_namespace == namespace:
-                continue
-            if _normalize_root(other_binding["root"]) == normalized_root:
-                raise ConfigError(
-                    "CONFIG_INVALID",
-                    "this instance root is already bound to another namespace",
-                )
-        existing = bindings.get(namespace)
-        if existing is not None:
-            if _normalize_root(existing["root"]) != normalized_root:
-                raise ConfigError(
-                    "CONFIG_INVALID",
-                    "this namespace is already bound to a different instance root",
-                )
+        if _check_instance_binding(bindings, namespace, root):
             return
         bindings[namespace] = {
             "root": str(root),
             "bound_at": datetime.now(timezone.utc).isoformat(),
         }
         _write_registry(registry_path, bindings)
+
+
+def _check_instance_binding(
+    bindings: Mapping[str, Any], namespace: str, root: Path
+) -> bool:
+    normalized_root = _normalize_root(str(root))
+    for other_namespace, other_binding in bindings.items():
+        if other_namespace != namespace and _normalize_root(other_binding["root"]) == normalized_root:
+            raise ConfigError(
+                "CONFIG_INVALID",
+                "this instance root is already bound to another namespace",
+            )
+    existing = bindings.get(namespace)
+    if existing is not None and _normalize_root(existing["root"]) != normalized_root:
+        raise ConfigError(
+            "CONFIG_INVALID",
+            "this namespace is already bound to a different instance root",
+        )
+    return existing is not None
 
 
 def _normalize_root(value: str) -> str:

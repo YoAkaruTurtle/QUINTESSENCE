@@ -354,7 +354,7 @@ class DirectHttpModel:
 
     # ------------------------------------------------------------- preflight
 
-    def preflight(self, *, namespace: str) -> None:
+    def preflight(self, *, namespace: str, record_exhaustion: bool = True) -> None:
         """Refuse before a Context is built if this call cannot be authorized."""
 
         authorization = self._authorization(namespace)
@@ -367,7 +367,7 @@ class DirectHttpModel:
             # The attempt count, not the status, is authoritative (it survives
             # a crash); when the authorization's own cap is what binds, make
             # the human-readable status agree with it before refusing.
-            if authorization.max_calls <= self._manifest.max_calls:
+            if record_exhaustion and authorization.max_calls <= self._manifest.max_calls:
                 self._store.mark_model_authorization_exhausted(
                     authorization.authorization_id
                 )
@@ -994,6 +994,8 @@ class DirectHttpModel:
             )
 
         try:
+            if context.continuity_guard is not None:
+                context.continuity_guard()
             snapshot = require_current_consult_context(
                 self._store, context_id=context.context_id, namespace=namespace
             )
@@ -1396,7 +1398,7 @@ class DirectHttpModel:
         def runner() -> None:
             try:
                 result = self._send_blocking(
-                    body_text, timeout=timeout, api_key=api_key
+                    body_text, timeout=timeout, api_key=api_key, cancel=event,
                 )
                 kind, value = "ok", result
             except BaseException as exc:  # noqa: BLE001 - handed to the worker
@@ -1444,7 +1446,8 @@ class DirectHttpModel:
             return value
 
     def _send_blocking(
-        self, body_text: str, *, timeout: float, api_key: str
+        self, body_text: str, *, timeout: float, api_key: str,
+        cancel: threading.Event | None = None,
     ) -> str:
         payload = body_text.encode("utf-8")
         request = urllib.request.Request(
@@ -1458,6 +1461,8 @@ class DirectHttpModel:
             },
             method="POST",
         )
+        if cancel is not None and cancel.is_set():
+            raise ModelCancelled("the maintenance wait was cancelled before send")
         try:
             with self._opener.open(request, timeout=timeout) as response:
                 status = int(response.status)

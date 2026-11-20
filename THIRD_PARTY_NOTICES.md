@@ -2,16 +2,18 @@
 
 QUINTESSENCE first-party code is licensed under **Apache-2.0**, as recorded in
 [LICENSE](LICENSE), [NOTICE](NOTICE), Python project metadata and the desktop
-Rust/npm manifests. This does not relicense any third-party work. Upstream code
-is obtained through package managers/lockfiles; this repository retains license
-texts, not a vendored copy of the Scope Recall implementation.
+Rust/npm manifests. Third-party works keep their own licenses. Scope Recall's
+pinned runtime source and license are included here. Other dependencies are
+resolved through the package managers and lockfiles.
 
-## Scope Recall: external memory runtime
+## Scope Recall memory runtime
 
 - Project: [Scope Recall](https://github.com/410979729/scope-recall-hermes).
 - Repository owner/maintainer: **410979729**; author attribution: **scope-recall contributors**.
 - Validated distribution: `hermes-scope-recall` **3.14.1**, source revision
   [`2b640260134565ac7fef3a76644e352a50866533`](https://github.com/410979729/scope-recall-hermes/tree/2b640260134565ac7fef3a76644e352a50866533).
+- The [vendored source](third_party/scope-recall/) contains the upstream wheel's runtime file set and build metadata.
+  The [provenance manifest](third_party/scope-recall-upstream.json) records the exact revision and source digests.
 - License: MIT. Original notice: **Copyright (c) 2026 scope-recall contributors**.
   The complete unmodified permission/disclaimer text is retained in
   [licenses/Scope-Recall-MIT.txt](licenses/Scope-Recall-MIT.txt).

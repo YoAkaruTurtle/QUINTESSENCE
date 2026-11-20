@@ -60,7 +60,7 @@ fn write_if_changed(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write generated icon");
 }
 
-/// Compute one pixel of the QUINTESSENCE mark: a dark rounded tile, a teal
+/// Compute one pixel of the QUINTESSENCE mark: a dark rounded tile, a red
 /// ring with a gap, and a short tail.  Alpha outside the tile is zero.
 fn pixel(x: u32, y: u32, size: u32) -> [u8; 4] {
     let s = size as f32;
@@ -88,9 +88,9 @@ fn pixel(x: u32, y: u32, size: u32) -> [u8; 4] {
         && distance < radius * 0.86
         && distance > radius * 0.42;
     if (ring && !gap) || tail {
-        return [53, 160, 140, 255];
+        return [237, 54, 77, 255];
     }
-    [13, 28, 32, 255]
+    [17, 14, 18, 255]
 }
 
 fn png(width: u32, height: u32, mut color: impl FnMut(u32, u32) -> [u8; 4]) -> Vec<u8> {

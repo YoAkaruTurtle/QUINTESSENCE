@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class AdapterConfig:
     scope_id: str
     session_id: str
     test_mode: bool = True
+    immutable_search: bool = False
 
 
 class SubprocessCaptureAdapter:
@@ -93,6 +95,8 @@ class SubprocessCaptureAdapter:
             "scope_id": self._config.scope_id,
             "timeout_seconds": float(timeout_seconds),
         }
+        if self._config.immutable_search:
+            request["immutable"] = True
         return self._invoke(request, timeout_seconds)
 
     def recall(
@@ -171,7 +175,12 @@ class SubprocessCaptureAdapter:
     ) -> dict[str, Any]:
         payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
         env = os.environ.copy()
-        env["PYTHONPATH"] = self._config.package_path
+        python_paths = [self._config.package_path]
+        if self._config.immutable_search and self._config.entry != "builtin:scope-recall":
+            python_paths.append(str(Path(__file__).resolve().parents[3]))
+            if getattr(sys, "_quintessence_offline_guard", False):
+                python_paths.extend(os.environ.get("PYTHONPATH", "").split(os.pathsep))
+        env["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUTF8"] = "1"
         try:

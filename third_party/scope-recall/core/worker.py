@@ -1,0 +1,643 @@
+"""Bounded durable-work drain. Model and vector calls stay outside SQLite transactions."""
+
+from __future__ import annotations
+
+import math
+import time
+from collections import Counter
+from dataclasses import dataclass
+from functools import partial
+
+from ..contracts import ContractError, TrustedContext
+from . import private
+from .admission import resume_deferred
+from .candidate_lifecycle import PROCESS_BATCH_LIMIT, CandidateEvaluator
+from .consolidate import candidate_evaluation_messages, consolidation_messages
+from .storage import SQLiteStorage
+from .work_storage import CAPACITY_REFUSALS, MAX_RECOVERY_PAGE
+from .worker_candidates import process_candidate_evaluation
+from .worker_consolidation import (
+    ConsolidationModel,
+    build_consolidation_model,
+    process_consolidate,
+)
+from .worker_outcomes import BUDGET_PAUSE_ERRORS, budget_left, hold_for_private_mode
+from .worker_projection import (
+    EmbedGroupRefused,
+    EmbedPort,
+    PurgePort,
+    complete_embed_group,
+    prepare_embed_group,
+    process_embed,
+    process_purge,
+    process_rebuild_projection,
+    publish_embed_group,
+)
+
+__all__ = [
+    "FINALIZE_MARGIN_SECONDS",
+    "ConsolidationModel",
+    "EmbedPort",
+    "PurgePort",
+    "WorkerConfig",
+    "WorkerItemReceipt",
+    "WorkerReceipt",
+    "build_consolidation_model",
+    "drain_worker",
+]
+
+#: Provider answers that mean "send less traffic".  Distinct from the
+#: recoverable set: that one says whether an item may be retried, this one
+#: decides whether the rest of the pass should even ask.  Every capacity
+#: refusal is one, taken from ``CAPACITY_REFUSALS`` and not copied (two
+#: hand-kept copies of the set would drift apart).  So is a generation the
+#: provider interrupted, for lack of capacity or at its own end: the next item
+#: meets it too.  That one was a billed answer, so unlike a refusal it is not
+#: refunded; it costs its item an attempt.
+_RATE_LIMITED_ERRORS = CAPACITY_REFUSALS | {"model_output_interrupted"}
+
+#: Seconds a model-bound item keeps back, beyond its one bounded request, to
+#: record the verdict under its lease: a few fenced SQLite writes and, for
+#: embed, the vector publish.  Finalization refuses to write once the pass is
+#: spent, so an item claimed without this stays leased until its lease expires,
+#: and a candidate evaluation, whose attempt marker is already committed, is
+#: then failed as interrupted for good.
+FINALIZE_MARGIN_SECONDS = 5.0
+#: Work that waits on an auxiliary provider; purge and projection rebuilds never do.
+_HOLDABLE_WORK_TYPES = frozenset({"consolidate", "embed", "evaluate_candidate"})
+#: Truncated source-trigger pages a pass continues before it claims work.  At
+#: one page a pass, a source matching a thousand candidates would take sixty
+#: passes, started back to back, each paying a whole pass to link sixteen of them.
+SOURCE_PAGES_PER_PASS = 16
+#: Seconds a pass waits after each of those pages.  Each page is its own write, but with the next one begun at once a
+#: hook waiting for the writer lease, which polls every 10 ms (``core/storage.py``), would rarely land in the gap, and
+#: would wait behind every page of the pass instead of one.  Two polls' worth lets it in.
+PAGE_TURN_SECONDS = 0.02
+#: Seconds of those pages a pass spends at most.  A page holds the writer lease while it matches its source
+#: against the candidates sharing a term: 0.5-7 s a page on a shared store with thousands of candidates, so
+#: sixteen pages would hold it for half a minute of each pass.  A small store's pages take
+#: milliseconds and all sixteen still fit.
+SOURCE_PAGE_SECONDS = 5.0
+#: Source embeddings one group may carry.  The adapter sends them as consecutive
+#: full provider requests (``runtime/models.py``: a hundred each), so this is
+#: how many items share one read, one group commit and one set of per-pass costs
+#: -- the numbers a drain is actually paying.  A pass still claims no more than
+#: its own ``max_items``.
+EMBED_BATCH_LIMIT = 1000
+#: Least lease time a group member must have left to still ask for itself.  Members
+#: are claimed together, so asked one at a time, the last ones would be asked after the
+#: lease had run out and dropped as stale, with the attempt spent and the vector paid for.
+GROUP_REQUEST_FLOOR_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    owner_id: str
+    lease_seconds: float = 60.0
+    max_items: int = 32
+    auto_retry_cooldown_seconds: float = 3600.0
+    max_auto_recoveries: int = 2
+    purge_only: bool = False
+    admission_policy: object | None = None
+    candidate_batch_limit: int = PROCESS_BATCH_LIMIT
+    #: Source embeddings a pass may ask for in one request.  One request per
+    #: source would make a vector store of a hundred thousand sources take days
+    #: of wall clock to rebuild, for minutes of tokens.
+    embed_batch_limit: int = EMBED_BATCH_LIMIT
+    #: The bound the caller clamps every model and embedding request to (the
+    #: runtime's ``request_seconds``).  None means the ports are unbounded and
+    #: each call gets whatever the pass has left, so no reserve can be known.
+    request_seconds: float | None = None
+    #: The bound consolidation and candidate-evaluation requests are clamped to instead, when the runtime gives
+    #: them a longer one (``model_request_seconds``).  None: ``request_seconds``.
+    model_request_seconds: float | None = None
+    #: Work types whose provider is on hold (runtime/model_budget.py): not
+    #: claimed at all this pass, so no item is leased only to be parked.
+    held_work_types: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if type(self.owner_id) is not str or not self.owner_id:
+            raise ValueError("owner_id is required")
+        if (
+            type(self.lease_seconds) not in (int, float)
+            or not math.isfinite(self.lease_seconds)
+            or self.lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be positive")
+        if type(self.max_items) is not int or not 1 <= self.max_items <= 1000:
+            raise ValueError("max_items must be between 1 and 1000")
+        if (
+            type(self.auto_retry_cooldown_seconds) not in (int, float)
+            or not math.isfinite(self.auto_retry_cooldown_seconds)
+            or not 60 <= self.auto_retry_cooldown_seconds <= 86400
+        ):
+            raise ValueError("auto_retry_cooldown_seconds")
+        if type(self.max_auto_recoveries) is not int or not 0 <= self.max_auto_recoveries <= 4:
+            raise ValueError("max_auto_recoveries")
+        if type(self.purge_only) is not bool:
+            raise ValueError("purge_only")
+        if type(self.candidate_batch_limit) is not int or not 1 <= self.candidate_batch_limit <= PROCESS_BATCH_LIMIT:
+            raise ValueError("candidate_batch_limit")
+        if type(self.embed_batch_limit) is not int or not 1 <= self.embed_batch_limit <= EMBED_BATCH_LIMIT:
+            raise ValueError("embed_batch_limit")
+        for name in ("request_seconds", "model_request_seconds"):
+            value = getattr(self, name)
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be positive")
+        if type(self.held_work_types) is not frozenset or not self.held_work_types <= _HOLDABLE_WORK_TYPES:
+            raise ValueError("held_work_types")
+
+
+def _request_reserves(config: WorkerConfig, ports) -> dict[str, float]:
+    """The pass time each model-bound work type needs left before one is claimed: its request's ceiling and the
+    margin to record the verdict.  Consolidation and candidate evaluation may have a longer ceiling than embedding
+    (``model_request_seconds``); each waits only for its own."""
+    if config.request_seconds is None:
+        return {}
+    reserve = config.request_seconds + FINALIZE_MARGIN_SECONDS
+    model = reserve if config.model_request_seconds is None else config.model_request_seconds + FINALIZE_MARGIN_SECONDS
+    return {work_type: model if work_type in _MODEL_REQUEST_TYPES else reserve for work_type in ports}
+
+
+#: Work whose port is the consolidation model, bounded by ``model_request_seconds`` when one is set.
+_MODEL_REQUEST_TYPES = frozenset({"consolidate", "evaluate_candidate"})
+
+
+@dataclass(frozen=True)
+class WorkerItemReceipt:
+    work_id: int
+    work_type: str
+    disposition: str
+    state: str
+    error_code: str | None = None
+    error_detail: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkerReceipt:
+    processed: int
+    completed: int
+    failed: int
+    retried: int
+    skipped: int
+    stale: int
+    obsolete: int
+    idle: bool
+    items: tuple[WorkerItemReceipt, ...]
+    deferred: int = 0
+    recovered: int = 0
+    unavailable_work_types: tuple[str, ...] = ()
+    #: Whether the pass's settle sweep saw every candidate ready (``_recover_failed_work``).
+    settle_swept: bool = False
+    #: Whether it filled its page, so that more may be ready behind it.
+    settle_partial: bool = False
+
+
+def _resume_admission(
+    storage, clock, context, config: WorkerConfig, started: float, budget: float, *, candidate_available: bool
+) -> None:
+    """Wake deferred captures and settle candidate pages before any claim."""
+    resume_deferred(
+        storage,
+        clock,
+        context,
+        config.admission_policy,
+        limit=min(16, config.max_items),
+        remaining_seconds=min(1.0, budget_left(started, clock, budget)),
+    )
+    # Each page is chosen in a read and linked in a write of its own, so a capture waits behind at most one
+    # page's links, never its matching; the pages may take at most half of the pass, and at most
+    # SOURCE_PAGE_SECONDS, on the pass's clock.
+    pages_started = clock.monotonic()
+    for _ in range(SOURCE_PAGES_PER_PASS):
+        if budget_left(started, clock, budget) <= budget / 2:
+            break
+        with storage.read(context, remaining_seconds=min(1.0, budget_left(started, clock, budget))) as tx:
+            page = tx.candidates.next_source_page()
+        if page is None:
+            break
+        with storage.write(context, remaining_seconds=min(1.0, budget_left(started, clock, budget))) as tx:
+            tx.candidates.resume_source_pages(now=clock.utc_now(), page=page)
+        time.sleep(PAGE_TURN_SECONDS)
+        if clock.monotonic() - pages_started >= SOURCE_PAGE_SECONDS:
+            break
+    page = min(config.candidate_batch_limit, config.max_items)
+    with storage.write(context, remaining_seconds=min(1.0, budget_left(started, clock, budget))) as tx:
+        tx.candidates.backfill(now=clock.utc_now(), limit=page)
+        tx.candidates.archive_dormant(now=clock.utc_now(), limit=page)
+        if not candidate_available:
+            tx.candidates.mark_capability_unavailable()
+
+
+def _queued_work_types(storage, clock, context, started: float, budget: float, kinds: list[str]) -> tuple[str, ...]:
+    """Which of ``kinds`` have queued rows, so the receipt reports only real gaps."""
+    if not kinds:
+        return ()
+    with storage.read(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+        visible, params = tx.work._visible_filter()
+        queued = {
+            row[0]
+            for row in tx._check().execute(
+                f"SELECT DISTINCT work_type FROM work_items WHERE state IN ('pending','failed','leased') AND {visible}",
+                params,
+            )
+        }
+    return tuple(kind for kind in kinds if kind in queued)
+
+
+#: Candidate evaluations allowed to wait before a pass stops queueing more.
+#:
+#: Scheduling settled candidates is how a candidate whose evidence stopped
+#: arriving is finally judged.  Run every pass however deep the queue already
+#: is, it would grow the queue by eight a pass, since a pass evaluates at most
+#: ``candidate_batch_limit`` of them, to hundreds waiting for hours, while every
+#: one of them costs a model call to get there.  Above this depth the work is
+#: already recorded and waiting; adding more only ages it.  Twelve passes'
+#: worth, an hour at the default wake, so an idle instance clears the ceiling
+#: before the next sweep.
+CANDIDATE_QUEUE_CEILING = PROCESS_BATCH_LIMIT * 12
+
+#: Stale pending candidates a pass returns to waiting for evidence, each checked again under the writer lease;
+#: 2,045 of them, as one store held, take about 64 passes.
+STALE_PENDING_PAGE = 32
+
+
+#: Seconds a pass may still spend handing untouched leases back once its budget
+#: is gone.  The usual reason a group is cut short is that the pass ran out of
+#: time; with nothing handed back then, every item claimed and never looked at
+#: would keep its spent attempt, and after three such passes it would be failed
+#: as ``lease_exhausted`` without having been tried once (888 embeddings in an
+#: hour on a store whose ``max_items`` was 1000, through all four automatic
+#: recoveries).  This is one page of UPDATEs; the runtime keeps a margin of the
+#: handed deadline for what follows the drain and the watchdog waits
+#: ``KILL_GRACE_SECONDS`` beyond it.
+RELEASE_SECONDS = 1.0
+
+
+def _release_group(
+    storage, clock, context, members, error_code, started: float, budget: float, *, seconds: float = 0
+) -> None:
+    """Return leased work nobody will look at this pass, without spending its attempt."""
+    if not members:
+        return
+    try:
+        with storage.write(context, remaining_seconds=max(budget_left(started, clock, budget), RELEASE_SECONDS)) as tx:
+            now = clock.utc_now()
+            for member in members:
+                tx.work.defer_without_attempt(
+                    *member.lease, now=now, error_code=str(error_code or "pass_ended"), seconds=seconds
+                )
+    except ContractError:
+        # The lease expires on its own; a failure to hand work back early is
+        # never worth failing a pass over.
+        return
+
+
+def _private_allowed(storage, clock, context, allowed: frozenset[str], started: float, budget: float) -> frozenset[str]:
+    """Drop every optional outbound work type while a store-wide full interval is open."""
+    with storage.read(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+        now = clock.utc_now()
+        rules = private.active_intervals(tx, now)
+    if private.source_blocked(rules, None):
+        return allowed - _HOLDABLE_WORK_TYPES
+    return allowed
+
+
+def _run_member(storage, clock, context, member, *, run, started: float, budget: float):
+    """Run one processor, unless a full interval covers its subject: then hold it without a provider call."""
+    if private.work_blocked(storage, clock, context, member):
+        return hold_for_private_mode(storage, clock, context, member, started=started, budget=budget)
+    return run(storage, clock, context, member, started=started, budget=budget)
+
+
+def _other_work_ready(storage, clock, context, started: float, budget: float, kinds: frozenset[str]) -> bool:
+    """Whether work this pass can still do, other than candidate evaluation, is ready now."""
+    if not kinds:
+        return False
+    with storage.read(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+        return tx.work.other_work_ready(now=clock.utc_now(), kinds=kinds)
+
+
+def _recover_failed_work(
+    storage, clock, context, config: WorkerConfig, allowed: frozenset[str], started: float, budget: float
+) -> tuple[int, str | None]:
+    """Grant bounded fresh attempts to failures a later fix or budget may have cured.  Also says how far the settle
+    sweep looked, for the wake plan (``runtime/scheduling``): ``"complete"``, ``"partial"`` when it filled its page
+    (more may be ready behind it), or ``None`` when it did not look (a provider hold, no evaluator, a purge-only
+    pass, the evaluation queue full)."""
+    settled: tuple = ()
+    stale: tuple = ()
+    sweep = None
+    if "evaluate_candidate" in allowed:
+        # Which settled candidates to queue is read before the write: finding them walks every candidate still
+        # settling, and under the writer lease that was 7.6 s of each pass on a large shared store.
+        with storage.read(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+            if tx.work.pending_depth("evaluate_candidate") < CANDIDATE_QUEUE_CEILING:
+                page = min(config.candidate_batch_limit, config.max_items)
+                settled = tx.candidates.settled_to_schedule(now=clock.utc_now(), limit=page)
+                sweep = "complete" if len(settled) < page else "partial"
+            stale = tx.candidates.stale_pending(now=clock.utc_now(), limit=STALE_PENDING_PAGE)
+    with storage.write(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+        recovery_page = min(MAX_RECOVERY_PAGE, config.max_items)
+        recovered = tx.work.recover_invalid_derivations(
+            now=clock.utc_now(), allowed_work_types=allowed, limit=recovery_page
+        )
+        # Corrections recorded with no claim to settle them (``close_unplaceable_updates``).
+        tx.claims.close_unplaceable_updates(limit=64)
+        if "consolidate" in allowed:
+            recovered += tx.work.recover_oversized_consolidations(
+                now=clock.utc_now(), formatter=consolidation_messages, limit=min(8, config.max_items)
+            )
+        if "evaluate_candidate" in allowed:
+            # Evidence stops arriving silently, so something has to notice.
+            # observe_source does not schedule while a candidate is still
+            # collecting; this is where a settled one finally gets its one
+            # evaluation.  See core/candidate_debounce.py.  A pass queues at
+            # most what it can also evaluate, and stops queueing entirely once
+            # the queue is deeper than passes can reach, so a backlog cannot
+            # grow on its own: what is not queued now waits and is queued later.
+            if settled:
+                tx.candidates.schedule_settled_candidates(
+                    now=clock.utc_now(), limit=min(config.candidate_batch_limit, config.max_items), refs=settled
+                )
+            # Pending with nothing new to ask (``stale_pending``) is returned to waiting for evidence.
+            if stale:
+                tx.candidates.settle_stale_pending(stale, now=clock.utc_now())
+            recovered += tx.candidates.reschedule_budget_blocked_candidates(
+                now=clock.utc_now(), limit=min(8, config.max_items)
+            )
+            # The candidate twin of recover_oversized_consolidations, which
+            # filters work_type='consolidate' and reformats a single source, so
+            # it never reaches these rows.
+            recovered += tx.candidates.recover_oversized_evaluations(
+                now=clock.utc_now(), formatter=candidate_evaluation_messages, limit=min(8, config.max_items)
+            )
+            # An attempt begun and never finished leaves nothing recorded; the
+            # candidate would wait for evidence it already has.
+            recovered += tx.work.recover_interrupted_attempts(
+                now=clock.utc_now(), allowed_work_types=allowed, limit=min(8, config.max_items)
+            )
+        recovered += tx.work.recover_transient_failures(
+            now=clock.utc_now(),
+            allowed_work_types=allowed,
+            cooldown_seconds=config.auto_retry_cooldown_seconds,
+            max_recoveries=config.max_auto_recoveries,
+            limit=recovery_page,
+        )
+        if "purge" in allowed:
+            recovered += tx.deletions.requeue_unfinished_purges(now=clock.utc_now(), limit=min(8, config.max_items))
+    return recovered, sweep
+
+
+def _pass_work_types(
+    storage, clock, context, config: WorkerConfig, ports: dict, started: float, budget: float
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The work types a pass may claim, and the queued ones it has no port for (after resuming admission)."""
+    if config.purge_only:
+        return frozenset({"purge"}), ()
+    allowed = (
+        frozenset({"purge", "rebuild_projection", *(kind for kind, port in ports.items() if port is not None)})
+        - config.held_work_types
+    )
+    _resume_admission(
+        storage, clock, context, config, started, budget, candidate_available=ports["evaluate_candidate"] is not None
+    )
+    unavailable = _queued_work_types(
+        storage, clock, context, started, budget, [kind for kind, port in ports.items() if port is None]
+    )
+    return _private_allowed(storage, clock, context, allowed, started, budget), unavailable
+
+
+def _embed_group(storage, clock, context, group: tuple, embed, started: float, budget: float):
+    """One request for a claimed embedding group's texts, one commit for its vectors, one record for the members it
+    wrote: the group as processed, its prepared and published vectors, and each recorded member's outcome."""
+    item = group[0]
+    try:
+        prepared_group = prepare_embed_group(
+            storage, clock, context, group, embed=embed, started=started, budget=budget
+        )
+    except EmbedGroupRefused as refusal:
+        # The provider refused the group's request: no member was tried,
+        # so the whole group goes back unspent, parked as long as one
+        # refused member would be, and this pass asks for no more.
+        _release_group(
+            storage,
+            clock,
+            context,
+            group,
+            refusal.error_code,
+            started,
+            budget,
+            seconds=3600 if refusal.error_code in BUDGET_PAUSE_ERRORS else 0,
+        )
+        return (item,), {}, {}, {item.work_id: ("deferred", refusal.error_code, "pending")}
+    # One commit for the group's vectors, for the same reason as one
+    # request for its texts: the per-item cost is the store's lock,
+    # not the work.  Then one record for the members it wrote.
+    published_group = publish_embed_group(
+        storage,
+        clock,
+        context,
+        group,
+        embed=embed,
+        prepared_group=prepared_group,
+        started=started,
+        budget=budget,
+    )
+    recorded = complete_embed_group(
+        storage, clock, context, group, published=published_group, started=started, budget=budget
+    )
+    return group, prepared_group, published_group, recorded
+
+
+def _port_refused(disposition: str, error_code) -> bool:
+    """Whether the port refused an item before any attempt (budget, credentials)."""
+    return disposition == "deferred" and error_code in BUDGET_PAUSE_ERRORS
+
+
+def _rate_limited(error_code) -> bool:
+    """Whether the provider answered an item with a rate limit, a capacity refusal or an interrupted generation."""
+    return str(error_code or "").lower() in _RATE_LIMITED_ERRORS
+
+
+def drain_worker(
+    storage: SQLiteStorage,
+    clock,
+    context: TrustedContext,
+    *,
+    config: WorkerConfig,
+    consolidation: ConsolidationModel | None = None,
+    candidate: CandidateEvaluator | None = None,
+    embed: EmbedPort | None = None,
+    purge: PurgePort | None = None,
+    remaining_seconds: float = 30.0,
+) -> WorkerReceipt:
+    """Process ready work until idle or the bounded limit is reached."""
+    if type(remaining_seconds) not in (int, float) or not math.isfinite(remaining_seconds) or remaining_seconds <= 0:
+        raise ContractError("DEADLINE_EXCEEDED")
+    started = clock.monotonic()
+    budget = remaining_seconds
+    if candidate is None and callable(getattr(consolidation, "evaluate_candidate", None)):
+        candidate = consolidation  # type: ignore[assignment]
+    # Missing optional ports are a capability state, not attempted model work.
+    # Their items remain pending and become eligible at the next configured wakeup.
+    ports = {"consolidate": consolidation, "embed": embed, "evaluate_candidate": candidate}
+    allowed, unavailable = _pass_work_types(storage, clock, context, config, ports, started, budget)
+    recovered, sweep = _recover_failed_work(storage, clock, context, config, allowed, started, budget)
+    processors = {
+        "consolidate": partial(process_consolidate, model=consolidation),
+        "embed": partial(process_embed, embed=embed),
+        "evaluate_candidate": partial(process_candidate_evaluation, evaluator=candidate),
+        "rebuild_projection": process_rebuild_projection,
+        "purge": partial(process_purge, purge=purge),
+    }
+    receipts: list[WorkerItemReceipt] = []
+    dispositions: Counter[str] = Counter()
+    claimed_types: Counter[str] = Counter()
+    # Every optional port is one bounded model or embedding request.  Its work
+    # is claimed only while the pass still covers that request and the margin
+    # to record the verdict; purge and rebuild_projection are local work and
+    # may use the tail of the pass.
+    reserves = _request_reserves(config, ports)
+    paused: list[str] = []
+    candidate_ceiling = min(config.candidate_batch_limit, config.max_items)
+    while len(receipts) < config.max_items and budget_left(started, clock, budget) > 0:
+        left = budget_left(started, clock, budget)
+        allowed = allowed - {work_type for work_type, reserve in reserves.items() if left < reserve}
+        # Every second claim prefers fresh conversation over the backlog.  The
+        # first claim of a pass stays FIFO, so the lane holds at most half of
+        # any pass, a one-claim pass included, and the oldest work keeps moving
+        # however busy the chat is.  A default runtime pass (120 s, 45 s
+        # requests) fits two model requests, so each such pass reaches the lane.
+        with storage.write(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+            claimed = tx.work.claim_next(
+                config.owner_id,
+                clock.utc_now(),
+                lease_seconds=config.lease_seconds,
+                limit=1,
+                allowed_work_types=allowed,
+                fresh_lane=len(receipts) % 2 == 1,
+            )
+        if not claimed:
+            break
+        item = claimed[0]
+        group: tuple = (item,)
+        prepared_group: dict = {}
+        published_group: dict = {}
+        recorded: dict = {}
+        claimed_at = clock.monotonic()
+        if item.work_type == "embed" and embed is not None:
+            # Embedding is one request per source; asking for the pass's other
+            # ready sources in the same one is the difference between a rebuild
+            # measured in hours and one measured in days.  The extra items are
+            # leased exactly as this one was and are processed right here, so
+            # none is left leased on a pass that ends early.
+            room = min(config.embed_batch_limit, config.max_items - len(receipts)) - 1
+            if room > 0:
+                with storage.write(context, remaining_seconds=budget_left(started, clock, budget)) as tx:
+                    group = (
+                        item,
+                        *tx.work.claim_next(
+                            config.owner_id,
+                            clock.utc_now(),
+                            lease_seconds=config.lease_seconds,
+                            limit=room,
+                            allowed_work_types=frozenset({"embed"}),
+                        ),
+                    )
+                claimed_at = clock.monotonic()
+                group, prepared_group, published_group, recorded = _embed_group(
+                    storage, clock, context, group, embed, started, budget
+                )
+        disposition, error_code = "skipped", None
+        for member in group:
+            if member.work_id not in recorded:
+                continue
+            claimed_types[member.work_type] += 1
+            disposition, error_code, state = recorded[member.work_id]
+            dispositions[disposition] += 1
+            receipts.append(WorkerItemReceipt(member.work_id, member.work_type, disposition, state, error_code))
+            item = member
+        # A member that still has to ask for itself is bounded by the lease it was
+        # claimed with, not only by the pass: asked after the lease ran out, its
+        # vector would be paid for and dropped as stale.
+        lease_end = (claimed_at - started) + config.lease_seconds - FINALIZE_MARGIN_SECONDS
+        rest = [member for member in group if member.work_id not in recorded]
+        for index, member in enumerate(rest):
+            member_budget = budget
+            if len(group) > 1:
+                if budget_left(started, clock, lease_end) < GROUP_REQUEST_FLOOR_SECONDS:
+                    _release_group(storage, clock, context, rest[index:], "lease_ending", started, budget)
+                    break
+                member_budget = min(budget, lease_end)
+            claimed_types[member.work_type] += 1
+            run = (
+                partial(process_embed, embed=embed, prepared_group=prepared_group, published_group=published_group)
+                if member.work_type == "embed"
+                else processors[member.work_type]
+            )
+            outcome = _run_member(storage, clock, context, member, run=run, started=started, budget=member_budget)
+            disposition, error_code, state = outcome
+            dispositions[disposition] += 1
+            receipts.append(
+                WorkerItemReceipt(
+                    member.work_id, member.work_type, disposition, state, error_code, getattr(outcome, "detail", None)
+                )
+            )
+            item = member
+            refused = _port_refused(disposition, error_code) or _rate_limited(error_code)
+            if refused or budget_left(started, clock, budget) <= 0:
+                # The rest of this group was leased for a request that is not
+                # going to be made. Hand it back unspent rather than holding it
+                # until the lease expires.
+                _release_group(storage, clock, context, rest[index + 1 :], error_code, started, budget)
+                break
+        # Standing a work type down for the rest of the pass.  The per-item
+        # backoff still decides when each item returns; this only decides how
+        # many of one type are tried in one pass.
+        if _port_refused(disposition, error_code):
+            # The port refused before any attempt (budget, credentials) and
+            # would refuse the next item the same way.  A long source that
+            # checkpointed a page is deferred too, but without a refusal code:
+            # it is pending again and says nothing about the port.
+            allowed = allowed - {item.work_type}
+            # Reported like a missing port, so the supervisor sleeps the type
+            # instead of starting the next pass at once for the next item:
+            # without an embedding credential, a store would otherwise park one
+            # waiting item every few seconds.
+            paused.append(item.work_type)
+        if _rate_limited(error_code):
+            # A provider that just answered 429 will answer 429 to the next item
+            # too.  Each item backing off on its own is no backoff at all.
+            allowed = allowed - {item.work_type}
+        if "evaluate_candidate" in allowed and claimed_types["evaluate_candidate"] >= candidate_ceiling:
+            # The batch limit is there so a busy candidate queue never holds
+            # captured conversation back.  With nothing else ready there is
+            # nothing to hold back, and standing down anyway would let a
+            # backlog outlive the passes meant to drain it: evaluating eight a
+            # pass while the schedulers queue up to sixteen grows the queue by
+            # eight a pass with no new conversation at all.
+            if candidate_ceiling < config.max_items and not _other_work_ready(
+                storage, clock, context, started, budget, allowed - {"evaluate_candidate"}
+            ):
+                candidate_ceiling = config.max_items
+            else:
+                allowed = allowed - {"evaluate_candidate"}
+        if budget_left(started, clock, budget) <= 0:
+            break
+    return WorkerReceipt(
+        processed=len(receipts),
+        completed=dispositions["completed"],
+        failed=dispositions["failed"],
+        retried=dispositions["retry"],
+        skipped=dispositions["skipped"],
+        stale=dispositions["stale"],
+        obsolete=dispositions["obsolete"],
+        idle=not receipts,
+        items=tuple(receipts),
+        deferred=dispositions["deferred"],
+        recovered=recovered,
+        unavailable_work_types=tuple(dict.fromkeys((*unavailable, *paused))),
+        settle_swept=sweep == "complete",
+        settle_partial=sweep == "partial",
+    )

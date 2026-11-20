@@ -2,18 +2,31 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO / "src"), str(REPO / "apps/desktop/sidecar")]
-from instance_manager import CONFIG, MANIFEST, InstanceError, prepare
+from instance_manager import (
+    CONFIG, DREAMING, DREAMING_OWNER, MANIFEST, InstanceError,
+    _publish_dreaming_directory, prepare, prepare_dreaming_root,
+)
 from host_config import load_config
 from quintessence_pcs.store import CognitionStore
 from quintessence_pcs.domains.persona.profiles import PersonaProfileService
+from tests.desktop.support import (
+    BridgeProcess, SIDECAR_DIR, SRC_DIR, config_document, review_proposal, seed_work,
+)
 from tests.store.support import append, RECORD_ID
 
 
@@ -35,6 +48,408 @@ class InstanceFolderTests(unittest.TestCase):
         with self.assertRaises(InstanceError) as caught:
             prepare(self.root)
         self.assertEqual(code, caught.exception.code)
+
+    def _snapshot(self, *, include_dreaming=False):
+        files = {}
+        for path in self.root.rglob("*"):
+            relative = path.relative_to(self.root)
+            if include_dreaming or relative.parts[0] != DREAMING:
+                stat = path.stat()
+                identity = (stat.st_dev, stat.st_ino)
+                files[relative] = (
+                    (*identity, stat.st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+                    if path.is_file() else identity
+                )
+        return files
+
+    def _instance_cli(self, action="--prepare-dreaming-startup", *, root=None, flags=()):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(SRC_DIR), str(SIDECAR_DIR), env.get("PYTHONPATH", "")]
+        ).strip(os.pathsep)
+        result = subprocess.run(
+            [sys.executable, "-B", str(SIDECAR_DIR / "pcs_bridge.py"),
+             action, str(self.root if root is None else root), *flags],
+            env=env, input="", capture_output=True, encoding="utf-8", timeout=30, check=False,
+        )
+        self.assertTrue(result.stdout, result.stderr)
+        return result.returncode, json.loads(result.stdout)
+
+    def _bridge(self, *, extra_env=None):
+        bridge = BridgeProcess(config_path=self.root / CONFIG, extra_env=extra_env)
+        self.addCleanup(bridge.close)
+        bridge.wait_ready()
+        return bridge
+
+    def _prepare_scripted_folder(self, *, external=True, review_script=None):
+        template = config_document(
+            self.root / "pcs.sqlite", script=[{"action": "final", "reply": "合成答复"}],
+            external=external, purposes=["consult", "reasoning", "review", "maintenance"],
+            desktop={"managed": False, "provision": False},
+            review_script=review_script,
+        )
+        template["destination"]["manifest"].update(
+            thinking="enabled", reasoning_effort="high",
+            protocol_version="EXP-01-THINKING-CANDIDATE-v1",
+            max_output_tokens_per_call=8192,
+        )
+        template["destination"]["manifest"].pop("temperature")
+        first = prepare(self.root, template)
+        config = load_config(first["config_path"])
+        # Seed through the normal old writable runtime before taking the snapshot.
+        from runtime import DesktopRuntime
+        writer = DesktopRuntime(config)
+        writer.close()
+        return first
+
+    def test_dreaming_upgrade_and_restart_preserve_legacy_file_identity_and_bytes(self):
+        first = self._prepare_scripted_folder()
+        (self.root / "logs").mkdir()
+        (self.root / "logs/desktop.log").write_bytes(b"synthetic log\n" * 150_000)
+        (self.root / "logs/desktop.1.log").write_bytes(b"synthetic previous log\n")
+        (self.root / "ui-preferences.json").write_bytes(b'{"conversation_ui":{}}\n')
+        (self.root / "host-settings.json").write_bytes(b'{"schema":"synthetic-settings"}\n')
+        for database in ("pcs.sqlite", "memory/memory.sqlite3"):
+            (self.root / f"{database}-wal").write_bytes(b"")
+            (self.root / f"{database}-shm").write_bytes(bytes(32_768))
+        before = self._snapshot()
+
+        for _ in range(2):
+            code, response = self._instance_cli()
+            self.assertEqual(0, code, response)
+            self.assertTrue(response["result"]["logs_ready"])
+            self.assertEqual(first["instance_id"], json.loads(
+                (self.root / DREAMING / DREAMING_OWNER).read_text(encoding="utf-8")
+            )["instance_id"])
+            bridge = self._bridge()
+            info = bridge.request("app.info")["result"]
+            self.assertTrue(info["host"]["ready"], info["host"])
+            self.assertEqual(first["namespace"], info["host"]["namespace"])
+            session = {"session_id": info["session_id"]}
+            for method, extra in (
+                ("bridge.ping", None),
+                ("conversation.list", {}),
+                ("profile.list", {}),
+                ("cognition.candidates.list", {}),
+                ("review.work.list", {}),
+            ):
+                with self.subTest(method=method):
+                    response = bridge.request(method, None if extra is None else {**session, **extra})
+                    self.assertTrue(response["ok"], response)
+            browse = bridge.request("memory.search", {**session, "query": "", "limit": 1})
+            self.assertTrue(browse["ok"], browse)
+            synthetic_id = "11111111-1111-4111-8111-111111111111"
+            for method, extra in (
+                ("review.candidate.detail", {"candidate_id": synthetic_id, "artifact_version": 1}),
+                ("review.result", {"interaction_id": synthetic_id}),
+            ):
+                with self.subTest(method=method):
+                    response = bridge.request(method, {**session, **extra})
+                    self.assertFalse(response["ok"], response)
+                    self.assertEqual("NOT_FOUND", response["error"]["code"])
+            other = self._bridge()
+            self.assertEqual("DATA_LOCKED", other.request("app.info")["result"]["host"]["reason_code"])
+            other.close()
+            bridge.close()
+            self.assertEqual(before, self._snapshot())
+        self.assertEqual([self.root], list(self.base.iterdir()))
+
+    def test_pending_journals_refuse_before_bootstrap_or_legacy_mutation(self):
+        prepare(self.root)
+        for name in ("pcs.sqlite-wal", "pcs.sqlite-journal", "memory/memory.sqlite3-wal"):
+            with self.subTest(journal=name):
+                journal = self.root / name
+                journal.write_bytes(b"synthetic pending journal")
+                before = self._snapshot(include_dreaming=True)
+                for action in ("--prepare-dreaming-startup", "--connect-instance"):
+                    code, response = self._instance_cli(action)
+                    self.assertNotEqual(0, code)
+                    self.assertEqual("INSTANCE_RECOVERY_REQUIRED", response["error"]["code"])
+                bridge = self._bridge()
+                info = bridge.request("app.info")["result"]
+                self.assertEqual("INSTANCE_RECOVERY_REQUIRED", info["host"]["reason_code"])
+                bridge.close()
+                self.assertEqual(before, self._snapshot(include_dreaming=True))
+                journal.unlink()
+
+    def test_cold_start_respects_the_scope_recall_restore_fence_and_binding(self):
+        from scope_recall.core.restore import MARKER_FILENAME
+
+        prepare(self.root)
+        marker = self.root / "memory" / MARKER_FILENAME
+        marker.write_bytes(b"synthetic pending restore")
+        before = self._snapshot(include_dreaming=True)
+        code, response = self._instance_cli()
+        self.assertNotEqual(0, code)
+        self.assertEqual("INSTANCE_RECOVERY_REQUIRED", response["error"]["code"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+        marker.unlink()
+
+        from contextlib import closing
+        with closing(sqlite3.connect(self.root / "memory/memory.sqlite3")) as connection:
+            connection.execute("UPDATE instance_meta SET agent_id = 'synthetic:foreign'")
+            connection.commit()
+        before = self._snapshot(include_dreaming=True)
+        code, response = self._instance_cli()
+        self.assertNotEqual(0, code)
+        self.assertEqual("INSTANCE_IDENTITY_MISMATCH", response["error"]["code"])
+        bridge = self._bridge()
+        self.assertEqual(
+            "INSTANCE_IDENTITY_MISMATCH", bridge.request("app.info")["result"]["host"]["reason_code"]
+        )
+        bridge.close()
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_dreaming_directory_collision_preserves_the_raced_directory(self):
+        first = prepare(self.root)
+        destination = self.root / DREAMING
+        raced_identity = None
+
+        def create_competing_directory(staging, path):
+            nonlocal raced_identity
+            path.mkdir()
+            raced_identity = path.stat().st_ino
+            _publish_dreaming_directory(staging, path)
+
+        with patch("instance_manager._publish_dreaming_directory", create_competing_directory):
+            with self.assertRaises(InstanceError) as caught:
+                prepare_dreaming_root(self.root, first["instance_id"])
+        self.assertEqual("DREAMING_PATH_COLLISION", caught.exception.code)
+        self.assertEqual(raced_identity, destination.stat().st_ino)
+        self.assertEqual([], list(destination.iterdir()))
+        self.assertEqual([], list(self.root.glob(".dreaming-*.pending")))
+        code, response = self._instance_cli()
+        self.assertNotEqual(0, code)
+        self.assertEqual("DREAMING_PATH_COLLISION", response["error"]["code"])
+
+    def test_dreaming_log_hard_link_cannot_route_rotation_into_legacy_log(self):
+        first = prepare(self.root)
+        directory = prepare_dreaming_root(self.root, first["instance_id"]) / "logs"
+        directory.mkdir()
+        original = self.root / "existing.log"
+        original.write_bytes(b"synthetic legacy log")
+        os.link(original, directory / "desktop.log")
+        before = self._snapshot(include_dreaming=True)
+        code, response = self._instance_cli()
+        self.assertNotEqual(0, code)
+        self.assertEqual("DREAMING_PATH_COLLISION", response["error"]["code"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_existing_folder_selection_uses_read_only_connection(self):
+        code, created = self._instance_cli("--connect-instance")
+        self.assertEqual(0, code, created)
+        self.assertEqual("created", created["result"]["state"])
+        before = self._snapshot(include_dreaming=True)
+        code, connected = self._instance_cli("--connect-instance")
+        self.assertEqual(0, code, connected)
+        self.assertEqual("connected", connected["result"]["state"])
+        self.assertEqual(created["result"]["instance_id"], connected["result"]["instance_id"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+        code, response = self._instance_cli(
+            "--connect-instance",
+            flags=("--adopt-legacy-by", "synthetic:operator",
+                   "--adopt-legacy-reason", "synthetic repeat refusal"),
+        )
+        self.assertNotEqual(0, code)
+        self.assertEqual("INSTANCE_ADOPTION_REFUSED", response["error"]["code"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+        target = self.base / "moved"
+        shutil.copytree(self.root, target)
+        code, moved = self._instance_cli("--connect-instance", root=target)
+        self.assertEqual(0, code, moved)
+        self.assertEqual("restored", moved["result"]["state"])
+        self.assertEqual(connected["result"]["instance_id"], moved["result"]["instance_id"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_connection_never_prepares_unknown_lifecycle_state(self):
+        prepare(self.root)
+        manifest = self.metadata()
+        manifest["components"]["memory"]["state"] = "unrecognized"
+        self.save_metadata(manifest)
+        before = self._snapshot(include_dreaming=True)
+        code, response = self._instance_cli("--connect-instance")
+        self.assertNotEqual(0, code)
+        self.assertEqual("INSTANCE_METADATA_INVALID", response["error"]["code"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_dreaming_resumes_past_unknown_staging_without_overwriting_it(self):
+        first = prepare(self.root)
+        staged = self.root / (".dreaming-" + uuid.uuid4().hex + ".pending")
+        staged.mkdir()
+        (staged / DREAMING_OWNER).write_bytes(b"synthetic incomplete marker")
+        before = self._snapshot()
+        code, response = self._instance_cli()
+        self.assertEqual(0, code, response)
+        owner = self.root / DREAMING / DREAMING_OWNER
+        self.assertEqual(first["instance_id"], json.loads(owner.read_bytes())["instance_id"])
+        self.assertEqual(before, self._snapshot())
+
+    def test_dreaming_does_not_claim_a_hard_linked_owner(self):
+        first = prepare(self.root)
+        directory = prepare_dreaming_root(self.root, first["instance_id"])
+        os.link(directory / DREAMING_OWNER, self.root / "existing-owner.json")
+        before = self._snapshot(include_dreaming=True)
+        code, response = self._instance_cli()
+        self.assertNotEqual(0, code)
+        self.assertEqual("DREAMING_PATH_COLLISION", response["error"]["code"])
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_forged_manifest_uuid_does_not_override_pcs_registration(self):
+        prepare(self.root)
+        manifest = self.metadata()
+        manifest["instance_id"] = str(uuid.uuid4())
+        self.save_metadata(manifest)
+        before = self._snapshot(include_dreaming=True)
+        for action in ("--prepare-dreaming-startup", "--connect-instance"):
+            code, response = self._instance_cli(action)
+            self.assertNotEqual(0, code)
+            self.assertEqual("INSTANCE_IDENTITY_MISMATCH", response["error"]["code"])
+        bridge = self._bridge()
+        self.assertEqual(
+            "INSTANCE_IDENTITY_MISMATCH", bridge.request("app.info")["result"]["host"]["reason_code"]
+        )
+        bridge.close()
+        self.assertEqual(before, self._snapshot(include_dreaming=True))
+
+    def test_registered_folder_model_probe_does_not_promote_the_pcs(self):
+        from tests.desktop.test_model_connection import _MockProvider
+
+        provider = _MockProvider()
+        self.addCleanup(provider.close)
+        prepare(self.root, {
+            "destination": {"manifest": {
+                "base_url": f"http://127.0.0.1:{provider.port}/v1",
+                "api_key_env": "Q_PCS_SYNTHETIC_MODEL_PROBE",
+            }},
+        })
+        before = self._snapshot()
+        bridge = self._bridge(extra_env={"Q_PCS_SYNTHETIC_MODEL_PROBE": "synthetic-offline-token"})
+        info = bridge.request("app.info")["result"]
+        result = bridge.request("model.test_connection", {"session_id": info["session_id"]})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["result"]["connected"])
+        self.assertEqual(1, len(provider.requests))
+        bridge.close()
+        self.assertEqual(before, self._snapshot())
+
+    def test_cold_review_returns_existing_result_and_defers_audited_detail(self):
+        self._prepare_scripted_folder(external=False)
+        work = seed_work(self.root / "pcs.sqlite")
+        # Bind the scripted proposal to the fixture's real event.
+        config = json.loads((self.root / CONFIG).read_bytes())
+        config["destination"]["transport"]["review_script"] = [review_proposal(work["event_id"])]
+        (self.root / CONFIG).write_text(json.dumps(config), encoding="utf-8")
+        bridge = self._bridge()
+        session = {"session_id": bridge.request("app.info")["result"]["session_id"]}
+        generated = bridge.request("review.generate", {
+            **session, "work_id": work["work_id"], "event_id": work["event_id"],
+        })
+        self.assertTrue(generated["ok"], generated)
+        self.assertEqual("pending", generated["result"]["state"])
+        bridge.close()
+
+        before = self._snapshot()
+        bridge = self._bridge()
+        session = {"session_id": bridge.request("app.info")["result"]["session_id"]}
+        result = bridge.request(
+            "review.result", {**session, "interaction_id": generated["result"]["interaction_id"]},
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("pending", result["result"]["state"])
+        detail = bridge.request("review.candidate.detail", {
+            **session, "candidate_id": generated["result"]["candidate_id"], "artifact_version": 1,
+        })
+        self.assertFalse(detail["ok"], detail)
+        self.assertEqual("FOREGROUND_REQUIRED", detail["error"]["code"])
+        self.assertFalse(detail["error"]["result_unknown"])
+        bridge.close()
+        self.assertEqual(before, self._snapshot())
+
+    def test_explicit_folder_actions_signal_foreground_before_worker_starts(self):
+        from pcs_bridge import Bridge
+
+        bridge = Bridge(None, None, None)
+        queued = []
+        signals = []
+        bridge.config = SimpleNamespace()
+        bridge.runtime = SimpleNamespace(ready=True)
+        bridge.worker = SimpleNamespace(submit=queued.append)
+        bridge._dreaming = SimpleNamespace(
+            foreground_queued=lambda: signals.append("queued"),
+            foreground_finished=lambda: signals.append("finished"),
+        )
+        session = {"session_id": bridge.session_id}
+        with patch.object(bridge, "_run_memory_search") as search:
+            bridge._dispatch_memory_search("request", {**session, "query": "synthetic"})
+            self.assertEqual(["queued"], signals)
+            search.assert_not_called()
+            queued.pop()()
+            self.assertEqual(["queued", "finished"], signals)
+            search.assert_called_once_with("request", "synthetic", 10, None)
+        with patch.object(bridge, "_run_conversation_read") as read:
+            bridge._dispatch_conversation_list("poll", session)
+            self.assertEqual(["queued", "finished"], signals)
+            queued.pop()()
+            read.assert_called_once()
+            self.assertEqual(["queued", "finished"], signals)
+
+    def test_registered_folder_can_run_foreground_chat_then_restart_read_only(self):
+        first = self._prepare_scripted_folder(external=False)
+        bridge = self._bridge()
+        info = bridge.request("app.info")["result"]
+        self.assertTrue(info["host"]["ready"], info["host"])
+        session = {"session_id": info["session_id"]}
+        result = bridge.request("conversation.create", {**session, "mode": "chat"})
+        self.assertTrue(result["ok"], result)
+        conversation = {"conversation_id": result["result"]["conversation"]["conversation_id"]}
+        sent = bridge.request(
+            "conversation.send",
+            {**session, **conversation, "client_request_id": "synthetic-chat", "text": "合成问题"},
+        )
+        self.assertTrue(sent["ok"], sent)
+        turn = {"turn_id": sent["result"]["turn_id"]}
+        deadline = time.monotonic() + 30
+        while bridge.request("bridge.ping")["result"]["busy"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        result = bridge.request("turn.result", {**session, **turn})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("completed", result["result"]["state"])
+        self.assertEqual("合成答复", result["result"]["final"]["text"])
+        bridge.close()
+
+        before = self._snapshot()
+        bridge = self._bridge()
+        info = bridge.request("app.info")["result"]
+        self.assertEqual(first["namespace"], info["host"]["namespace"])
+        result = bridge.request("conversation.get", {"session_id": info["session_id"], **conversation})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(["user", "final"], [row["kind"] for row in result["result"]["messages"]])
+        bridge.close()
+        self.assertEqual(before, self._snapshot())
+
+    def test_registered_folder_publishes_a_cold_persona_preview_on_confirmation(self):
+        from runtime import _generic_profile_body
+
+        self._prepare_scripted_folder()
+        draft = _generic_profile_body({})
+        draft.update(profile_id="example.synthetic.import", identity_summary="Synthetic profile.")
+        source = self.root / "persona-import" / "synthetic.json"
+        source.write_text(json.dumps(draft), encoding="utf-8")
+        bridge = self._bridge()
+        info = bridge.request("app.info")["result"]
+        session = {"session_id": info["session_id"]}
+        preview = bridge.request("profile.import.preview", {**session, "name": source.name})
+        self.assertTrue(preview["ok"], preview)
+        published = bridge.request(
+            "profile.publish_reviewed",
+            {**session, "import_id": preview["result"]["import_id"], "confirm": True},
+        )
+        self.assertTrue(published["ok"], published)
+        self.assertEqual(draft["profile_id"], published["result"]["profile_id"])
+        self.assertFalse(published["result"]["active_changed"])
+        self.assertEqual(draft, json.loads(source.read_text(encoding="utf-8")))
 
     def test_empty_folder_creates_real_stores_and_a_guide(self):
         first = prepare(self.root)

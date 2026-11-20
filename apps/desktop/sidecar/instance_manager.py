@@ -6,21 +6,32 @@ Persona, conversations, Cognition, memory and PS06; no new SQL migration is used
 from __future__ import annotations
 
 import copy
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from locking import DataInstanceLock
+from locking import DataInstanceLock, DataLocked
+
+if TYPE_CHECKING:
+    from host_config import HostConfig
 
 MANIFEST = "instance.json"
 CONFIG = "instance-host.json"
 SCHEMA = "quintessence.instance.v1"
+DREAMING = "dreaming"
+DREAMING_OWNER = "owner.json"
+DREAMING_SCHEMA = "quintessence.dreaming.instance.v1"
 README = """# 完善这个 AI 实例的人格
 
 这个文件夹保存此实例的身份、人格、聊天历史、记忆和认识。关闭软件后，复制整个文件夹即可迁移；不要只复制数据库，也不要单独删除安全记录。
@@ -45,6 +56,12 @@ class InstanceError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class ReadyInstance:
+    config: HostConfig
+    instance_id: str
 
 
 def _now() -> str:
@@ -378,6 +395,235 @@ def _adapter(document: dict) -> None:
                     entry=str(Path(quintessence_pcs.__file__).parent / "adapters/scope_recall/cli.py"),
                     package_path=str(Path(scope_recall.__file__).parent.parent))
     spec.pop("adopt_data_directory", None)
+
+
+def ready_instance(value: str | Path) -> ReadyInstance:
+    """Validate the registered folder and derive the effective config in memory."""
+    from host_config import _check_instance_binding, _load_registry, _parse
+
+    root = _root(value)
+    path = _inside(root, MANIFEST)
+    if not path.exists():
+        raise InstanceError("INSTANCE_PREPARE_REQUIRED", "请在设置中连接实例文件夹。")
+    if not path.is_file():
+        raise InstanceError("INSTANCE_METADATA_INVALID", "实例描述路径已有其他内容。")
+    manifest = _read(path)
+    try:
+        if manifest["schema"] != SCHEMA:
+            raise InstanceError("INSTANCE_VERSION_UNSUPPORTED", "实例描述文件版本不受支持。")
+        instance_id = str(uuid.UUID(manifest["instance_id"]))
+        components = manifest["components"]
+        if manifest["config"] != CONFIG:
+            raise ValueError("unexpected configuration name")
+        states = (
+            manifest["config_state"],
+            *(components[name]["state"] for name in ("pcs", "memory", "recovery")),
+        )
+        if any(state not in ("pending", "initializing", "ready") for state in states):
+            raise ValueError("unknown instance lifecycle state")
+        recorded_root = Path(manifest["root"])
+        if not recorded_root.is_absolute():
+            raise ValueError("instance root must be absolute")
+        if os.path.normcase(str(recorded_root)) != os.path.normcase(str(root)):
+            raise InstanceError("INSTANCE_PREPARE_REQUIRED", "实例已移动，请在设置中重新连接。")
+        if any(state != "ready" for state in states):
+            raise InstanceError("INSTANCE_PREPARE_REQUIRED", "请在设置中完成实例连接。")
+        config_path = _inside(root, CONFIG)
+        document = _read(config_path)
+        if (
+            document["host"]["namespace"] != manifest["namespace"]
+            or document["host"]["host_instance"] != manifest["host_instance"]
+        ):
+            raise InstanceError("INSTANCE_IDENTITY_MISMATCH", "实例身份与宿主配置不一致。")
+        # Compare the original path spellings as well as the parsed paths.
+        # The parser canonicalizes them, which would otherwise hide a link.
+        raw_store = document["store"]
+        raw_memory = document["memory_bridge"]
+        for source in (
+            raw_store.get("database", "pcs.sqlite"),
+            raw_memory["data_directory"],
+        ):
+            _inside(root, source)
+        _adapter(document)
+        config = _parse(document, config_path, bind_instance=False)
+        memory = _inside(root, components["memory"]["path"])
+        pcs = _inside(root, components["pcs"]["path"])
+        if not pcs.is_file() or not memory.is_file():
+            raise InstanceError("INSTANCE_COMPONENT_MISSING", "实例数据缺失，请恢复原有组件。")
+        spec = config.memory_bridge
+        if (
+            config.instance_root != root
+            or config.database_path != pcs
+            or spec is None or not spec.enabled
+            or spec.data_directory / "memory.sqlite3" != memory
+        ):
+            raise InstanceError("INSTANCE_IDENTITY_MISMATCH", "实例组件路径与登记不一致。")
+        if config.deletion_adopt or config.ps06_unprotected:
+            raise InstanceError("INSTANCE_RECOVERY_REQUIRED", "实例需要显式恢复或接入。")
+        for field, directory in (
+            ("deletion_ledger_dir", config.deletion_ledger_dir),
+            ("deletion_anchor_dir", config.deletion_anchor_dir),
+        ):
+            if directory is None or _inside(root, document["store"].get(field, directory)).resolve() != directory:
+                raise InstanceError("INSTANCE_RECOVERY_REQUIRED", "删除保护必须位于实例内。")
+        bindings = _load_registry(_inside(root, "instances.json"))
+        _check_instance_binding(bindings, manifest["namespace"], root)
+        return ReadyInstance(config, instance_id)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise InstanceError("INSTANCE_METADATA_INVALID", "实例身份或组件元数据损坏。") from exc
+
+
+def check_ready_memory(config: HostConfig) -> None:
+    """Check the pinned Memory binding while its normal writer lease is free."""
+    from contextlib import closing
+    from scope_recall.contracts import ContractError, InstanceBinding
+    from scope_recall.core.restore import restore_pending
+    from scope_recall.core.storage import SQLiteStorage
+    from scope_recall.core.writer_lease import TRUTH_WRITER_LEASE_FILENAME
+    from quintessence_pcs.foundation.sqlite_db import connect, hold_existing_lock
+
+    spec = config.memory_bridge
+    assert spec is not None
+    directory = spec.data_directory
+    assert directory is not None
+    lease = _inside(config.instance_root, directory / TRUTH_WRITER_LEASE_FILENAME)
+    path = _inside(config.instance_root, directory / "memory.sqlite3")
+    binding = InstanceBinding(
+        spec.agent_id, spec.installation_id, directory, frozenset({spec.scope_id}), spec.test_mode
+    )
+    try:
+        with hold_existing_lock(lease):
+            if restore_pending(directory):
+                raise InstanceError("INSTANCE_RECOVERY_REQUIRED", "Memory 有待确认的恢复操作。")
+            with closing(connect(path, read_only=True)) as connection:
+                SQLiteStorage(binding, upgrade_on_open=False).verify(connection)
+    except ContractError as exc:
+        code = (
+            "INSTANCE_VERSION_UNSUPPORTED" if exc.code == "SCHEMA_UNSUPPORTED"
+            else "INSTANCE_IDENTITY_MISMATCH"
+        )
+        raise InstanceError(code, "Memory 身份或数据版本与当前实例不一致。") from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise InstanceError("INSTANCE_RECOVERY_REQUIRED", "无法只读核对原有 Memory 状态。") from exc
+
+
+def _publish_dreaming_directory(staging: Path, destination: Path) -> None:
+    # Windows rename already fails if the destination exists. POSIX rename
+    # replaces even an empty directory, so use the platform's exclusive form.
+    if os.name == "nt":
+        staging.rename(destination)
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    src, dst = os.fsencode(staging), os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename_exclusive = 0x00000004
+        result = libc.renamex_np(src, dst, rename_exclusive)
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        at_cwd, rename_noreplace = -100, 1
+        result = libc.renameat2(at_cwd, src, at_cwd, dst, rename_noreplace)
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive directory publication is unavailable")
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), destination)
+
+
+def prepare_dreaming_root(root: Path, instance_id: str) -> Path:
+    """Publish the new component once. Existing unowned names stay untouched."""
+    path = _inside(root, DREAMING)
+    marker = {"schema": DREAMING_SCHEMA, "instance_id": instance_id}
+    if not path.exists():
+        staging = root / f".dreaming-{uuid.uuid4().hex}.pending"
+        staging.mkdir(mode=0o700)
+        try:
+            with (staging / DREAMING_OWNER).open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(marker, ensure_ascii=False, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                _publish_dreaming_directory(staging, path)
+            except FileExistsError:
+                pass
+        finally:
+            if staging.exists():
+                (staging / DREAMING_OWNER).unlink(missing_ok=True)
+                staging.rmdir()
+    owner_path = _inside(root, path / DREAMING_OWNER)
+    try:
+        owner = owner_path.lstat()
+        owned = stat.S_ISREG(owner.st_mode) and owner.st_nlink == 1 and _read(owner_path) == marker
+    except (InstanceError, FileNotFoundError, NotADirectoryError):
+        owned = False
+    if not path.is_dir() or not owned:
+        raise InstanceError("DREAMING_PATH_COLLISION", "Dreaming 目录已有其他内容。")
+    return path
+
+
+@contextmanager
+def _checked_ready_instance(instance: ReadyInstance):
+    """Keep the normal lock held throughout validation and bootstrap."""
+    from runtime import RuntimeStartupError, open_ready_pcs
+
+    config = instance.config
+    lock = DataInstanceLock(config.database_path)
+    try:
+        lock.acquire(owner="dreaming-startup", preserve=True)
+        with open_ready_pcs(config, instance.instance_id):
+            check_ready_memory(config)
+            yield
+    except DataLocked as exc:
+        raise InstanceError("DATA_LOCKED", "实例已被另一个进程占用，或实例锁文件无法打开。") from exc
+    except RuntimeStartupError as exc:
+        raise InstanceError(exc.code, exc.message) from exc
+    finally:
+        lock.release()
+
+
+def prepare_dreaming_startup(value: str | Path) -> dict[str, bool]:
+    """Validate where the desktop may put its startup and idle logs."""
+    instance = ready_instance(value)
+    root = instance.config.instance_root
+    with _checked_ready_instance(instance):
+        path = prepare_dreaming_root(root, instance.instance_id)
+        logs = _inside(root, path / "logs")
+        if logs.exists() and not logs.is_dir():
+            raise InstanceError("DREAMING_PATH_COLLISION", "Dreaming 日志路径已有其他内容。")
+        for name in ("desktop.log", "desktop.1.log"):
+            file = _inside(root, logs / name)
+            if file.exists() and (not file.is_file() or file.stat().st_nlink != 1):
+                raise InstanceError("DREAMING_PATH_COLLISION", "Dreaming 日志路径已有其他内容。")
+    return {"logs_ready": True}
+
+
+def connect_folder(
+    value: str | Path, template: dict | None = None, *,
+    legacy_adoption: dict | None = None, component_declaration: dict | None = None,
+) -> dict:
+    """Use a read-only connection for a registered, ready folder at its recorded location."""
+    try:
+        instance = ready_instance(value)
+    except InstanceError as exc:
+        if exc.code != "INSTANCE_PREPARE_REQUIRED":
+            raise
+    else:
+        if legacy_adoption is not None:
+            raise InstanceError("INSTANCE_ADOPTION_REFUSED", "已登记的实例不能重复创建安全基线。")
+        if component_declaration is not None:
+            raise InstanceError("INSTANCE_DECLARATION_REFUSED", "已登记的实例不能声明组件从未建立。")
+        config = instance.config
+        with _checked_ready_instance(instance):
+            return {
+                "instance_id": instance.instance_id,
+                "namespace": config.authority.namespace,
+                "root": str(config.instance_root),
+                "config_path": str(config.path),
+                "state": "connected",
+                "deletion_safety": "enforced",
+                "rollback_protection": "instance-local; whole-folder rollback is not reliably detectable",
+            }
+    return prepare(
+        value, template, legacy_adoption=legacy_adoption, component_declaration=component_declaration,
+    )
 
 
 def _persona_source(root: Path, document: dict) -> tuple[Path, dict] | None:

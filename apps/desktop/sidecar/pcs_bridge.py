@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import queue
+import sqlite3
 import sys
 import threading
 import time
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import framing
+from dreaming_host import DreamingHost
 from host_config import (
     APP_NAME,
     APP_VERSION,
@@ -40,6 +42,13 @@ from host_config import (
     web_status,
 )
 from locking import DataInstanceLock, DataLocked
+from instance_manager import (
+    CONFIG as FOLDER_CONFIG,
+    MANIFEST as FOLDER_MANIFEST,
+    InstanceError,
+    prepare_dreaming_root,
+    ready_instance,
+)
 from runtime import (
     ConversationRequestError,
     DesktopRuntime,
@@ -50,6 +59,7 @@ from runtime import (
     valid_persona_import_name,
 )
 from quintessence_pcs.domains.errors import SourceUntrusted
+from quintessence_pcs.domains.refs import RecordRef
 from quintessence_pcs.foundation.errors import (
     AuthorizationRequired,
     ContextStale,
@@ -61,6 +71,7 @@ from quintessence_pcs.foundation.errors import (
     RecordVersionConflict,
     Redacted,
     StateRevisionConflict,
+    StorageError,
 )
 from quintessence_pcs.runtime import (
     ModelAdapterError,
@@ -129,6 +140,7 @@ REVIEW_METHODS = frozenset(
     }
 )
 MODEL_TEST_METHOD = "model.test_connection"
+_DREAMING_METHODS = frozenset({"dreaming.configure", "dreaming.configure_journals", "dreaming.review_question"})
 MAINTENANCE_METHODS = frozenset(
     {"maintenance.status", "maintenance.run", "maintenance.control"}
 )
@@ -391,13 +403,17 @@ class _RuntimeWorker:
         *,
         event_sink: Any = None,
         cancel_requested: Any = None,
+        instance_id: str | None = None,
+        dreaming: DreamingHost | None = None,
     ) -> None:
-        self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue()
+        self._queue: queue.Queue[Callable[[], None] | tuple[Callable[[], None], bool] | None] = queue.Queue()
         self._ready = threading.Event()
         self.runtime: DesktopRuntime | None = None
         self.error: RuntimeStartupError | None = None
         self._event_sink = event_sink
         self._cancel_requested = cancel_requested
+        self._instance_id = instance_id
+        self._dreaming = dreaming
         self._thread = threading.Thread(
             target=self._run, args=(config,), name="pcs-desktop-db", daemon=True
         )
@@ -414,6 +430,9 @@ class _RuntimeWorker:
                 config,
                 event_sink=self._event_sink,
                 cancel_requested=self._cancel_requested,
+                instance_id=self._instance_id,
+                read_only=self._instance_id is not None,
+                dreaming=self._dreaming,
             )
         except RuntimeStartupError as exc:
             self.error = exc
@@ -426,25 +445,68 @@ class _RuntimeWorker:
             self._ready.set()
             return
         self.runtime = runtime
+        if self._instance_id is not None:
+            try:
+                runtime.dreaming_root = prepare_dreaming_root(
+                    config.instance_root, self._instance_id
+                )
+            except (InstanceError, OSError) as exc:
+                LOGGER.warning(
+                    "Dreaming startup refused code=%s",
+                    exc.code if isinstance(exc, InstanceError) else "DREAMING_PATH_UNAVAILABLE",
+                )
         self._ready.set()
         try:
             while True:
-                job = self._queue.get()
-                if job is None:
+                queued = self._queue.get()
+                if queued is None:
                     return
+                job, refresh_readiness = queued if isinstance(queued, tuple) else (queued, True)
                 try:
                     job()
                 except BaseException:  # noqa: BLE001 - a job must not kill the DB thread
                     LOGGER.exception("consult job failed outside its handler")
                 try:
-                    runtime.refresh_readiness()
+                    if refresh_readiness and self.runtime is not None:
+                        self.runtime.refresh_readiness()
                 except Exception:  # noqa: BLE001 - preserve the worker on store failure
                     LOGGER.exception("runtime readiness refresh failed")
         finally:
-            runtime.close()
+            if self.runtime is not None:
+                self.runtime.close()
 
-    def submit(self, job: Callable[[], None]) -> None:
-        self._queue.put(job)
+    def promote(self) -> DesktopRuntime:
+        """Switch to the regular writer on the DB thread, under the same lock."""
+        current = self.runtime
+        if current is None:
+            raise RuntimeStartupError("RUNTIME_UNAVAILABLE", "the trusted runtime is unavailable")
+        if not current.read_only:
+            return current
+        instance_id = current.instance_id
+        config = current.config
+        dreaming_root = current.dreaming_root
+        current.close()
+        try:
+            writer = DesktopRuntime(
+                config,
+                event_sink=self._event_sink,
+                cancel_requested=self._cancel_requested,
+                instance_id=instance_id,
+                dreaming_root=dreaming_root,
+                dreaming=self._dreaming,
+            )
+        except RuntimeStartupError:
+            self.runtime = None
+            raise
+        writer.retain_session_reads(current)
+        self.runtime = writer
+        return writer
+
+    def submit(self, job: Callable[[], None], *, refresh_readiness: bool = True) -> None:
+        if refresh_readiness:
+            self._queue.put(job)
+            return
+        self._queue.put((job, False))
 
     def stop(self) -> None:
         self._queue.put(None)
@@ -454,6 +516,7 @@ class _RuntimeWorker:
 #: RG05-F01: one external trigger may continue the bounded sweep a few times.
 #: The sweep parameters stay RG04-sized; only the number of follow-up slices is
 #: bounded, so an idle app can finish the normal user+final pair without a loop.
+_DREAMING_TICK_SECONDS = 10.0
 _POSTPROCESS_FOLLOWUP_LIMIT = 3
 _POSTPROCESS_FOLLOWUP_DELAY_SECONDS = 1.0
 _POSTPROCESS_FOLLOWUP_JITTER_SECONDS = 0.25
@@ -529,6 +592,7 @@ class Bridge:
         self.session_id = str(uuid.uuid4())
         self.config: HostConfig | None = None
         self.config_path = config_path
+        self._instance_id: str | None = None
         self._settings_pending = False
         self.config_error: ConfigError | None = None
         self.worker: _RuntimeWorker | None = None
@@ -569,6 +633,9 @@ class Bridge:
         #: the paused job visible for the explicit ``maintenance.run`` entry.
         self._maintenance_resume: tuple[str, str] | None = None
         self._maintenance_resume_timer: threading.Timer | None = None
+        self._dreaming: DreamingHost | None = None
+        self._dreaming_timer: threading.Timer | None = None
+        self._dreaming_lock = threading.Lock()
 
         if not config_path:
             self.config_error = ConfigError(
@@ -577,9 +644,31 @@ class Bridge:
             )
         else:
             try:
-                self.config = load_config(config_path)
+                path = Path(config_path)
+                if os.path.normcase(path.name) == FOLDER_CONFIG:
+                    if not os.path.lexists(path.parent / FOLDER_MANIFEST):
+                        # Standalone scripted Lab fixtures also use this name.
+                        # Inspect without binding before accepting that legacy entry.
+                        try:
+                            lab = load_config(path, bind_instance=False)
+                        except ConfigError:
+                            lab = None
+                        if (
+                            lab is not None and lab.is_lab
+                            and lab.model.transport_kind == "scripted"
+                            and not lab.managed and lab.memory_bridge is None
+                        ):
+                            self.config = load_config(path)
+                    if self.config is None:
+                        instance = ready_instance(path.parent)
+                        self.config = instance.config
+                        self._instance_id = instance.instance_id
+                else:
+                    self.config = load_config(config_path)
             except ConfigError as exc:
                 self.config_error = exc
+            except InstanceError as exc:
+                self.config_error = ConfigError(exc.code, str(exc))
             except BaseException as exc:  # noqa: BLE001 - a config bug is not a crash
                 self.config_error = ConfigError(
                     "CONFIG_INVALID",
@@ -592,22 +681,29 @@ class Bridge:
     def _start_runtime(self, config: HostConfig) -> None:
         lock = DataInstanceLock(config.database_path)
         try:
-            lock.acquire(owner=f"pcs-bridge:{os.getpid()}")
+            lock.acquire(
+                owner=f"pcs-bridge:{os.getpid()}", preserve=self._instance_id is not None
+            )
         except DataLocked:
             self.data_locked = True
             LOGGER.warning("data instance is locked by another process")
             return
         self.lock = lock
         try:
+            if self._instance_id is not None:
+                self._dreaming = DreamingHost(lambda: self.runtime, generation=self.session_id)
             self.worker = _RuntimeWorker(
                 config,
                 event_sink=self._ring_event,
                 cancel_requested=self._cancel_requested,
+                instance_id=self._instance_id,
+                dreaming=self._dreaming,
             )
         except RuntimeStartupError as exc:
             LOGGER.error("runtime startup refused code=%s", exc.code)
             self.config_error = ConfigError(exc.code, exc.message)
             self._release_lock()
+            self._dreaming = None
             return
         if self.worker.error is not None:
             LOGGER.error("runtime startup refused code=%s", self.worker.error.code)
@@ -617,10 +713,85 @@ class Bridge:
             self.worker.stop()
             self.worker = None
             self._release_lock()
+            self._dreaming = None
             return
         self.runtime = self.worker.runtime
-        if self.runtime.memory_bridge_configured():
+        if self._dreaming is not None:
+            self.worker.submit(self._dreaming.refresh_configuration, refresh_readiness=False)
+            self._schedule_dreaming()
+        if not self.runtime.read_only and self.runtime.memory_bridge_configured():
             self._schedule_postprocess_sweep(1.5)
+
+    def _promote_for_foreground(self) -> DesktopRuntime:
+        """Called only by validated foreground handlers on the worker thread."""
+        if self._instance_id is not None:
+            try:
+                self.runtime = self.worker.promote()
+            except RuntimeStartupError as exc:
+                self.runtime = None
+                self.config_error = ConfigError(exc.code, exc.message)
+                raise
+        return self.runtime
+
+    def _submit_foreground(self, job: Callable[[], None], *, refresh_readiness: bool = True) -> None:
+        dreaming = self._dreaming
+        if dreaming is None:
+            self.worker.submit(job)
+            return
+        dreaming.foreground_queued()
+
+        def run() -> None:
+            try:
+                job()
+            finally:
+                dreaming.foreground_finished()
+
+        try:
+            if refresh_readiness:
+                self.worker.submit(run)
+            else:
+                self.worker.submit(run, refresh_readiness=False)
+        except BaseException:
+            dreaming.foreground_finished()
+            raise
+
+    def _schedule_dreaming(self) -> None:
+        with self._dreaming_lock:
+            if self._stopping.is_set() or self._dreaming_timer is not None:
+                return
+            timer = threading.Timer(_DREAMING_TICK_SECONDS, self._queue_dreaming)
+            timer.daemon = True
+            self._dreaming_timer = timer
+            timer.start()
+
+    def _queue_dreaming(self) -> None:
+        with self._dreaming_lock:
+            self._dreaming_timer = None
+            if self._stopping.is_set() or self.worker is None:
+                return
+            if self._dreaming is not None:
+                self._dreaming.record_running()
+            self.worker.submit(self._run_dreaming, refresh_readiness=False)
+
+    def _run_dreaming(self) -> None:
+        try:
+            if self._stopping.is_set() or self._dreaming is None or self.runtime is None:
+                return
+            with self._maintenance_lock:
+                review_pending = bool(self._maintenance_turns) or bool(
+                    self._maintenance_resume and self._maintenance_resume_timer is not None
+                )
+            # The immutable startup path cannot deliver the old outbox. It
+            # must not hold the independent idle wake hostage to that backlog.
+            delivery_pending = False
+            if not self.runtime.read_only and self.runtime.memory_bridge_configured():
+                backlog = self.runtime.store.pending_delivery_summary(self.config.authority.namespace)
+                delivery_pending = bool(backlog["due"] and self._sweep_timer is not None)
+            self._dreaming.run_idle(pending_work=review_pending or delivery_pending)
+        except (StorageError, sqlite3.Error) as exc:
+            LOGGER.warning("Dreaming scheduling degraded class=%s", type(exc).__name__)
+        finally:
+            self._schedule_dreaming()
 
     # ------------------------------------------------------- RG04 postprocess
 
@@ -951,6 +1122,13 @@ class Bridge:
             return 2
         finally:
             self._stopping.set()
+            with self._dreaming_lock:
+                if self._dreaming_timer is not None:
+                    self._dreaming_timer.cancel()
+                    self._dreaming_timer = None
+            if self._dreaming is not None:
+                self._dreaming.record_running()
+                self._dreaming.stop()
             with self._sweep_lock:
                 if self._sweep_timer is not None:
                     self._sweep_timer.cancel()
@@ -1006,6 +1184,12 @@ class Bridge:
                 f"{method} is reserved and not implemented in this desktop build",
             )
             return
+        if method in _DREAMING_METHODS and self._dreaming is not None:
+            if self._settings_pending:
+                self._send_error(request_id, ERROR_BUSY, "settings will apply after the running turn")
+            else:
+                self._dispatch_dreaming(request_id, method, params)
+            return
         if method not in IMPLEMENTED_METHODS:
             self._send_error(
                 request_id,
@@ -1024,7 +1208,7 @@ class Bridge:
                 self._send_error(request_id, ERROR_BUSY, "settings update unavailable")
                 return
             self._settings_pending = True
-            self.worker.submit(lambda: self._reload_settings(request_id))
+            self._submit_foreground(lambda: self._reload_settings(request_id))
             return
         if self._settings_pending and method not in {"turn.cancel", "turn.events", "turn.result", "profile.status"}:
             self._send_error(request_id, ERROR_BUSY, "settings will apply after the running turn")
@@ -1119,18 +1303,67 @@ class Bridge:
     def _reload_settings(self, request_id: str) -> None:
         """Runs on the DB worker after the current job; never restarts a turn."""
         try:
-            config = load_config(self.config_path)
+            if self._instance_id is None:
+                config = load_config(self.config_path)
+            else:
+                config = ready_instance(Path(self.config_path).parent).config
+                self._promote_for_foreground()
             self.runtime.apply_generation_settings(config)
             self.config = config
             if config.maintenance is None or not config.maintenance.enabled:
                 self._stop_auto_maintenance()
             self._send_ok(request_id, {"applied": True, "effect": "next_turn"})
-        except (ConfigError, RuntimeStartupError):
+        except (ConfigError, InstanceError, RuntimeStartupError):
             self._send_error(request_id, "SETTINGS_INVALID", "settings were not applied")
         except Exception:
             self._send_error(request_id, ERROR_INTERNAL, "settings could not be applied")
         finally:
             self._settings_pending = False
+
+    def _dispatch_dreaming(self, request_id: str, method: str, params: dict[str, Any]) -> None:
+        journals = method == "dreaming.configure_journals"
+        configure = journals or method == "dreaming.configure"
+        parameter = "enabled" if configure else "question"
+        if set(params) != {"session_id", "destination_id", parameter}:
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "Dreaming request fields are invalid")
+            return
+        try:
+            if configure:
+                if type(params["enabled"]) is not bool:
+                    raise InvalidInput("expected a boolean")
+                requested = params["enabled"]
+            else:
+                requested = RecordRef.from_value(params["question"], field="question")
+        except InvalidInput:
+            self._send_error(request_id, ERROR_INVALID_PARAMS, "Dreaming request values are invalid")
+            return
+        if self.worker is None or self.runtime is None or self.config is None or self.data_locked:
+            self._send_error(request_id, ERROR_HOST_NOT_READY, "the trusted host is unavailable")
+            return
+        if params["session_id"] != self.session_id:
+            self._send_error(request_id, ERROR_SESSION_MISMATCH, "the host session changed")
+            return
+        if params["destination_id"] != self.config.destination.destination_id:
+            self._send_error(request_id, ERROR_DESTINATION_MISMATCH, "the destination changed")
+            return
+
+        def run() -> None:
+            if self.config is None or params["destination_id"] != self.config.destination.destination_id:
+                self._send_error(request_id, ERROR_DESTINATION_MISMATCH, "the destination changed")
+                return
+            try:
+                if journals:
+                    result = self._dreaming.configure_journals(requested)
+                elif configure:
+                    result = self._dreaming.configure(requested)
+                else:
+                    result = self._dreaming.request_question_review(requested)
+            except (OSError, ValueError, StorageError, ModelAdapterError, sqlite3.Error):
+                self._send_error(request_id, "DREAMING_UNAVAILABLE", "Dreaming request could not be applied")
+            else:
+                self._send_ok(request_id, result)
+
+        self._submit_foreground(run, refresh_readiness=False)
 
     def _dispatch_model_renewal(self, request_id: str, params: dict[str, Any]) -> None:
         if set(params) != {"session_id", "destination_id", "authorization_id"}:
@@ -1152,7 +1385,10 @@ class Bridge:
 
         def renew() -> None:
             try:
+                self._promote_for_foreground()
                 self.runtime.renew_model_authorization(authorization_id)
+            except RuntimeStartupError as exc:
+                self._send_error(request_id, exc.code, exc.message)
             except ReviewRequestError as exc:
                 self._send_error(request_id, exc.code, exc.message)
             except Exception:
@@ -1165,7 +1401,7 @@ class Bridge:
                 self._settings_pending = False
 
         self._settings_pending = True
-        self.worker.submit(renew)
+        self._submit_foreground(renew)
 
     def _ready(self) -> bool:
         return self.runtime is not None and self.runtime.ready
@@ -1259,6 +1495,10 @@ class Bridge:
                 "web": self._web_capabilities(),
             },
             "persona": self._persona_info(),
+            "dreaming": self._dreaming.view() if self._dreaming else {
+                "state": "unavailable", "reason": reason_code,
+                "enabled": False, "can_configure": False, "semantic_reason": None,
+            },
             "deletion_safety": self._deletion_safety(),
             "limits": {
                 "frame_bytes": framing.MAX_FRAME_BYTES,
@@ -1267,7 +1507,9 @@ class Bridge:
                     config.max_question_chars if config is not None else MAX_QUESTION_CHARS
                 ),
             },
-            "methods": sorted(IMPLEMENTED_METHODS),
+            "methods": sorted(
+                IMPLEMENTED_METHODS | _DREAMING_METHODS if self._dreaming else IMPLEMENTED_METHODS
+            ),
             "reserved": sorted(RESERVED_METHODS),
             "pcs": {
                 "package": "quintessence_pcs",
@@ -1508,7 +1750,8 @@ class Bridge:
             )
             return
         frozen = dict(params)
-        worker.submit(lambda: self._run_profile(request_id, method, frozen))
+        submit = worker.submit if method == "profile.read" else self._submit_foreground
+        submit(lambda: self._run_profile(request_id, method, frozen))
 
     def _run_profile(
         self, request_id: str, method: str, params: dict[str, Any]
@@ -1525,17 +1768,17 @@ class Bridge:
             if method == "profile.read":
                 result = runtime.profile_read()
             elif method == "profile.publish":
-                result = runtime.profile_publish(
+                result = self._promote_for_foreground().profile_publish(
                     profile_id=params["profile_id"],
                     body=params["body"],
                     review_event_id=params["review_event_id"],
                 )
             else:
-                result = runtime.profile_activate(
+                result = self._promote_for_foreground().profile_activate(
                     profile_id=params["profile_id"],
                     record_version=int(params["record_version"]),
                 )
-        except PersonaControlError as exc:
+        except (PersonaControlError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except SourceUntrusted as exc:
             self._send_error(
@@ -1580,7 +1823,7 @@ class Bridge:
     def _dispatch_profile_admin(
         self, request_id: str, method: str, params: dict[str, Any]
     ) -> None:
-        """UI-F02 bounded profile/import reads (worker thread, never a write).
+        """UI-F02 bounded profile/import reads on the worker thread.
 
         These calls read the store, so they obey the same R2 rule as the
         conversation reads: while a turn is running they answer ``BUSY``
@@ -1661,9 +1904,8 @@ class Bridge:
         if not self._require_turn_slot(request_id, method):
             return
         frozen = dict(params)
-        self.worker.submit(
-            lambda: self._run_profile_admin(request_id, method, frozen)
-        )
+        submit = self._submit_foreground if method == "profile.read_body" else self.worker.submit
+        submit(lambda: self._run_profile_admin(request_id, method, frozen))
 
     def _run_profile_admin(
         self, request_id: str, method: str, params: dict[str, Any]
@@ -1678,7 +1920,7 @@ class Bridge:
             if method == "profile.list":
                 result = runtime.profile_list()
             elif method == "profile.read_body":
-                result = runtime.profile_read_body(
+                result = self._promote_for_foreground().profile_read_body(
                     record_id=params["record_id"],
                     record_version=int(params["record_version"]),
                 )
@@ -1686,7 +1928,7 @@ class Bridge:
                 result = runtime.profile_import_list()
             else:
                 result = runtime.profile_import_preview(name=params["name"])
-        except PersonaControlError as exc:
+        except (PersonaControlError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except (RecordNotFound, EventNotFound):
             self._send_error(
@@ -1782,7 +2024,7 @@ class Bridge:
             )
             return
         frozen = dict(params)
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_profile_publish_reviewed(request_id, frozen)
         )
 
@@ -1796,12 +2038,12 @@ class Bridge:
             )
             return
         try:
-            result = runtime.profile_publish_reviewed(
+            result = self._promote_for_foreground().profile_publish_reviewed(
                 import_id=params["import_id"],
                 profile_id=params.get("profile_id"),
                 confirm=True,
             )
-        except PersonaControlError as exc:
+        except (PersonaControlError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except SourceUntrusted:
             self._send_error(
@@ -1929,9 +2171,8 @@ class Bridge:
         if read and not self._require_turn_slot(request_id, method):
             return
         frozen = dict(params)
-        self.worker.submit(
-            lambda: self._run_preferences(request_id, method, frozen)
-        )
+        submit = self.worker.submit if read else self._submit_foreground
+        submit(lambda: self._run_preferences(request_id, method, frozen))
 
     def _run_preferences(
         self, request_id: str, method: str, params: dict[str, Any]
@@ -1948,12 +2189,12 @@ class Bridge:
                     conversation_id=params.get("conversation_id")
                 )
             else:
-                result = runtime.preference_revoke(
+                result = self._promote_for_foreground().preference_revoke(
                     conversation_id=params["conversation_id"],
                     dimension=params["dimension"],
                     reason=params.get("reason"),
                 )
-        except PersonaControlError as exc:
+        except (PersonaControlError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except RecordNotFound:
             self._send_error(
@@ -2066,7 +2307,7 @@ class Bridge:
                 "another process owns this data instance; no bridge job was started",
             )
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_memory_bridge(request_id, method, limit)
         )
 
@@ -2075,10 +2316,11 @@ class Bridge:
     ) -> None:
         assert self.runtime is not None
         try:
+            runtime = self._promote_for_foreground()
             if method == "memory.bridge.sync":
-                result = self.runtime.memory_bridge_sync(limit=limit or 20)
+                result = runtime.memory_bridge_sync(limit=limit or 20)
             else:
-                result = self.runtime.memory_bridge_deliver(limit=limit)
+                result = runtime.memory_bridge_deliver(limit=limit)
         except RuntimeStartupError as exc:
             self._send_error(request_id, exc.code, exc.message)
             return
@@ -2130,7 +2372,7 @@ class Bridge:
             return
         if not self._require_turn_slot(request_id, "memory.search"):
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_memory_search(request_id, query, limit, cursor)
         )
 
@@ -2252,10 +2494,10 @@ class Bridge:
                     },
                 )
                 return
-            self.worker.submit(
+            self._submit_foreground(
                 lambda: self._run_maintenance(
                     request_id,
-                    lambda: self.runtime.maintenance_control(
+                    lambda: self._promote_for_foreground().maintenance_control(
                         task_id=task_id, action=action
                     ),
                 )
@@ -2280,10 +2522,10 @@ class Bridge:
                 request_id, ERROR_INVALID_PARAMS, "task_id must be a string"
             )
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_maintenance(
                 request_id,
-                lambda: self.runtime.maintenance_run(
+                lambda: self._promote_for_foreground().maintenance_run(
                     event_ids=tuple(event_ids), task_id=task_id, limit=limit
                 ),
             )
@@ -2449,12 +2691,12 @@ class Bridge:
             return
         if not self._require_turn_slot(request_id, "conversation.create"):
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_conversation_read(
                 request_id,
                 lambda: {
                     "conversation": conversation_dto.conversation_dict(
-                        self.runtime.conversation_create(mode=mode)
+                        self._promote_for_foreground().conversation_create(mode=mode)
                     )
                 },
             )
@@ -2828,7 +3070,7 @@ class Bridge:
             return
         if not self._require_turn_slot(request_id, "postprocess.retry"):
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_postprocess_retry(request_id, turn_id)
         )
 
@@ -2846,7 +3088,7 @@ class Bridge:
             )
             return
         try:
-            result = self.runtime.postprocess_retry(turn_id=turn_id)
+            result = self._promote_for_foreground().postprocess_retry(turn_id=turn_id)
         except BaseException as exc:  # noqa: BLE001 - refusal is a result
             code, message, unknown = _map_conversation_error(exc)
             self._send_error(request_id, code, message, result_unknown=unknown)
@@ -3087,7 +3329,7 @@ class Bridge:
         self._mark_send_pending(1)
         self._request_maintenance_yield()
         try:
-            self.worker.submit(
+            self._submit_foreground(
                 lambda: self._run_conversation_send(
                     request_id,
                     conversation_id,
@@ -3111,7 +3353,7 @@ class Bridge:
     ) -> None:
         assert self.runtime is not None
         try:
-            conversation, creation = self.runtime.conversation_send(
+            conversation, creation = self._promote_for_foreground().conversation_send(
                 conversation_id=conversation_id,
                 client_request_id=client_request_id,
                 text=text,
@@ -3119,6 +3361,7 @@ class Bridge:
         except BaseException as exc:  # noqa: BLE001 - refusal is a result
             code, message, unknown = _map_conversation_error(exc)
             self._model_lock.release()
+            self._mark_send_pending(-1)
             self._send_error(
                 request_id, code, message, result_unknown=unknown
             )
@@ -3387,7 +3630,7 @@ class Bridge:
             )
             return
         try:
-            self.worker.submit(lambda: self._run_consult(request_id, question))
+            self._submit_foreground(lambda: self._run_consult(request_id, question))
         except BaseException:
             self._model_lock.release()
             raise
@@ -3395,7 +3638,7 @@ class Bridge:
     def _run_consult(self, request_id: str, question: str) -> None:
         assert self.runtime is not None
         self._run_model_call(
-            request_id, "consult.interact", lambda: self.runtime.consult(question)
+            request_id, "consult.interact", lambda: self._promote_for_foreground().consult(question)
         )
 
     def _run_model_call(
@@ -3410,7 +3653,7 @@ class Bridge:
         result = None
         try:
             result = call()
-        except (InputRegistrationError, ReviewRequestError) as exc:
+        except (InputRegistrationError, ReviewRequestError, RuntimeStartupError) as exc:
             error = (exc.code, exc.message, False)
         except BaseException as exc:  # noqa: BLE001 - contain runtime failures
             if method == "consult.interact":
@@ -3488,7 +3731,7 @@ class Bridge:
             )
             return
         try:
-            self.worker.submit(lambda: self._run_model_test(request_id))
+            self._submit_foreground(lambda: self._run_model_test(request_id))
         except BaseException:
             self._model_lock.release()
             raise
@@ -3499,7 +3742,7 @@ class Bridge:
         error = None
         try:
             result = self.runtime.test_model_connection()
-        except ReviewRequestError as exc:
+        except (ReviewRequestError, RuntimeStartupError) as exc:
             error = (exc.code, exc.message)
         except BaseException as exc:  # noqa: BLE001 - contain probe failures
             error = (
@@ -3686,11 +3929,10 @@ class Bridge:
             )
             return
 
-        runtime = self.runtime
         if method == "review.work.list":
             self.worker.submit(
                 lambda: self._run_review_read(
-                    request_id, "review.work.list", runtime.review_work_list
+                    request_id, "review.work.list", lambda: self.runtime.review_work_list()
                 )
             )
             return
@@ -3701,7 +3943,7 @@ class Bridge:
                 lambda: self._run_review_read(
                     request_id,
                     "review.candidates.list",
-                    lambda: runtime.review_candidates(
+                    lambda: self.runtime.review_candidates(
                         work_id=work_id, generation=generation
                     ),
                 )
@@ -3714,7 +3956,7 @@ class Bridge:
                 lambda: self._run_review_read(
                     request_id,
                     "review.candidate.detail",
-                    lambda: runtime.review_candidate_detail(
+                    lambda: self.runtime.review_candidate_detail(
                         candidate_id=candidate_id,
                         artifact_version=artifact_version,
                     ),
@@ -3738,7 +3980,7 @@ class Bridge:
                 )
                 return
             try:
-                self.worker.submit(
+                self._submit_foreground(
                     lambda: self._run_review_generate(
                         request_id, work_id, event_id
                     )
@@ -3759,7 +4001,7 @@ class Bridge:
             )
             return
         try:
-            self.worker.submit(
+            self._submit_foreground(
                 lambda: self._run_review_resolve(
                     request_id, candidate_id, artifact_version, decision
                 )
@@ -3806,7 +4048,7 @@ class Bridge:
     ) -> None:
         try:
             result = call()
-        except ReviewRequestError as exc:
+        except (ReviewRequestError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except BaseException as exc:  # noqa: BLE001 - a read must not kill the worker
             self._review_failure(request_id, method, exc, unknown=False)
@@ -3820,7 +4062,7 @@ class Bridge:
         self._run_model_call(
             request_id,
             "review.generate",
-            lambda: self.runtime.review_generate(work_id=work_id, event_id=event_id),
+            lambda: self._promote_for_foreground().review_generate(work_id=work_id, event_id=event_id),
         )
 
     def _run_review_resolve(
@@ -3834,7 +4076,7 @@ class Bridge:
         self._run_model_call(
             request_id,
             "review.resolve",
-            lambda: self.runtime.review_resolve(
+            lambda: self._promote_for_foreground().review_resolve(
                 candidate_id=candidate_id,
                 artifact_version=artifact_version,
                 decision=decision,
@@ -3845,7 +4087,7 @@ class Bridge:
         assert self.runtime is not None
         try:
             result = self.runtime.review_result(interaction_id=interaction_id)
-        except ReviewRequestError as exc:
+        except (ReviewRequestError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except BaseException as exc:  # noqa: BLE001 - never crash the reader
             self._review_failure(
@@ -3862,6 +4104,17 @@ class Bridge:
         *,
         unknown: bool,
     ) -> None:
+        if (
+            self.runtime is not None and self.runtime.read_only
+            and isinstance(exc, sqlite3.OperationalError)
+            and (getattr(exc, "sqlite_errorcode", 0) & 0xff) == sqlite3.SQLITE_READONLY
+        ):
+            # Some reads audit disclosure or repair a label in the PCS. A cold
+            # request may finish only if the existing operation is read-only.
+            self._send_error(
+                request_id, "FOREGROUND_REQUIRED", "此读取需要记录审计或恢复状态，请在首次前台操作后重试"
+            )
+            return
         code, message, result_unknown = _map_review_error(
             exc, default_unknown=unknown
         )
@@ -3982,21 +4235,20 @@ class Bridge:
             )
             return
 
-        runtime = self.runtime
         if read:
             self.worker.submit(
                 lambda: self._run_cognition_read(
                     request_id,
                     method,
-                    lambda: runtime.cognition_candidates(limit=limit),
+                    lambda: self.runtime.cognition_candidates(limit=limit),
                 )
             )
             return
-        self.worker.submit(
+        self._submit_foreground(
             lambda: self._run_cognition_read(
                 request_id,
                 method,
-                lambda: runtime.cognition_decide(
+                lambda: self._promote_for_foreground().cognition_decide(
                     candidate_id=candidate_id,
                     artifact_version=artifact_version,
                     decision=decision,
@@ -4009,7 +4261,7 @@ class Bridge:
     ) -> None:
         try:
             result = call()
-        except ReviewRequestError as exc:
+        except (ReviewRequestError, RuntimeStartupError) as exc:
             self._send_error(request_id, exc.code, exc.message)
         except BaseException as exc:  # noqa: BLE001 - never crash the worker
             self._review_failure(request_id, method, exc, unknown=False)
@@ -4235,7 +4487,7 @@ def _map_conversation_error(
 ) -> tuple[str, str, bool]:
     """Map a conversation refusal without leaking bodies, paths or credentials."""
 
-    if isinstance(exc, ConversationRequestError):
+    if isinstance(exc, (ConversationRequestError, RuntimeStartupError)):
         return exc.code, exc.message, False
     if isinstance(exc, ClientRequestConflict):
         return (
@@ -4342,7 +4594,10 @@ def _parser() -> argparse.ArgumentParser:
         description="QUINTESSENCE desktop Consult PCS sidecar",
     )
     parser.add_argument("--config", default=None, help="private host configuration file")
-    parser.add_argument("--prepare-instance", default=None, help="prepare a selected instance folder")
+    instance_command = parser.add_mutually_exclusive_group()
+    instance_command.add_argument("--prepare-instance", help="prepare or repair an instance folder")
+    instance_command.add_argument("--connect-instance", help="connect a selected instance folder")
+    instance_command.add_argument("--prepare-dreaming-startup", help="prepare the selected folder's additive startup assets")
     parser.add_argument("--adopt-legacy-by", default=None)
     parser.add_argument("--adopt-legacy-reason", default=None)
     parser.add_argument("--declare-component-by", default=None)
@@ -4367,8 +4622,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.memory_adapter:
         from quintessence_pcs.adapters.scope_recall.cli import main as adapter_main
         return adapter_main()
-    if args.prepare_instance:
-        from instance_manager import InstanceError, prepare
+    if args.prepare_dreaming_startup:
+        from instance_manager import prepare_dreaming_startup
+
+        try:
+            result = prepare_dreaming_startup(args.prepare_dreaming_startup)
+        except InstanceError as exc:
+            print(json.dumps({"ok": False, "error": {"code": exc.code, "message": str(exc)}}, ensure_ascii=False))
+            return 1
+        except (ConfigError, OSError):
+            print(json.dumps({"ok": False, "error": {"code": "DREAMING_PATH_UNAVAILABLE", "message": "Dreaming 启动目录不可用。"}}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+        return 0
+    if args.prepare_instance or args.connect_instance:
+        from instance_manager import connect_folder, prepare
+
         try:
             raw = sys.stdin.buffer.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
@@ -4380,7 +4649,9 @@ def main(argv: list[str] | None = None) -> int:
             declaration = None
             if args.never_created_component or args.declare_component_by is not None or args.declare_component_reason is not None:
                 declaration = {"by": args.declare_component_by, "reason": args.declare_component_reason, "components": args.never_created_component}
-            result = prepare(args.prepare_instance, template, legacy_adoption=adoption, component_declaration=declaration)
+            instance_path = args.connect_instance or args.prepare_instance
+            operation = connect_folder if args.connect_instance else prepare
+            result = operation(instance_path, template, legacy_adoption=adoption, component_declaration=declaration)
             print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
             return 0
         except InstanceError as exc:

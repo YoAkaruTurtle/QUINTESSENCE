@@ -35,6 +35,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from dreaming_host import DreamingHost, consult_policy
+from instance_manager import InstanceError, check_ready_memory
 from quintessence_pcs.conversation.orchestrator import (
     ConversationOrchestrator,
     PersonaNotReady,
@@ -134,6 +136,7 @@ from quintessence_pcs.foundation.errors import (
     RecordNotFound,
     Redacted,
 )
+from quintessence_pcs.store.recovery import RestoreBlocked
 from quintessence_pcs.conversation.persona import (
     PersonaExpectationConflict,
     PersonaState,
@@ -170,6 +173,7 @@ from quintessence_pcs.runtime.http_model import (
 from quintessence_pcs.runtime.model_port import (
     ModelAdapterError,
     ModelBudgetExceededError,
+    ModelCancelled,
     ModelNotAuthorizedError,
 )
 from quintessence_pcs.collaboration.generation import phase_label
@@ -247,6 +251,42 @@ class RuntimeStartupError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def open_ready_pcs(config: HostConfig, instance_id: str) -> CognitionStore:
+    """Open the validated PCS while the caller holds the instance lock."""
+    try:
+        store = CognitionStore.open_read_only(
+            config.database_path,
+            migrations_dir=_migrations_dir(),
+            deletion_ledger_dir=config.deletion_ledger_dir,
+            deletion_anchor_dir=config.deletion_anchor_dir,
+        )
+    except Exception as exc:  # startup refusal is a host state
+        reason = exc.reason if isinstance(exc, RestoreBlocked) else type(exc).__name__
+        raise RuntimeStartupError(
+            "INSTANCE_RECOVERY_REQUIRED",
+            f"instance is not ready for read-only startup ({reason})",
+        ) from exc
+    namespace = config.authority.namespace
+    try:
+        registered = store.connection.execute(
+            "SELECT source_event_id FROM event_journal WHERE namespace = ? "
+            "AND source_instance = 'instance-manager' AND source_kind = 'host_observation' "
+            "AND event_type IN ('InstanceCreated', 'InstanceAdopted') LIMIT 2",
+            (namespace,),
+        ).fetchall()
+        if namespace not in store.restore_decision.namespaces or (
+            registered and [row["source_event_id"] for row in registered]
+            != ["instance-registration:" + instance_id]
+        ):
+            raise RuntimeStartupError(
+                "INSTANCE_IDENTITY_MISMATCH", "PCS registration does not match this instance"
+            )
+    except BaseException:
+        store.close()
+        raise
+    return store
 
 
 class ConversationRequestError(Exception):
@@ -766,8 +806,16 @@ class DesktopRuntime:
         *,
         event_sink: Any | None = None,
         cancel_requested: Any | None = None,
+        instance_id: str | None = None,
+        dreaming_root: Path | None = None,
+        read_only: bool = False,
+        dreaming: DreamingHost | None = None,
     ) -> None:
         self.config = config
+        self.instance_id = instance_id
+        self.dreaming_root = dreaming_root
+        self._dreaming = dreaming
+        self.read_only = read_only
         self._event_sink = event_sink
         self._cancel_requested = cancel_requested
         self._lab_key_env = _ensure_synthetic_key(config)
@@ -794,16 +842,27 @@ class DesktopRuntime:
                 ",".join(self._memory_entry_compat["missing"]),
             )
         try:
-            self.store = CognitionStore.open(
-                config.database_path,
-                migrations_dir=_migrations_dir(),
-                deletion_ledger_dir=getattr(config, "deletion_ledger_dir", None),
-                deletion_anchor_dir=getattr(config, "deletion_anchor_dir", None),
-                deletion_adopt=getattr(config, "deletion_adopt", None),
-                ps06_unprotected=getattr(config, "ps06_unprotected", None),
-            )
+            if read_only:
+                assert instance_id is not None
+                self.store = open_ready_pcs(config, instance_id)
+                check_ready_memory(config)
+            else:
+                self.store = CognitionStore.open(
+                    config.database_path,
+                    migrations_dir=_migrations_dir(),
+                    deletion_ledger_dir=getattr(config, "deletion_ledger_dir", None),
+                    deletion_anchor_dir=getattr(config, "deletion_anchor_dir", None),
+                    deletion_adopt=getattr(config, "deletion_adopt", None),
+                    ps06_unprotected=getattr(config, "ps06_unprotected", None),
+                )
         except Exception as exc:  # noqa: BLE001 - startup refusal is a host state
+            if self.store is not None:
+                self.store.close()
             self._remove_synthetic_key()
+            if isinstance(exc, RuntimeStartupError):
+                raise
+            if isinstance(exc, InstanceError):
+                raise RuntimeStartupError(exc.code, str(exc)) from exc
             raise RuntimeStartupError(
                 "STORE_UNAVAILABLE", f"the PCS store could not be opened ({type(exc).__name__})"
             ) from exc
@@ -821,6 +880,7 @@ class DesktopRuntime:
             self._directive_access = None
             self._change_scope: dict[str, Any] = {}
             self._import_drafts: dict[str, dict[str, Any]] = {}
+            self._memory_page_cursors: dict[str, tuple[str, float]] = {}
             self._expression_error: str | None = None
             self.self_view = SelfViewService(self.store)
             self.contexts = ContextService(
@@ -837,9 +897,9 @@ class DesktopRuntime:
             self.persona: PersonaState | None = self._startup_persona(config)
             had_persona = self.persona is not None
             try:
-                if config.lab is not None:
+                if config.lab is not None and not read_only:
                     self._seed_lab(config)
-                if config.managed and config.provision:
+                if config.managed and config.provision and not read_only:
                     self._provision_managed(config)
             except Exception as exc:  # noqa: BLE001 - startup refusal is a host state
                 if had_persona:
@@ -849,7 +909,7 @@ class DesktopRuntime:
                     "the neutral default persona could not be provisioned "
                     f"({type(exc).__name__})",
                 ) from exc
-            if self.persona is None:
+            if self.persona is None and not read_only:
                 try:
                     self.persona = with_source(
                         read_active_persona(
@@ -927,13 +987,15 @@ class DesktopRuntime:
                     config
                 ),
                 memory_recall_factory=self._build_memory_recall_factory(config),
+                continuity=self._dreaming.continuity if self._dreaming is not None else None,
+                continuity_policy=lambda: consult_policy(self),
                 cognition_status_factory=self._pending_cognition_changes,
                 event_sink=self._event_sink,
                 cancel_requested=self._cancel_requested,
                 # Trusted host identity: from the loaded HostConfig only.
                 host_is_lab=config.is_lab,
             )
-            self.interrupted_turns = self.store.interrupt_stale_turns(
+            self.interrupted_turns = 0 if read_only else self.store.interrupt_stale_turns(
                 namespace=config.authority.namespace
             )
             self.experience_bridge = self._build_experience_bridge(config)
@@ -1233,7 +1295,7 @@ class DesktopRuntime:
                 "CONTEXT_BUDGET_TOO_SMALL",
                 "cognition requires budget.pcs_context_max_bytes >= 65536",
             )
-        if spec.propose:
+        if spec.propose and not self.read_only:
             # Auto on by default, but only for the policy's safe range.  An
             # explicit config id is honoured (and was validated above).
             self._cognition_auto_id = (
@@ -1445,7 +1507,7 @@ class DesktopRuntime:
         # ``memory.sqlite3``.  Without this check the mismatch only shows up as
         # ``IDENTITY_UNBOUND`` at the first recall, far from the cause.
         try:
-            adoption = ensure_binding(
+            adoption = None if self.read_only else ensure_binding(
                 spec.data_directory,
                 adopt_by=spec.adopt_by,
                 adopt_reason=spec.adopt_reason,
@@ -1473,6 +1535,7 @@ class DesktopRuntime:
                 scope_id=spec.scope_id,
                 session_id=spec.session_id,
                 test_mode=spec.test_mode,
+                immutable_search=self.read_only,
             )
         )
         self._memory_adapter = adapter
@@ -1606,11 +1669,7 @@ class DesktopRuntime:
     _PAGE_CURSOR_TTL_SECONDS = 600.0
 
     def _page_cursors(self) -> dict[str, tuple[str, float]]:
-        cursors = getattr(self, "_memory_page_cursors", None)
-        if cursors is None:
-            cursors = {}
-            self._memory_page_cursors = cursors
-        return cursors
+        return self._memory_page_cursors
 
     def _mint_page_cursor(self, upstream: str) -> str:
         """Remember one upstream cursor and return the short token for it."""
@@ -4602,6 +4661,8 @@ class DesktopRuntime:
             cognition_material_factory=self._build_cognition_material_factory(config),
             expression_material_factory=self._build_expression_material_factory(config),
             memory_recall_factory=self._build_memory_recall_factory(config),
+            continuity=self._dreaming.continuity if self._dreaming is not None else None,
+            continuity_policy=lambda: consult_policy(self),
             cognition_status_factory=self._pending_cognition_changes,
             event_sink=self._event_sink, cancel_requested=self._cancel_requested,
             host_is_lab=config.is_lab,
@@ -5191,6 +5252,13 @@ class DesktopRuntime:
                 "PROFILE_CORRUPT",
                 "the active host profile could not be read",
             )
+        # A ready folder can legitimately be awaiting its first explicit
+        # foreground use. The writer will provision its neutral profile and
+        # model grant, as before, when that action actually starts.
+        if self.read_only and config.managed and config.provision:
+            matching = self.model.latest_matching_authorization(namespace)
+            if (active is None or active.ref is None or matching is None) and config.persona_expected is None:
+                return True, None, None
         if active is None or active.ref is None:
             return (
                 False,
@@ -5200,7 +5268,10 @@ class DesktopRuntime:
         preflight = getattr(self.model, "preflight", None)
         if callable(preflight):
             try:
-                preflight(namespace=namespace)
+                if self.read_only:
+                    preflight(namespace=namespace, record_exhaustion=False)
+                else:
+                    preflight(namespace=namespace)
             except Exception as exc:  # noqa: BLE001 - preflight refusal is a state
                 return (
                     False,
@@ -5210,6 +5281,11 @@ class DesktopRuntime:
         return True, None, None
 
     # -------------------------------------------------------------- lifecycle
+
+    def retain_session_reads(self, previous: DesktopRuntime) -> None:
+        """Keep caller tokens issued by the reader while promoting this session."""
+        self._import_drafts = previous._import_drafts
+        self._memory_page_cursors = previous._memory_page_cursors
 
     def close(self) -> None:
         try:
@@ -5404,7 +5480,7 @@ def _build_model(
 class ScriptedHttpModel(DirectHttpModel):
     """``DirectHttpModel`` with a deterministic in-process transport.
 
-    Only ``_send`` is replaced.  Everything that makes an attempt auditable --
+    Only ``_send_blocking`` is replaced.  Everything that makes an attempt auditable --
     the send gate, the reservation, the request hash, the response validation,
     settlement and ``last_attempt_evidence`` -- stays in the real adapter.  The
     script is host configuration, not model output.
@@ -5443,13 +5519,20 @@ class ScriptedHttpModel(DirectHttpModel):
         self.last_request_sha256: str | None = None
 
     def _send_blocking(
-        self, body_text: str, *, timeout: float, api_key: str
+        self, body_text: str, *, timeout: float, api_key: str,
+        cancel: threading.Event | None = None,
     ) -> str:
         del timeout
         del api_key
-        if self._spec.delay_ms:
-            time.sleep(self._spec.delay_ms / 1000.0)
+        delay = self._spec.delay_ms / 1000.0
+        if cancel is not None:
+            if cancel.wait(delay):
+                raise ModelCancelled("the maintenance wait was cancelled before send")
+        elif delay:
+            time.sleep(delay)
         with self._script_lock:
+            if cancel is not None and cancel.is_set():
+                raise ModelCancelled("the maintenance wait was cancelled before send")
             if self._script_index >= len(self._script):
                 raise RuntimeError("the configured model script is exhausted")
             output = self._script[self._script_index]

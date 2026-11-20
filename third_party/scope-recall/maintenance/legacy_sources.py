@@ -1,0 +1,596 @@
+"""Legacy rows become sanitized ``source_events`` rows; nothing is written here.
+
+Every legacy record that carries content or history is archived as an imported
+source event so later authority (claims, episodes, deletions) can cite it by a
+stable Core id instead of a legacy row identity.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections import defaultdict
+from typing import Any, Mapping, cast
+
+from scope_recall.core.events import MAX_SEGMENT_CHARS, segment_key
+from scope_recall.maintenance.legacy_v2_compat import resolve_memory_scope
+
+from .legacy_catalog import DIGEST_TABLES, HISTORY_TABLES
+from .legacy_plan import Conversion, Row
+from .migration_records import (
+    LEGACY_BASELINE,
+    canonical_digest,
+    canonical_json,
+    json_value,
+    parse_instant,
+    recorded_time,
+    sanitized_text,
+    sanitized_value,
+    stable_legacy_id,
+)
+
+SOURCE_EVENT_FIELDS = (
+    "event_id",
+    "source_event_key",
+    "source_revision",
+    "source_group_key",
+    "segment_index",
+    "segment_total",
+    "scope_id",
+    "session_id",
+    "project_id",
+    "branch_id",
+    "origin",
+    "role",
+    "content",
+    "content_sha256",
+    "event_sha256",
+    "occurred_at",
+    "recorded_at",
+    "persisted_at",
+    "time_precision",
+    "capture_state",
+    "source_original_origin",
+    "dataset_id",
+    "import_provenance_sha256",
+    "extra_json",
+    "capture_gaps_json",
+    "read_blocked",
+    "suppressed",
+)
+
+_ROLE_ORIGINS = {
+    "user": ("user", "human_direct"),
+    "human": ("user", "human_direct"),
+    "assistant": ("assistant", "assistant_visible"),
+    "model": ("assistant", "assistant_visible"),
+    "tool": ("tool", "tool_observation"),
+    "function": ("tool", "tool_observation"),
+    "document": ("document", "external_document"),
+    "doc": ("document", "external_document"),
+    "system": ("system", "host_generated"),
+}
+_SCOPE_MODES = ("local", "shared", "shared_pool")
+_JOURNAL_EXTRA = (
+    "turn_number",
+    "platform",
+    "user_id",
+    "chat_id",
+    "thread_id",
+    "agent_identity",
+    "agent_workspace",
+)
+_DIGEST_EXTRA = {
+    "memory_digest_sources": {
+        "message_ids_namespace": "hermes_external_session_messages",
+        "source_hash_meaning": "sha1_of_candidate_content",
+        "evidence_resolution": "unresolved",
+    },
+    "nightly_digest_quarantine": {"retention_kind": "rejected_candidate_hash"},
+    "nightly_digest_runs": {
+        "retention_kind": "run_metadata_path",
+        "deleted_counter_is_aggregate_only": True,
+    },
+}
+
+
+# --- row readers -----------------------------------------------------------
+
+
+def _role_origin(role: object) -> tuple[str, str]:
+    return _ROLE_ORIGINS.get(str(role or "").lower(), ("unknown", "origin_unknown"))
+
+
+def _metadata(row: Row) -> dict[str, Any]:
+    value = json_value(row.get("metadata"), {})
+    return value if isinstance(value, dict) else {}
+
+
+def text_or_none(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def own_scope_id(row: Row) -> str | None:
+    """The row's own scope, or None when the column is absent or empty."""
+    value = row.get("scope_id")
+    return None if value is None or value == "" else str(value)
+
+
+def _by_id(rows: list[Row], key: str) -> dict[str, Row]:
+    return {str(row.get(key)): row for row in rows}
+
+
+def json_list(value: object) -> list[object]:
+    parsed = json_value(value, [])
+    return parsed if isinstance(parsed, list) else []
+
+
+def evidence_items(value: object) -> list[dict[str, Any]]:
+    return [item for item in json_list(value) if isinstance(item, dict)]
+
+
+def sanitized_list(value: object) -> list[str]:
+    return [
+        sanitized_text(item)[0] if isinstance(item, str) else canonical_json(sanitized_value(item))
+        for item in json_list(value)
+    ]
+
+
+def anchor_ref(anchor: dict[str, Any]) -> object:
+    return anchor.get("source_ref") or anchor.get("source_id") or anchor.get("ref")
+
+
+def journal_links(rows: dict[str, list[Row]]) -> dict[str, list[str]]:
+    """memory id -> journal ids from the legacy M:N link table, in row order."""
+    links: dict[str, list[str]] = defaultdict(list)
+    for row in rows["memory_journal_sources"]:
+        links[str(row.get("memory_id"))].append(str(row.get("journal_entry_id")))
+    return links
+
+
+def scope_descriptor(row: Row) -> dict[str, Any]:
+    """Use resolved old scope_id; shared_scope_id alone is not a block."""
+    metadata = _metadata(row)
+    source_scope = str(row.get("__legacy_source_scope_id") or row.get("scope_id") or "legacy-scope")
+    explicit = str(metadata.get("scope_mode") or "").strip().lower()
+    descriptors = {
+        "local": str(metadata.get("runtime_scope_id") or source_scope),
+        "shared": str(metadata.get("shared_scope_id") or row.get("shared_scope_id") or ""),
+        "shared_pool": str(metadata.get("shared_pool_scope_id") or row.get("shared_pool_scope_id") or ""),
+    }
+    gap = ""
+    if explicit in _SCOPE_MODES:
+        if descriptors[explicit] != source_scope:
+            gap = f"explicit_{explicit}_scope_mismatch"
+    elif explicit:
+        gap = "unsupported_scope_mode"
+    return {
+        "row_scope_id": str(row.get("scope_id") or "legacy-scope"),
+        "source_scope_id": source_scope,
+        "runtime_scope_id": descriptors["local"],
+        "shared_scope_id": descriptors["shared"],
+        "shared_pool_scope_id": descriptors["shared_pool"],
+        "scope_mode": explicit if explicit in _SCOPE_MODES else "legacy_row_scope",
+        "gap": gap,
+    }
+
+
+def map_scope_rows(
+    rows: list[Row],
+    mapping: Mapping[str, str],
+    *,
+    default_source_scope: str | None = None,
+) -> list[Row]:
+    """Rewrite scope_id through the handoff map, remembering the source scope."""
+    mapped: list[Row] = []
+    for row in rows:
+        source = own_scope_id(row)
+        if source is None and default_source_scope is not None:
+            row = {**row, "scope_id": default_source_scope, "__legacy_default_scope": default_source_scope}
+            source = default_source_scope
+        if source is None:
+            mapped.append(row)
+            continue
+        copy = {**row, "__legacy_source_scope_id": source}
+        target = mapping.get(source)
+        if target is None:
+            copy["__scope_mapping_gap"] = source
+        else:
+            copy["scope_id"] = target
+        mapped.append(copy)
+    return mapped
+
+
+def resolve_evidence_ref(
+    raw: object,
+    source_type: object,
+    journals: dict[str, str],
+    memories: dict[str, str],
+    archives: dict[tuple[str, str], str],
+) -> str | None:
+    """Resolve a legacy evidence reference to an archived Core event id."""
+    value, kind = str(raw or "").strip(), str(source_type or "").lower().strip()
+    if (kind, value) in archives:
+        return archives[(kind, value)]
+    if value in journals:
+        return journals[value]
+    if value in memories:
+        return memories[value]
+    tail = re.split(r"[:/]+", value)[-1]
+    if kind in {"memory", "memory_id", "fact_memory"}:
+        return memories.get(tail)
+    if kind in {"journal", "journal_entry", "event", "source"}:
+        return journals.get(tail)
+    return journals.get(tail) or memories.get(tail)
+
+
+# --- source events ---------------------------------------------------------
+
+
+def _source_event(
+    table: str,
+    identity: str,
+    row: Row,
+    scope: dict[str, Any],
+    content: str,
+    kind: str,
+    original: str,
+    extra: dict[str, Any],
+    redacted: bool,
+) -> Row:
+    """One imported source event; ``extra["segment"]`` makes it a part of a record stored in parts (``archive``)."""
+    group = f"legacy:{table}:{identity}"
+    segment = extra.get("segment")
+    index = segment["index"] if segment else 0
+    key = segment_key(group, index) if index else group
+    stamp = row.get("created_at") or row.get("updated_at") or row.get("started_at")
+    occurred, precision = parse_instant(stamp)
+    recorded = recorded_time(row.get("updated_at") or row.get("created_at") or row.get("started_at"))
+    role = _role_origin(row.get("role"))[0] if table == "journal_entries" else "unknown"
+    body = {
+        "protocol_version": "1.1",
+        "source_event_key": key,
+        "source_revision": 1,
+        "origin": "imported",
+        "role": role,
+        "content": content,
+        "occurred_at": occurred,
+        "recorded_at": recorded,
+        "time_precision": precision,
+        "capture_state": "complete",
+        "evidence_refs": [],
+    }
+    extra_payload = {
+        "legacy_table": table,
+        "legacy_id": identity,
+        "source_kind": kind,
+        "redaction_applied": redacted,
+        "scope_authorization": scope,
+        **cast(dict[str, Any], sanitized_value(extra)),
+    }
+    if segment:
+        body["segment"] = extra_payload["segment"] = segment
+    return {
+        "event_id": stable_legacy_id(
+            "event", canonical_json([table, identity, index]) if index else f"{table}:{identity}"
+        ),
+        "source_event_key": key,
+        "source_revision": 1,
+        "source_group_key": group,
+        "segment_index": index,
+        "segment_total": segment["total"] if segment else None,
+        "scope_id": scope["row_scope_id"],
+        "session_id": str(row.get("session_id") or f"legacy-session-{scope['row_scope_id']}"),
+        "project_id": text_or_none(row.get("project_id")),
+        "branch_id": text_or_none(row.get("branch_id")),
+        "origin": "imported",
+        "role": role,
+        "content": content,
+        "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "event_sha256": canonical_digest(body),
+        "occurred_at": occurred,
+        "recorded_at": recorded,
+        "persisted_at": recorded,
+        "time_precision": precision,
+        "capture_state": "complete",
+        "source_original_origin": original,
+        "dataset_id": "legacy-578b",
+        "import_provenance_sha256": canonical_digest({"baseline": LEGACY_BASELINE, "key": group}),
+        "extra_json": canonical_json(extra_payload),
+        "capture_gaps_json": canonical_json([scope["gap"]] if scope["gap"] else []),
+        "read_blocked": int(bool(scope["gap"])),
+        "suppressed": 0,
+        "scope_gap": scope["gap"],
+        # The record a source came from, which no later stage changes (a digest row moves to its memory's group).
+        "legacy_table": table,
+        "legacy_record": group,
+    }
+
+
+def archive(
+    cv: Conversion,
+    table: str,
+    identity: str,
+    row: Row,
+    content: str,
+    kind: str,
+    original: str,
+    extra: dict[str, Any],
+    scope: dict[str, Any],
+    redacted: bool = False,
+) -> Row:
+    """Queue one legacy record as an imported source event; scope gaps block.
+
+    A record longer than a source holds (a 2.0 memory merged again and again reached 77,000 characters) is queued in
+    parts of at most ``MAX_SEGMENT_CHARS``, as ``prepare_capture`` stores a long message: every character once and in
+    order, one source group under the record's key.  The first part keeps the record's event id, key and metadata, so
+    whatever cites the record cites it; ``cv.record_parts`` lists the parts."""
+    cv.redactions += int(redacted)
+    cv.permission_gaps += int(bool(scope["gap"]))
+    texts = [content[start : start + MAX_SEGMENT_CHARS] for start in range(0, len(content), MAX_SEGMENT_CHARS)]
+    if len(texts) > 1:
+        group = f"legacy:{table}:{identity}"
+        parts = [
+            _source_event(
+                table,
+                identity,
+                row,
+                scope,
+                text,
+                kind,
+                original,
+                {
+                    **(extra if index == 0 else {}),
+                    "segment": dict(group_key=group, index=index, total=len(texts), truncated=False),
+                },
+                redacted,
+            )
+            for index, text in enumerate(texts)
+        ]
+        cv.record_parts[parts[0]["event_id"]] = parts
+    else:
+        parts = [_source_event(table, identity, row, scope, content, kind, original, extra, redacted)]
+    cv.sources.extend(parts)
+    item = parts[0]
+    if scope["gap"]:
+        cv.unmapped(table, item["source_event_key"], scope["gap"], scope_authorization=sanitized_value(scope))
+    return item
+
+
+def _archive_record(
+    cv: Conversion,
+    table: str,
+    identity: str,
+    scope_row: Row,
+    row: Row,
+    kind: str,
+    scope: dict[str, Any] | None = None,
+    **extra: Any,
+) -> Row:
+    """Archive a row whose content is its own sanitized canonical JSON."""
+    content, changed = sanitized_text(canonical_json(sanitized_value(row)))
+    # A row longer than a source is held whole by its parts; a second copy in its metadata would not fit there.
+    copy = {"legacy_row": sanitized_value(row)} if len(content) <= MAX_SEGMENT_CHARS else {}
+    item = archive(
+        cv,
+        table,
+        identity,
+        {**scope_row, "id": identity},
+        content,
+        kind,
+        "origin_unknown",
+        {**copy, **extra},
+        scope if scope is not None else scope_descriptor(scope_row),
+        changed,
+    )
+    cv.archives[(table, identity)] = item["event_id"]
+    return item
+
+
+def archive_journal(cv: Conversion) -> None:
+    for row in cv.rows["journal_entries"]:
+        role, original = _role_origin(row.get("role"))
+        content, changed = sanitized_text(row.get("content"))
+        extra = {"role": role, **{key: row.get(key) for key in _JOURNAL_EXTRA}, "metadata": _metadata(row)}
+        item = archive(
+            cv,
+            "journal_entries",
+            str(row.get("id") or "unknown"),
+            row,
+            content,
+            "raw_event",
+            original,
+            extra,
+            scope_descriptor(row),
+            changed,
+        )
+        cv.journal_refs[str(row.get("id"))] = item["event_id"]
+
+
+def archive_memories(cv: Conversion) -> None:
+    links = journal_links(cv.rows)
+    for row in cv.rows["memories"]:
+        content, changed_content = sanitized_text(row.get("content") or row.get("summary"))
+        summary, changed_summary = sanitized_text(row.get("summary"))
+        meta = _metadata(row)
+        ids = list(links.get(str(row.get("id")), []))
+        for ref in json_list(meta.get("journal_entry_ids")):
+            if str(ref) not in ids:
+                ids.append(str(ref))
+        scope = scope_descriptor(row)
+        if cv.memory_authority is not None:
+            scope = resolve_memory_scope(row, scope, authority=cv.memory_authority)
+        extra = {
+            "summary": summary,
+            "source": row.get("source") or "",
+            "target": row.get("target") or "",
+            "legacy_journal_ids": ids,
+            "legacy_metadata": meta,
+        }
+        item = archive(
+            cv,
+            "memories",
+            str(row.get("id") or "unknown"),
+            row,
+            content,
+            "durable_memory_evidence",
+            "origin_unknown",
+            extra,
+            scope,
+            changed_content or changed_summary,
+        )
+        cv.memory_refs[str(row.get("id"))] = item["event_id"]
+        cv.memory_items[str(row.get("id"))] = item
+
+
+def archive_fact_records(cv: Conversion) -> None:
+    """Facts and their evidence rows are archived verbatim; claims cite them."""
+    facts = _by_id(cv.rows["fact_claims"], "claim_id")
+    for row in cv.rows["fact_claims"]:
+        identity = str(row.get("claim_id") or row.get("id") or "unknown")
+        _archive_record(cv, "fact_claims", identity, row, row, "legacy_fact_record")
+    for row in cv.rows["fact_claim_evidence"]:
+        identity = str(row.get("evidence_id") or row.get("claim_id") or "unknown")
+        scope_row = row if row.get("scope_id") else _inherit(row, facts.get(str(row.get("claim_id")), {}))
+        archive_row = {**row, "project_id": scope_row.get("project_id"), "branch_id": scope_row.get("branch_id")}
+        _archive_record(
+            cv, "fact_claim_evidence", identity, archive_row, row, "legacy_fact_record", scope_descriptor(scope_row)
+        )
+
+
+def _inherit(row: Row, parent: Row) -> Row:
+    return {
+        **row,
+        "scope_id": parent.get("scope_id"),
+        "project_id": parent.get("project_id"),
+        "branch_id": parent.get("branch_id"),
+    }
+
+
+def report_target_tombstones(cv: Conversion) -> None:
+    for row in cv.rows["privacy_purge_tombstones"]:
+        identity = canonical_digest(
+            {key: row.get(key) for key in ("operation_id", "target_hash", "content_hash", "erased_at")}
+        )
+        cv.unmapped(
+            "privacy_purge_tombstones",
+            identity,
+            "unmapped_target_tombstone_blocks_cutover",
+            redacted_row=sanitized_value(row),
+        )
+
+
+def _history_parent(table: str, row: Row, parents: dict[str, dict[str, Row]]) -> Row:
+    if table in {"skill_anchors", "skill_conflicts", "playbook_versions"}:
+        return parents["procedural_playbooks"].get(str(row.get("playbook_id")), {})
+    if table == "fact_freshness":
+        subject_type = str(row.get("subject_type") or "").lower()
+        if subject_type in {"memory", "memories"}:
+            return parents["memories"].get(str(row.get("subject_id")), {})
+        if subject_type in {"fact", "fact_claim", "claim"}:
+            return parents["fact_claims"].get(str(row.get("subject_id")), {})
+    return {}
+
+
+def archive_history(cv: Conversion) -> None:
+    """History rows without a scope inherit their parent's; unresolved ones block."""
+    parents = {
+        "procedural_playbooks": _by_id(cv.rows["procedural_playbooks"], "id"),
+        "memories": _by_id(cv.rows["memories"], "id"),
+        "fact_claims": _by_id(cv.rows["fact_claims"], "claim_id"),
+    }
+    for table in sorted(HISTORY_TABLES | {"procedural_playbooks", "playbook_versions"}):
+        for row in cv.rows[table]:
+            identity = str(
+                row.get("id")
+                or row.get("action_id")
+                or row.get("evidence_id")
+                or row.get("playbook_id")
+                or row.get("version")
+                or "unknown"
+            )
+            scope_row = row
+            if not row.get("scope_id"):
+                parent = _history_parent(table, row, parents)
+                if not parent.get("scope_id"):
+                    cv.unmapped(
+                        table, identity, "history_scope_unresolved_blocks_cutover", redacted_row=sanitized_value(row)
+                    )
+                    continue
+                scope_row = _inherit(row, parent)
+            _archive_record(cv, table, identity, scope_row, row, "legacy_history")
+
+
+def archive_digests(cv: Conversion) -> None:
+    """Digest audit rows are read-blocked archives under the manifest's retention scopes.
+
+    A digest bridge attached to a converted memory shares that memory's source
+    group, so Core's sibling closure fences it when the memory is deleted; no
+    event-to-event evidence link is needed (and 'event' is not a durable object).
+    event_sha256 hashes the protocol body only, so source_group_key and
+    segment_index stay writable after the event is built.
+    """
+    memories = _by_id(cv.rows["memories"], "id")
+    next_segment: dict[str, int] = {}
+    for table in sorted(DIGEST_TABLES):
+        for row in cv.rows[table]:
+            parent_item = None
+            attached = False
+            if table == "memory_digest_sources":
+                mid, rid, sid = (str(row.get(key) or "") for key in ("memory_id", "run_id", "session_id"))
+                identity = f"{len(mid)}:{mid}-{len(rid)}:{rid}-{len(sid)}:{sid}"
+                parent = memories.get(mid, {})
+                parent_item = cv.memory_items.get(mid)
+                attached = parent_item is not None and bool(parent.get("scope_id"))
+                if attached:
+                    scope_row = {
+                        **parent,
+                        "session_id": sid,
+                        "created_at": row.get("created_at"),
+                        "run_id": rid,
+                        "message_ids": row.get("message_ids"),
+                        "source_hash": row.get("source_hash"),
+                    }
+                else:
+                    scope_row = {**row, "scope_id": cv.orphan_bridge_scope}
+            else:
+                identity = str(row.get("id") or "unknown")
+                scope_row = {**row, "scope_id": cv.digest_audit_scope}
+            extra: dict[str, Any] = {
+                "source_kind": "legacy_audit",
+                "retention_namespace": "hermes_digest_archive",
+                "composite_id": identity,
+                "read_blocked": True,
+                **_DIGEST_EXTRA[table],
+            }
+            if table == "memory_digest_sources":
+                extra["attachment_resolution"] = "attached" if parent_item else "absent_memory"
+                if attached:
+                    extra["legacy_parent_event_id"] = parent_item["event_id"]
+            scope = json.loads(parent_item["extra_json"])["scope_authorization"] if attached else None
+            item = _archive_record(cv, table, identity, scope_row, row, "legacy_audit", scope, **extra)
+            # Every part of a row stored in parts, as its first.
+            for part in cv.record_parts.get(item["event_id"], [item]):
+                part["read_blocked"] = 1
+                if attached and parent_item is not None:
+                    for key in ("source_group_key", "scope_id", "project_id", "branch_id"):
+                        part[key] = parent_item[key]
+                    group = str(parent_item["source_group_key"])
+                    # After the memory's own parts, when it is stored in parts, and the bridge's own earlier ones.
+                    part["segment_index"] = next_segment.get(group, parent_item["segment_total"] or 1)
+                    part["segment_total"] = None
+                    next_segment[group] = part["segment_index"] + 1
+
+
+def archive_sources(cv: Conversion) -> None:
+    """Archive every convertible legacy record, in the order the report expects."""
+    archive_journal(cv)
+    archive_memories(cv)
+    archive_fact_records(cv)
+    report_target_tombstones(cv)
+    archive_history(cv)
+    archive_digests(cv)
+    cv.episode_refs = {
+        str(row.get("id")): stable_legacy_id("episode", row.get("id")) for row in cv.rows["task_episodes"]
+    }

@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -39,6 +40,8 @@ from quintessence_pcs.runtime import (  # noqa: E402
     ConsultSendPolicy,
     DirectHttpModel,
 )
+from quintessence_pcs.runtime.context import ContinuityMaterial  # noqa: E402
+from quintessence_pcs.runtime.dreaming_journal import JournalEntry, JournalPeriod  # noqa: E402
 from quintessence_pcs.runtime.model_port import ModelAdapterError  # noqa: E402
 from quintessence_pcs.store.conversation import (  # noqa: E402
     HistoryBundle,
@@ -151,6 +154,36 @@ class OrchestratorTests(ModelPortTestCase):
         return self.store.turn_result(
             namespace=NS, host_instance=HOST, turn_id=turn_id, access=self.access
         )
+
+    def test_long_journal_reaches_the_normal_chat_model_intact(self):
+        previous, execution = self.answer("合成经历：核对备份。", "记录好了。")
+        self.assertEqual("completed", execution.turn.state)
+        journal_text = ("合成经历的长回顾。" * 3000) + "最后一条重要回忆"
+        self.assertGreater(len(journal_text.encode("utf-8")), MAX_CONTEXT_BYTES)
+        journal = JournalEntry(
+            period=JournalPeriod("month", date(2026, 3, 1), date(2026, 4, 1), "Asia/Shanghai"),
+            text=journal_text, tags=("备份",), refs=(previous.input_ref,), children=(),
+            revision="synthetic-journal-revision",
+        )
+        material = ContinuityMaterial(
+            journals=(journal,),
+            journal_live=lambda entry: self.store.dreaming_experience_ref(
+                self.access, ref=entry.refs[0],
+            ) is not None,
+        )
+        orchestrator = ConversationOrchestrator(
+            self.store,
+            context_service=self.contexts,
+            model=self.chat_model,
+            continuity=lambda policy, turn, ref: material,
+            continuity_policy=lambda: self.policy,
+        )
+        self.enqueue({"action": "none", "reply": "那个月主要核对了备份。"})
+        _, execution = self.send("上个月发生了什么", orchestrator=orchestrator)
+        self.assertEqual("completed", execution.turn.state)
+        request = json.loads(self.provider.requests[-1]["body"])
+        document = json.loads(request["messages"][1]["content"])
+        self.assertEqual(journal_text, document["journal_recall"]["journals"][0]["text"])
 
     # ---------------------------------------------------------------- C01
 

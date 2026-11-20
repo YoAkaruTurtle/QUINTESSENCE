@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,18 +44,22 @@ class DataInstanceLock:
     def held(self) -> bool:
         return self._held
 
-    def acquire(self, *, owner: str) -> None:
+    def acquire(self, *, owner: str, preserve: bool = False) -> None:
         """Try to take the lock without blocking; raise :class:`DataLocked`."""
 
         if self._held:
             raise RuntimeError("the data lock is already held by this object")
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if not preserve:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            if preserve and not stat.S_ISREG(self.lock_path.lstat().st_mode):
+                raise DataLocked("the data instance lock must be a regular file")
+            flags = os.O_RDWR if preserve else os.O_RDWR | os.O_CREAT
+            fd = os.open(self.lock_path, flags, 0o600)
         except OSError as exc:
             raise DataLocked("the data instance lock file is not writable") from exc
         try:
-            if os.fstat(fd).st_size < _LOCK_BYTE:
+            if not preserve and os.fstat(fd).st_size < _LOCK_BYTE:
                 os.write(fd, b"\n")
             _lock(fd)
         except OSError as exc:
@@ -71,6 +76,8 @@ class DataInstanceLock:
             raise
         self._fd = fd
         self._held = True
+        if preserve:
+            return
         record = {
             "schema": "desktop.data-lock.v1",
             "pid": os.getpid(),

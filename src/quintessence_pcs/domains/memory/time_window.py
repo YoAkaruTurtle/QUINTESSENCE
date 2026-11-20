@@ -68,6 +68,12 @@ _UNSUPPORTED = re.compile(
     r"凌晨|早上|上午|中午|下午|傍晚|晚上|夜里|半夜|今晚|今早|今晨|昨晚"
 )
 
+_JOURNAL_PERIOD = re.compile(
+    r"(?P<week>上周|上星期|上礼拜)(?![一二三四五六日天0-9])"
+    r"|(?P<month>上个月|上月)(?![0-9一二三四五六七八九十])"
+    r"|(?P<year>去年)(?![0-9一二三四五六七八九十])"
+)
+
 _QUOTE_CHARS = re.compile(r"[「」『』“”\"']")
 _QUOTE_CUES = ("他说", "她说", "据说", "听说", "根据", "按照", "引用", "原文", "转述", "自称")
 _HYPOTHETICAL = (
@@ -139,7 +145,7 @@ _NON_CONTENT = re.compile(r"[\s\W_]+", re.UNICODE)
 
 @dataclass(frozen=True)
 class TimeWindow:
-    """One whole local day as a half-open UTC instant range."""
+    """A named local calendar span as a half-open UTC instant range."""
 
     start: datetime
     end: datetime
@@ -225,15 +231,19 @@ def _day_start(day: date, zone: tzinfo) -> datetime:
     return datetime.combine(day, time(0), tzinfo=zone)
 
 
-def _window(day: date, zone: tzinfo, label: str) -> TimeWindow:
-    start = _day_start(day, zone)
-    end = _day_start(day + timedelta(days=1), zone)
+def _calendar_window(
+    start: date, end: date, zone: tzinfo, label: str, *, precision: str = "day"
+) -> TimeWindow:
     return TimeWindow(
-        start=start.astimezone(timezone.utc),
-        end=end.astimezone(timezone.utc),
-        precision="day",
+        start=_day_start(start, zone).astimezone(timezone.utc),
+        end=_day_start(end, zone).astimezone(timezone.utc),
+        precision=precision,
         label=label,
     )
+
+
+def _window(day: date, zone: tzinfo, label: str) -> TimeWindow:
+    return _calendar_window(day, day + timedelta(days=1), zone, label)
 
 
 def _normalize(text: str) -> str:
@@ -412,6 +422,57 @@ def parse_time_query(
         rest=rest,
         time_only=_content_chars(rest) == 0,
         reason=past[0].label,
+    )
+
+
+def parse_journal_time_query(
+    text: Any, *, anchor: Any, timezone_name: str = DEFAULT_TIMEZONE
+) -> TimeQuery | None:
+    """Resolve closed calendar periods without changing occurrence matching."""
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    normalized = _normalize(text)
+    if len(normalized) > _MAX_QUERY_CHARS:
+        return None
+    moment = parse_timestamp(anchor)
+    if moment is None:
+        return None
+    try:
+        zone = resolve_zone(timezone_name)
+    except ValueError:
+        return None
+    today = _local_date(moment, zone)
+    matches = tuple(_JOURNAL_PERIOD.finditer(normalized))
+    remaining = _remove_spans(normalized, [match.span() for match in matches])
+    days = parse_time_query(remaining, anchor=anchor, timezone_name=timezone_name)
+    if days is not None and (days.future or not days.windows):
+        return None
+    windows = list(days.windows if days is not None else ())
+    for match in matches:
+        kind = match.lastgroup
+        if kind == "week":
+            end = today - timedelta(days=today.weekday())
+            start = end - timedelta(days=7)
+        elif kind == "month":
+            end = today.replace(day=1)
+            start = (end - timedelta(days=1)).replace(day=1)
+        else:
+            end = today.replace(month=1, day=1)
+            start = end.replace(year=end.year - 1)
+        windows.append(_calendar_window(start, end, zone, match.group(), precision=kind))
+    today_start = _day_start(today, zone)
+    unique = {
+        (window.start, window.end, window.precision): window
+        for window in windows if window.end <= today_start
+    }
+    if not unique:
+        return None
+    ordered = tuple(sorted(unique.values(), key=lambda window: (window.start, window.end)))
+    rest = days.rest if days is not None else remaining
+    return TimeQuery(
+        ordered, _intent(rest), rest, _content_chars(rest) == 0,
+        ordered[0].label,
     )
 
 
@@ -631,6 +692,7 @@ __all__ = [
     "in_windows",
     "message_time",
     "parse_event_time",
+    "parse_journal_time_query",
     "parse_time_query",
     "parse_timestamp",
     "resolve_zone",

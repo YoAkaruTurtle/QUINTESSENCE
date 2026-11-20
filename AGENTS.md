@@ -7,3 +7,12 @@
 - Keep private instances, credentials, model outputs, audit evidence and build/test products outside the source tree. Do not copy real identity or persona text into negative tests.
 - Preserve third-party notices and existing domain/safety boundaries. Run the relevant tests and repository gate without bypassing hooks.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md), especially the development-mainline and local-archive policy.
+
+## Scope Recall development
+
+The pinned runtime source is in [third_party/scope-recall](third_party/scope-recall/).
+Run `python tools/setup_scope_recall.py` from the checkout to prepare its local
+Python environment. Use `python tools/setup_scope_recall.py --check` to verify it.
+For focused verification, use `python tools/run_tests.py --scope-recall --test`
+followed by the affected unittest module names. See the
+[desktop development guide](apps/desktop/README.md#development) for sidecar builds.

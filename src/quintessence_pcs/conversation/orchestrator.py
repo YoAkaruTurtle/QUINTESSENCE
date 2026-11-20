@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
 from ..collaboration.generation import (
@@ -43,12 +43,14 @@ from ..runtime.collab_protocol import (
     COLLAB_PROTOCOL_VERSION,
     COLLAB_V2_PROTOCOL_VERSION,
     CollabOutput,
+    ConsultSendPolicy,
     protocol_policy_version,
     protocol_renderer_version,
     repair_feedback,
 )
 from ..runtime.context import (
     ConsultQueryMaterial,
+    ContinuityMaterial,
     ContextService,
     PublishedMessageMaterial,
     ReadSetEntry,
@@ -241,6 +243,7 @@ class _ExecutionState:
     stage_id: str | None = None
     interaction_id: str | None = None
     context_id: str | None = None
+    continuity: ContinuityMaterial | None = None
 
 
 class _TurnFailure(Exception):
@@ -274,6 +277,8 @@ class ConversationOrchestrator:
         ) = None,
         expression_material_factory: Callable[[Any], Any] | None = None,
         memory_recall_factory: Callable[[Any, Mapping[str, Any]], Any] | None = None,
+        continuity: Callable[[ConsultSendPolicy, TurnRow, Mapping[str, Any]], ContinuityMaterial] | None = None,
+        continuity_policy: Callable[[], ConsultSendPolicy] | None = None,
         cognition_status_factory: Callable[[], int] | None = None,
         event_sink: Callable[[Any, Mapping[str, Any] | None], None] | None = None,
         cancel_requested: Callable[[str], bool] | None = None,
@@ -292,6 +297,8 @@ class ConversationOrchestrator:
         self._cognition_material_factory = cognition_material_factory
         self._expression_material_factory = expression_material_factory
         self._memory_recall_factory = memory_recall_factory
+        self._continuity = continuity
+        self._continuity_policy = continuity_policy
         self._cognition_status_factory = cognition_status_factory
         self._event_sink = event_sink
         self._cancel_requested = cancel_requested or (lambda _turn_id: False)
@@ -345,6 +352,7 @@ class ConversationOrchestrator:
             )
             state.stage_id = stage.stage_id
             recall_session = self._new_memory_recall_session(turn, input_ref)
+            state.continuity = self._initial_continuity(turn, input_ref, access)
             runner = (
                 self._run_tool_loop if self._tools_enabled() else self._run_single
             )
@@ -502,6 +510,62 @@ class ConversationOrchestrator:
             LOGGER.warning("memory recall session construction failed")
             return None
 
+    def _live_continuity_policy(self, namespace: str) -> ConsultSendPolicy | None:
+        if self._continuity_policy is None:
+            return None
+        try:
+            policy = self._continuity_policy()
+        except Exception:  # noqa: BLE001 - missing authority degrades optional continuity
+            LOGGER.warning("continuity policy could not be read")
+            return None
+        if (
+            not isinstance(policy, ConsultSendPolicy) or policy.namespace != namespace
+            or not policy.disclose or "consult" not in policy.purposes
+        ):
+            return None
+        return policy
+
+    def _initial_continuity(
+        self, turn: TurnRow, input_ref: Mapping[str, Any], access: Any,
+    ) -> ContinuityMaterial | None:
+        if self._continuity is None or self._cancel_requested(turn.turn_id):
+            return None
+        policy = self._live_continuity_policy(turn.namespace)
+        if policy is None or policy.to_experience_access() != access:
+            return None
+        try:
+            current = self._store.turn_for_host(
+                namespace=policy.namespace, host_instance=policy.host_instance,
+                turn_id=turn.turn_id,
+            )
+            if current.state != "running" or current.input_ref != input_ref:
+                return None
+            material = self._continuity(policy, current, dict(input_ref))
+        except Exception:  # noqa: BLE001 - optional recall failures do not stop the turn
+            LOGGER.warning("continuity material could not be selected")
+            return None
+        return material if isinstance(material, ContinuityMaterial) else None
+
+    def _build_consult_context(self, state: _ExecutionState, turn: TurnRow, **arguments: Any) -> Any:
+        material = state.continuity
+        if material is not None:
+            policy = self._live_continuity_policy(turn.namespace)
+            if policy is not None and policy.to_experience_access() == arguments["access"]:
+                arguments.update(continuity=material, conversation_id=turn.conversation_id)
+        context = self._contexts.build_consult_context(**arguments)
+        if context.continuity.has_content:
+            return replace(context, continuity_guard=lambda: self._require_continuity_send(context))
+        return context
+
+    def _require_continuity_send(self, context: Any) -> None:
+        material = context.continuity
+        if not material.has_content:
+            return
+        policy = self._live_continuity_policy(context.namespace)
+        if policy is None:
+            raise ContextStale("continuity disclosure authority changed")
+        self._contexts.require_consult_continuity_live(context, policy.to_experience_access())
+
     def _memory_recall_material(
         self, session: Any, *, tool_results: Any, history: Any
     ) -> Any:
@@ -571,7 +635,8 @@ class ConversationOrchestrator:
         memory_recall = self._memory_recall_material(
             memory_recall_session, tool_results=(), history=history
         )
-        context = self._contexts.build_consult_context(
+        context = self._build_consult_context(
+            state, turn,
             namespace=namespace,
             access=access,
             input_refs=[input_ref],
@@ -735,7 +800,8 @@ class ConversationOrchestrator:
         memory_recall = self._memory_recall_material(
             memory_recall_session, tool_results=(), history=history
         )
-        context = self._contexts.build_consult_context(
+        context = self._build_consult_context(
+            state, turn,
             namespace=namespace,
             access=access,
             input_refs=[input_ref],
@@ -1111,7 +1177,8 @@ class ConversationOrchestrator:
             memory_recall = self._memory_recall_material(
                 memory_recall_session, tool_results=selected, history=history
             )
-            context = self._contexts.build_consult_context(
+            context = self._build_consult_context(
+                state, turn,
                 namespace=namespace,
                 access=access,
                 input_refs=[input_ref],
@@ -1241,7 +1308,8 @@ class ConversationOrchestrator:
             pending_cognition_changes=pending, bundle=bundle
         )
         try:
-            expression_context = self._contexts.build_consult_context(
+            expression_context = self._build_consult_context(
+                state, turn,
                 namespace=namespace,
                 access=access,
                 input_refs=[input_ref],
@@ -1509,6 +1577,7 @@ class ConversationOrchestrator:
         for _attempt in range(attempts):
             before = None if feedback is None else self._attempt_ids(context)
             try:
+                self._require_continuity_send(context)
                 result = generate_once(
                     self._store,
                     self._model,
@@ -1583,6 +1652,7 @@ class ConversationOrchestrator:
         for _attempt in range(attempts):
             before = None if feedback is None else self._attempt_ids(context)
             try:
+                self._require_continuity_send(context)
                 result = generate_once(
                     self._store,
                     self._model,

@@ -174,10 +174,13 @@ class ForegroundLatencyTests(unittest.TestCase):
         assert runtime is not None
         original = runtime.maintenance_model._send_blocking
 
-        def slow(body_text: str, *, timeout: float, api_key: str) -> str:
+        def slow(
+            body_text: str, *, timeout: float, api_key: str,
+            cancel: threading.Event | None = None,
+        ) -> str:
             self.maintenance_started.set()
             self.maintenance_release.wait(30.0)
-            return original(body_text, timeout=timeout, api_key=api_key)
+            return original(body_text, timeout=timeout, api_key=api_key, cancel=cancel)
 
         runtime.maintenance_model._send_blocking = slow  # type: ignore[method-assign]
         chat_original = runtime.model._send_blocking
@@ -230,6 +233,7 @@ class ForegroundLatencyTests(unittest.TestCase):
         # The foreground attempt is a real ledger row, not only a queued job.
         attempts = self._count_attempts()
         self.assertGreater(attempts, self.attempt_before)
+        transport_calls = self.bridge.runtime.maintenance_model.transport_calls
         self.maintenance_release.set()
         deadline = time.monotonic() + 3.0
         while (
@@ -238,6 +242,7 @@ class ForegroundLatencyTests(unittest.TestCase):
         ):
             time.sleep(0.01)
         self.assertFalse(self.bridge.runtime.maintenance_model.in_flight)
+        self.assertEqual(self.bridge.runtime.maintenance_model.transport_calls, transport_calls)
 
 
 if __name__ == "__main__":  # pragma: no cover

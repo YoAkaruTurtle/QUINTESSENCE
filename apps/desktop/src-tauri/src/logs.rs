@@ -269,6 +269,19 @@ pub struct Redaction {
 }
 
 impl LogStore {
+    pub fn transient(scope: Scope) -> Arc<Self> {
+        Arc::new(Self {
+            dir: PathBuf::new(),
+            scope,
+            file_max: FILE_MAX_BYTES,
+            ring_cap: RING_CAPACITY,
+            inner: Mutex::new(Inner {
+                write: WriteState::Disabled("instance_log_directory_unavailable"),
+                ..Inner::default()
+            }),
+        })
+    }
+
     pub fn open(dir: PathBuf) -> Arc<Self> {
         Self::open_in(dir, Scope::Instance)
     }

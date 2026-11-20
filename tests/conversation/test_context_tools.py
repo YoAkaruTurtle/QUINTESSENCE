@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -26,9 +27,12 @@ from quintessence_pcs.runtime.collab_protocol import (  # noqa: E402
     COLLAB_V2_RENDERER_VERSION,
 )
 from quintessence_pcs.runtime.context import (  # noqa: E402
+    ContextService,
+    ContinuityMaterial,
     PublishedMessageMaterial,
     ToolResultMaterial,
 )
+from quintessence_pcs.runtime.dreaming_history import HistoryItem  # noqa: E402
 from quintessence_pcs.store.experience import ExperienceAccess  # noqa: E402
 
 HOST = "host:rg03-context"
@@ -99,6 +103,41 @@ class ContextToolSectionTests(CognitionTestCase):
         self.assertEqual("collab.v1.renderer.3", self.store.load_context_snapshot(
             context.context_id
         ).renderer_version)
+
+    def test_trimmed_continuity_keeps_only_rendered_source_links(self) -> None:
+        now = datetime.now(UTC)
+        sources = []
+        for age in (timedelta(minutes=3), timedelta(days=2)):
+            row = self.store.register_input(
+                namespace=NS, origin_kind="user_statement", body="合成片段" * 96,
+                privacy_class=PRIVACY, retention="standard",
+                observed_at=(now - age).isoformat().replace("+00:00", "Z"),
+            )
+            ref = {
+                "ref_type": "collab_input", "namespace": NS, "input_id": row.input_id,
+                "content_version": row.content_version,
+            }
+            self.store.register_interaction(
+                namespace=NS, mode="consult", activation_kind="user_input",
+                host_instance=HOST, access_ref=ACCESS_REF, policy_ref=POLICY_REF,
+                input_refs=[ref], result="answered",
+            )
+            source = self.store.dreaming_experience_ref(self.access, ref=ref)
+            self.assertIsNotNone(source)
+            sources.append(HistoryItem(source, "", "user_statement", "answered", False))
+        context = ContextService(self.store, now_provider=lambda: now).build_consult_context(
+            namespace=NS, access=self.access, input_refs=[self.input_ref],
+            adapter_kind="direct-http", continuity=ContinuityMaterial(
+                recent=(sources[0],), recalled=(sources[1],), audit=lambda *_: None,
+            ),
+        )
+        document = json.loads(context.rendered_input)
+        self.assertEqual([sources[0].source.ref], [entry["ref"] for entry in document["continuity"]["recent"]])
+        self.assertEqual([], document["continuity"]["recalled"])
+        self.assertIn({"reason": "continuity_budget", "dropped": 1}, document["omissions"])
+        self.assertEqual([sources[0].source.ref["input_id"]], [row["ref_id"] for row in self.store.context_history_rows(
+            namespace=NS, context_id=context.context_id,
+        )])
 
     def test_v2_sections_and_source_links(self) -> None:
         first = self.context()

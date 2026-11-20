@@ -38,6 +38,22 @@ fn timeout_terminates_the_child_and_returns_result_unknown() {
 }
 
 #[test]
+fn dreaming_status_timeout_keeps_another_request_alive() {
+    let manager = Arc::new(fake("slow_status"));
+    let action = {
+        let manager = Arc::clone(&manager);
+        std::thread::spawn(move || manager.request("bridge.ping", serde_json::json!({})))
+    };
+    let status = manager.observe_app_info();
+    assert_eq!(error(&status).code, "TIMEOUT");
+    assert!(!error(&status).result_unknown);
+    assert!(manager.is_alive());
+    assert!(action.join().expect("action thread").ok);
+    assert!(manager.request("bridge.ping", serde_json::json!({})).ok);
+    manager.shutdown();
+}
+
+#[test]
 fn child_crash_fails_the_pending_request_with_unknown_result() {
     let manager = fake("crash");
     let reply = manager.request_with_timeout(

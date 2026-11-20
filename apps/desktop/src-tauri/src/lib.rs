@@ -2,14 +2,13 @@
 //!
 //! Trusted-host boundary: Rust is the single application process, resolves and
 //! spawns the installed one-folder Python sidecar, owns its lifecycle and
-//! framed stdio, re-reads `app.info` before each action and exposes only
-//! `app.info`, `app.confirm_destination`, `consult.interact`, the RG02
-//! `conversation.*`/`turn.result` methods, the six `review.*` reads/decisions,
-//! the host-only display-only conversation preference commands and
-//! `bridge.ping` to the WebView.  The WebView has no shell, filesystem,
-//! HTTP or process capability.
+//! framed stdio and re-reads `app.info` before authority-sensitive actions.
+//! The main WebView gets the registered desktop commands. The Dreaming orb
+//! gets read-only status and its own window controls. Neither has shell,
+//! filesystem, HTTP or process capability.
 
 pub mod commands;
+mod dreaming_orb;
 mod key_store;
 mod host_settings;
 mod instance;
@@ -24,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 use logs::Level;
 use session::HostSession;
@@ -57,8 +56,7 @@ pub struct AppState {
 /// debug build honours `QUINTESSENCE_DESKTOP_LOG_DIR` (absolute, existing, no
 /// link escape) so Lab evidence never lands in the real app data directory.
 /// `scope_dir` then selects `instances/<fingerprint>` or `boot/`.
-fn resolve_log_base(app: &tauri::AppHandle, config: &std::path::Path) -> (PathBuf, bool) {
-    if instance::is_folder_config(config) { return (config.parent().unwrap().join("logs"), false); }
+fn resolve_log_base(app: &tauri::AppHandle) -> (PathBuf, bool) {
     if let Some(selected) = std::env::var_os("QUINTESSENCE_DESKTOP_STATE_DIR").map(PathBuf::from) {
         if paths::validate_instance_root(&selected).is_ok() { return (selected.join("logs"), false); }
     }
@@ -127,21 +125,119 @@ pub fn run() {
     let args = CliArgs::parse();
     let started = Instant::now();
 
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        commands::app_info,
+        commands::instance_status,
+        commands::choose_instance_folder,
+        commands::connect_instance,
+        commands::bridge_ping,
+        commands::confirm_destination,
+        commands::consult_interact,
+        commands::conversation_create,
+        commands::conversation_list,
+        commands::conversation_get,
+        commands::conversation_search,
+        commands::memory_search,
+        commands::conversation_send,
+        commands::turn_result,
+        commands::turn_events,
+        commands::turn_steps,
+        commands::turn_trace,
+        commands::conversation_usage,
+        commands::turn_cancel,
+        commands::postprocess_status,
+        commands::postprocess_retry,
+        commands::maintenance_status,
+        commands::maintenance_run,
+        commands::maintenance_control,
+        commands::save_maintenance_enabled,
+        commands::save_dreaming_enabled,
+        dreaming_orb::dreaming_status,
+        dreaming_orb::open_dreaming_orb,
+        dreaming_orb::dreaming_orb_drag,
+        dreaming_orb::dreaming_orb_hide,
+        commands::cognition_candidates,
+        commands::cognition_candidate_decide,
+        commands::profile_status,
+        commands::profile_read,
+        commands::profile_publish,
+        commands::profile_activate,
+        commands::profile_list,
+        commands::profile_read_body,
+        commands::profile_import_list,
+        commands::profile_import_preview,
+        commands::profile_publish_reviewed,
+        commands::preference_list,
+        commands::preference_revoke,
+        commands::review_work_list,
+        commands::review_candidates,
+        commands::review_candidate_detail,
+        commands::review_generate,
+        commands::review_resolve,
+        commands::review_result,
+        commands::set_ai_display_name,
+        commands::logs_read,
+        commands::ui_preferences,
+        commands::save_ui_preferences,
+        commands::save_layout_preferences,
+        commands::conversation_display_preferences,
+        commands::set_conversation_display_preference,
+        commands::model_status,
+        commands::generation_settings,
+        commands::renew_model_authorization,
+        commands::save_generation_settings,
+        commands::web_settings,
+        commands::save_web_settings,
+        commands::memory_recall_settings,
+        commands::save_memory_recall_settings,
+        commands::save_model_api_key,
+        commands::delete_model_api_key,
+        commands::set_model_choice,
+        commands::test_model_connection,
+    ];
     let builder = tauri::Builder::default()
+        .invoke_handler(move |invoke| {
+            if !dreaming_orb::allow_invoke(
+                invoke.message.webview_ref().label(),
+                invoke.message.command(),
+            ) {
+                invoke.resolver.reject("Command is unavailable in this window");
+                return true;
+            }
+            handler(invoke)
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(event, WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed)
+            {
+                dreaming_orb::destroy(window.app_handle());
+            }
+        })
         .setup(move |app| {
             let (config_path, managed_config) =
                 host_settings::resolve_config_path(app.handle(), args.config.clone());
             let settings_path = host_settings::settings_path(app.handle());
             let settings = host_settings::load(&settings_path);
-            // Revalidate the folder before the runtime opens any component.
-            let folder_error = if instance::is_folder_config(&config_path) {
-                paths::resolve(app.handle()).and_then(|paths| instance::prepare_folder(&paths, config_path.parent().unwrap(), &settings)).err()
+            let folder_config = instance::is_folder_config(&config_path);
+            let startup = if folder_config {
+                paths::resolve(app.handle()).and_then(|paths| {
+                    instance::prepare_dreaming_startup(&paths, config_path.parent().unwrap())
+                }).ok()
             } else { None };
             let identity = resolve_identity(&config_path, managed_config, &settings);
             let instance_scope = instance::scope(&config_path).or_else(|| identity.as_ref().map(|identity| identity.fingerprint()));
-            let (log_base, log_dir_rejected) = resolve_log_base(app.handle(), &config_path);
-            let (log_dir, log_scope) = logs::scope_dir(&log_base, identity.as_ref());
-            let log_store = logs::LogStore::open_in(log_dir, log_scope);
+            let (log_store, log_scope, log_dir_rejected) = if folder_config {
+                let scope = if identity.is_some() { logs::Scope::Instance } else { logs::Scope::Boot };
+                let logs = startup.as_ref().and_then(|value| value["logs_ready"].as_bool())
+                    .filter(|ready| *ready)
+                    .map(|_| logs::LogStore::open_in(config_path.parent().unwrap().join("dreaming").join("logs"), scope))
+                    .unwrap_or_else(|| logs::LogStore::transient(scope));
+                (logs, scope, false)
+            } else {
+                let (base, rejected) = resolve_log_base(app.handle());
+                let (directory, scope) = logs::scope_dir(&base, identity.as_ref());
+                (logs::LogStore::open_in(directory, scope), scope, rejected)
+            };
             if log_dir_rejected {
                 log_store.record(
                     Level::Warn,
@@ -158,10 +254,8 @@ pub fn run() {
                     log_scope.as_str()
                 ),
             );
-            if managed_config || folder_error.is_some() {
-                let setup = if let Some(error) = folder_error { Err(error) }
-                    else if instance::is_folder_config(&config_path) { Ok(()) }
-                    else { host_settings::ensure_managed_config(&config_path, &settings) };
+            if managed_config && !folder_config {
+                let setup = host_settings::ensure_managed_config(&config_path, &settings);
                 if let Err(error) = setup {
                     // Keep the app open: Settings can still report the failure.
                     log_store.record_lifecycle(
@@ -250,72 +344,7 @@ pub fn run() {
                 instance_scope,
             });
             Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            commands::app_info,
-            commands::instance_status,
-            commands::choose_instance_folder,
-            commands::connect_instance,
-            commands::bridge_ping,
-            commands::confirm_destination,
-            commands::consult_interact,
-            commands::conversation_create,
-            commands::conversation_list,
-            commands::conversation_get,
-            commands::conversation_search,
-            commands::memory_search,
-            commands::conversation_send,
-            commands::turn_result,
-            commands::turn_events,
-            commands::turn_steps,
-            commands::turn_trace,
-            commands::conversation_usage,
-            commands::turn_cancel,
-            commands::postprocess_status,
-            commands::postprocess_retry,
-            commands::maintenance_status,
-            commands::maintenance_run,
-            commands::maintenance_control,
-            commands::save_maintenance_enabled,
-            commands::cognition_candidates,
-            commands::cognition_candidate_decide,
-            commands::profile_status,
-            commands::profile_read,
-            commands::profile_publish,
-            commands::profile_activate,
-            commands::profile_list,
-            commands::profile_read_body,
-            commands::profile_import_list,
-            commands::profile_import_preview,
-            commands::profile_publish_reviewed,
-            commands::preference_list,
-            commands::preference_revoke,
-            commands::review_work_list,
-            commands::review_candidates,
-            commands::review_candidate_detail,
-            commands::review_generate,
-            commands::review_resolve,
-            commands::review_result,
-            commands::set_ai_display_name,
-            commands::logs_read,
-            commands::ui_preferences,
-            commands::save_ui_preferences,
-            commands::save_layout_preferences,
-            commands::conversation_display_preferences,
-            commands::set_conversation_display_preference,
-            commands::model_status,
-            commands::generation_settings,
-            commands::renew_model_authorization,
-            commands::save_generation_settings,
-            commands::web_settings,
-            commands::save_web_settings,
-            commands::memory_recall_settings,
-            commands::save_memory_recall_settings,
-            commands::save_model_api_key,
-            commands::delete_model_api_key,
-            commands::set_model_choice,
-            commands::test_model_connection
-        ]);
+        });
 
     let application = builder
         .build(tauri::generate_context!())

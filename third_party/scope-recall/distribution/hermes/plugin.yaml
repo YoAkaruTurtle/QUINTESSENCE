@@ -1,0 +1,9 @@
+name: scope-recall
+version: 3.14.1
+description: Scope Recall long-term memory, local and source-backed, one store shared by your agents
+provider_entry: register:register
+hooks:
+  - pre_llm_call
+  - api_request_error
+  - post_tool_call
+  - post_llm_call

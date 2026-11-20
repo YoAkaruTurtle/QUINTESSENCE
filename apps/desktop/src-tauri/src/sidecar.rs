@@ -2,8 +2,8 @@
 //!
 //! The WebView never receives a shell.  Rust owns the child process, the
 //! 4-byte big-endian/UTF-8 frame codec, the pending-request map and the
-//! 120-second request deadline.  A timeout, crash, truncated frame or protocol
-//! violation terminates the child and fails every pending request with
+//! 120-second request deadline.  An action timeout, crash, truncated frame or
+//! protocol violation terminates the child and fails every pending request with
 //! ``result_unknown = true``; the caller must not retry a non-idempotent
 //! consult automatically.
 
@@ -437,6 +437,21 @@ impl SidecarManager {
         params: Value,
         timeout: Duration,
     ) -> HostReply {
+        self.request_inner(method, params, timeout, true)
+    }
+
+    /// A status read can be abandoned without interrupting unrelated actions.
+    pub fn observe_app_info(&self) -> HostReply {
+        self.request_inner("app.info", json!({}), Duration::from_secs(2), false)
+    }
+
+    fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        terminate_on_timeout: bool,
+    ) -> HostReply {
         if !self.is_alive() {
             return HostReply::error(HostError::new(
                 "SIDECAR_UNAVAILABLE",
@@ -477,6 +492,9 @@ impl SidecarManager {
             Ok(reply) => reply,
             Err(RecvTimeoutError::Timeout) => {
                 remove_pending(&self.pending, &request_id);
+                if !terminate_on_timeout {
+                    return HostReply::error(HostError::new("TIMEOUT", "读取宿主状态超时"));
+                }
                 self.terminate(HostError::unknown(
                     "TIMEOUT",
                     "sidecar 请求超时；sidecar 已终止，结果未知",

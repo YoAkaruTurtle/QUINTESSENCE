@@ -2,6 +2,7 @@ param(
     [string]$RepoRoot = "",
     [string]$LabRoot = "",
     [string]$CargoTarget = "",
+    [string]$Python = "",
     [switch]$SkipBundle,
     [switch]$DebugBuild,
     [switch]$AllowFallbackIcons
@@ -12,8 +13,21 @@ $AppRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = Split-Path (Split-Path $AppRoot -Parent) -Parent
 }
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+$AppRoot = Join-Path $RepoRoot 'apps\desktop'
+if ([string]::IsNullOrWhiteSpace($Python)) {
+    $Python = if ($env:QUINTESSENCE_DESKTOP_PYTHON) {
+        $env:QUINTESSENCE_DESKTOP_PYTHON
+    } else {
+        Join-Path $RepoRoot '.venv\Scripts\python.exe'
+    }
+}
 if ([string]::IsNullOrWhiteSpace($LabRoot)) {
-    $LabRoot = Join-Path (Split-Path $RepoRoot -Parent) 'QUINTESSENCE-Lab'
+    if (-not (Get-Command -Name $Python -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw 'prepare the checkout with python tools/setup_scope_recall.py --build'
+    }
+    $LabRoot = & $Python -I -B (Join-Path $RepoRoot 'tools\setup_scope_recall.py') --show-build-root
+    if ($LASTEXITCODE -ne 0) { throw 'could not select the external build root' }
 }
 if ([string]::IsNullOrWhiteSpace($CargoTarget)) {
     $CargoTarget = Join-Path $LabRoot 'build\c12b\cargo-target'
@@ -36,10 +50,11 @@ if (-not (Test-Path (Join-Path $AppRoot 'dist\index.html'))) {
 # scales it into the ignored icon directory and the public brand image; a clean
 # checkout without the artwork may use the neutral build.rs fallback.
 $brandSource = if ($env:QUINTESSENCE_BRAND_ICON) { $env:QUINTESSENCE_BRAND_ICON } else { Join-Path $Build 'brand\quintessence-icon.png' }
-$brandPython = Join-Path $Build 'venv\Scripts\python.exe'
 if (Test-Path $brandSource) {
-    if (-not (Test-Path $brandPython)) { throw 'Pillow Python not found for brand assets' }
-    & $brandPython (Join-Path $AppRoot 'scripts\make_brand_assets.py') `
+    if (-not (Get-Command -Name $Python -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw 'prepare the checkout with python tools/setup_scope_recall.py --build for brand assets'
+    }
+    & $Python (Join-Path $AppRoot 'scripts\make_brand_assets.py') `
         --source $brandSource --app-root $AppRoot `
         --evidence (Join-Path $Evidence 'brand-assets.json') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'brand asset generation failed' }

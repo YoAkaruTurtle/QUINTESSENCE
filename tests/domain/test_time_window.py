@@ -8,6 +8,7 @@ from datetime import datetime
 from quintessence_pcs.domains.memory.time_window import (
     message_time,
     parse_event_time,
+    parse_journal_time_query,
     parse_time_query,
 )
 
@@ -220,6 +221,36 @@ class TimeQueryTests(unittest.TestCase):
         self.assertEqual(1, len(parsed.windows))
         self.assertFalse(parsed.time_only)
         self.assertIn("天气", parsed.rest)
+
+
+class JournalTimeQueryTests(unittest.TestCase):
+    def test_closed_calendar_periods_keep_local_boundaries(self):
+        anchors = {
+            "昨天有什么重要的事吗": ("day", "2025-12-31", "2026-01-01"),
+            "上周聊了什么": ("week", "2025-12-22", "2025-12-29"),
+            "上个月发生了什么": ("month", "2025-12-01", "2026-01-01"),
+            "去年有什么变化": ("year", "2025-01-01", "2026-01-01"),
+        }
+        at = "2026-01-01T00:15:00+08:00"
+        zone = datetime.fromisoformat(at).tzinfo
+        for query, (kind, start, end) in anchors.items():
+            with self.subTest(query=query):
+                (window,) = parse_journal_time_query(query, anchor=at).windows
+                self.assertEqual(kind, window.precision)
+                self.assertEqual(start, window.start.astimezone(zone).date().isoformat())
+                self.assertEqual(end, window.end.astimezone(zone).date().isoformat())
+
+    def test_calendar_windows_leave_the_event_parser_unchanged(self):
+        self.assertEqual("unsupported", parse_time_query("上个月发生了什么", anchor=ANCHOR).reason)
+        self.assertEqual("unknown", event("我上个月参加了面试。")["event_type"])
+        for text in ("明年会发生什么", "今天的日记", "上周一发生了什么", "上个月15日发生了什么"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_journal_time_query(text, anchor=ANCHOR))
+
+    def test_mixed_periods_keep_the_topic_and_exact_windows(self):
+        query = parse_journal_time_query("上个月和昨天的备份有什么变化", anchor=ANCHOR)
+        self.assertEqual(["month", "day"], [window.precision for window in query.windows])
+        self.assertIn("备份", query.rest)
 
 
 if __name__ == "__main__":

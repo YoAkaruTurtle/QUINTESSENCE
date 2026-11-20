@@ -35,11 +35,15 @@ pub fn scope(config: &Path) -> Option<String> {
     Some(format!("{digest:x}"))
 }
 
-pub fn prepare_folder(paths: &SidecarPaths, root: &Path, settings: &HostSettings) -> Result<Value, HostError> {
-    prepare_folder_with_adoption(paths, root, settings, None, None)
+pub fn prepare_dreaming_startup(paths: &SidecarPaths, root: &Path) -> Result<Value, HostError> {
+    run_prepare(paths, root, "--prepare-dreaming-startup", None, None, None)
 }
 
-pub fn prepare_folder_with_adoption(paths: &SidecarPaths, root: &Path, settings: &HostSettings, adoption: Option<(&str, &str)>, declaration: Option<(&str, &str, &[String])>) -> Result<Value, HostError> {
+pub fn connect_folder(paths: &SidecarPaths, root: &Path, settings: &HostSettings, adoption: Option<(&str, &str)>, declaration: Option<(&str, &str, &[String])>) -> Result<Value, HostError> {
+    run_prepare(paths, root, "--connect-instance", Some(settings), adoption, declaration)
+}
+
+fn run_prepare(paths: &SidecarPaths, root: &Path, action: &str, settings: Option<&HostSettings>, adoption: Option<(&str, &str)>, declaration: Option<(&str, &str, &[String])>) -> Result<Value, HostError> {
     crate::paths::validate_instance_root(root)?;
     let mut command = match &paths.launch {
         LaunchSpec::Frozen { executable, working_dir } => {
@@ -65,19 +69,21 @@ pub fn prepare_folder_with_adoption(paths: &SidecarPaths, root: &Path, settings:
         command.arg("--declare-component-by").arg(by).arg("--declare-component-reason").arg(reason);
         for component in components { command.arg("--never-created-component").arg(component); }
     }
-    command.arg("--prepare-instance").arg(root).env("PYTHONUTF8", "1")
+    command.arg(action).arg(root).env("PYTHONUTF8", "1")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
-    let mut template = host_settings::managed_config(settings, root, &root.join("pcs.sqlite"),
-        settings.request_budget_units.unwrap_or(2_000_000), settings.output_reserve_units.unwrap_or(4096));
-    // New instances receive distinct identities; existing ones recover theirs.
-    if let Some(host) = template.get_mut("host").and_then(Value::as_object_mut) {
-        host.remove("namespace"); host.remove("host_instance");
-    }
     let mut child = command.spawn().map_err(|_| HostError::new("INSTANCE_PREPARE_FAILED", "无法启动实例准备程序"))?;
     let mut input = child.stdin.take().ok_or_else(|| HostError::new("INSTANCE_PREPARE_FAILED", "实例准备通道不可用"))?;
-    let payload = serde_json::to_vec(&template).unwrap();
-    if input.write_all(&payload).is_err() { let _ = child.kill(); let _ = child.wait(); return Err(HostError::new("INSTANCE_PREPARE_FAILED", "无法发送实例配置")); }
+    if let Some(settings) = settings {
+        let mut template = host_settings::managed_config(settings, root, &root.join("pcs.sqlite"),
+            settings.request_budget_units.unwrap_or(2_000_000), settings.output_reserve_units.unwrap_or(4096));
+        // New instances receive distinct identities; existing ones recover theirs.
+        if let Some(host) = template.get_mut("host").and_then(Value::as_object_mut) {
+            host.remove("namespace"); host.remove("host_instance");
+        }
+        let payload = serde_json::to_vec(&template).unwrap();
+        if input.write_all(&payload).is_err() { let _ = child.kill(); let _ = child.wait(); return Err(HostError::new("INSTANCE_PREPARE_FAILED", "无法发送实例配置")); }
+    }
     drop(input);
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();

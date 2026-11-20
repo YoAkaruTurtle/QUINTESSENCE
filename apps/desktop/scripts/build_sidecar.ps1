@@ -10,11 +10,24 @@ $AppRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = Split-Path (Split-Path $AppRoot -Parent) -Parent
 }
-if ([string]::IsNullOrWhiteSpace($LabRoot)) {
-    $LabRoot = Join-Path (Split-Path $RepoRoot -Parent) 'QUINTESSENCE-Lab'
-}
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+$AppRoot = Join-Path $RepoRoot 'apps\desktop'
+$Setup = Join-Path $RepoRoot 'tools\setup_scope_recall.py'
 if ([string]::IsNullOrWhiteSpace($Python)) {
-    $Python = Join-Path $LabRoot 'build\c12b\venv\Scripts\python.exe'
+    $Python = if ($env:QUINTESSENCE_DESKTOP_PYTHON) {
+        $env:QUINTESSENCE_DESKTOP_PYTHON
+    } else {
+        Join-Path $RepoRoot '.venv\Scripts\python.exe'
+    }
+}
+if (-not (Get-Command -Name $Python -CommandType Application -ErrorAction SilentlyContinue)) {
+    throw 'prepare the checkout with python tools/setup_scope_recall.py --build'
+}
+& $Python -I -B $Setup --check --python $Python
+if ($LASTEXITCODE -ne 0) { throw 'vendored Scope Recall validation failed' }
+if ([string]::IsNullOrWhiteSpace($LabRoot)) {
+    $LabRoot = & $Python -I -B $Setup --show-build-root
+    if ($LASTEXITCODE -ne 0) { throw 'could not select the external build root' }
 }
 $Build = Join-Path $LabRoot 'build\c12b'
 $Stage = Join-Path $Build 'sidecar-stage'
@@ -46,15 +59,12 @@ foreach ($cleanupTarget in @($Stage, $Work, $Dist)) {
 }
 New-Item -ItemType Directory -Force -Path $Build, $Evidence | Out-Null
 
-if (-not (Test-Path $Python)) {
-    throw "PyInstaller Python not found: $Python (create the Lab venv and install pyinstaller==6.16.0)"
-}
 $PcsSource = Join-Path $RepoRoot 'src\quintessence_pcs'
 if (-not (Test-Path $PcsSource)) { throw "PCS source not found under $RepoRoot" }
 
 # Original notices are build resources; missing license/version evidence fails closed.
 $LicenseBundle = Join-Path $Build ('third-party-notices-' + [guid]::NewGuid().ToString('N'))
-& $Python -B (Join-Path $PSScriptRoot 'collect_licenses.py') --repo-root $RepoRoot --output $LicenseBundle
+& $Python -I -B (Join-Path $AppRoot 'scripts\collect_licenses.py') --repo-root $RepoRoot --output $LicenseBundle
 if ($LASTEXITCODE -ne 0) { throw 'third-party notice collection failed' }
 
 Write-Host '[sidecar] staging sources outside the repository'
@@ -127,7 +137,7 @@ Push-Location $Build
 try {
     $buildLog = Join-Path $Build 'sidecar-build.log'
     $ErrorActionPreference = 'Continue'
-    & $Python -m PyInstaller --noconfirm --clean --distpath $DistRoot --workpath $Work $Spec *> $buildLog
+    & $Python -I -B -m PyInstaller --noconfirm --clean --distpath $DistRoot --workpath $Work $Spec *> $buildLog
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($exitCode -ne 0) {
@@ -185,7 +195,8 @@ if (-not $SkipTests) {
     $env:QUINTESSENCE_DESKTOP_SIDECAR_EXE = $Exe
     Push-Location $RepoRoot
     try {
-        & python -m unittest tests.desktop.test_packaged -v
+        $testRoot = Join-Path $Build ('packaged-tests-' + [guid]::NewGuid().ToString('N'))
+        & $Python -B (Join-Path $RepoRoot 'tools\run_tests.py') --python $Python --test tests.desktop.test_packaged --output $testRoot
         if ($LASTEXITCODE -ne 0) { throw 'packaged sidecar test failed' }
     }
     finally {
@@ -195,5 +206,5 @@ if (-not $SkipTests) {
 }
 
 Write-Host '[sidecar] private-data scan'
-& python (Join-Path $AppRoot 'scripts\scan_private.py') --root $Dist --output (Join-Path $Evidence 'scan-sidecar.json') --json
+& $Python -I -B (Join-Path $AppRoot 'scripts\scan_private.py') --root $Dist --output (Join-Path $Evidence 'scan-sidecar.json') --json
 if ($LASTEXITCODE -ne 0) { throw 'sidecar bundle scan failed' }

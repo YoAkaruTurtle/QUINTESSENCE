@@ -7,6 +7,7 @@ audit only.
 This structural/secret-pattern gate supplements human content and rights review.
 It cannot certify the absence of every possible secret or copyrighted passage.
 """
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -36,6 +37,21 @@ APPROVED_BINARY_PATHS = frozenset({'assets/quintessence-banner.png'})
 # reachable from this boundary are exempt from the new style rules only; they
 # are still scanned for secrets. Every later commit is treated as new content.
 HISTORICAL_BASELINE = '246d87458b548021b762f1c349cdccab05c696f5'
+
+# These upstream files contain reviewed portable examples, Windows system
+# defaults, or path-detection regexes. The exemptions apply to the precise
+# imported bytes and rule indices only. Other content still uses the gate.
+SCOPE_RECALL_PATH_EXAMPLES = {
+    'README.md': ('10b5f5dcfa5ba95e59cc38677175b2532558eda98715891160570e78d58bb9db', (3,)),
+    'adapters/hermes/boundary.py': ('4786e419c3498cfeaaa918a6900974b9720db6468b01c6f1f4981487b17bec55', (3,)),
+    'core/capture_filters.py': ('de2b4ef9adac1dbf2dc3d7a2df81b0745129104f4035838034fd9b2e724b22b1', (2, 3, 4)),
+    'core/claims.py': ('e6ba0db3ee31e279bb97a5118855c8786601fd6021298a96fc97b23b6cd6bf00', (3,)),
+    'core/mutate.py': ('da68bff9e5346b5082356ca5a6d0414bac7990bdb964d215a1acaf816516da24', (3,)),
+    'core/private.py': ('adc5a82f8915226d8bea19aefa3d762fd576c1052f6f7ff7b8ff1f3f98a9320d', (3,)),
+    'core/secret_patterns.py': ('3a8b34c68feffaf158f65babaf7f5847a222cb8f537da306252181de5ecdfe00', (3,)),
+    'runtime/codex_cli.py': ('2785aa17766b8d2c7467aa7f9ab84682906d098bc3f36c0a35003e2bc7c0884d', (3,)),
+}
+
 
 def git(*args):
     return subprocess.check_output(['git', '--no-optional-locks', '-C', str(ROOT), *args])
@@ -69,8 +85,14 @@ def inspect_content(path, data, *, historical=False):
         r'(?i)' + 'chi' + 'tose',
         '千' + '岁',
     ]
+    base = path.split(' (', 1)[0]
+    scope_prefix = 'third_party/scope-recall/'
+    exception = SCOPE_RECALL_PATH_EXAMPLES.get(base.removeprefix(scope_prefix)) if base.startswith(scope_prefix) else None
+    exempt = ()
+    if exception is not None and sha256(data.replace(b'\r\n', b'\n')).hexdigest() == exception[0]:
+        exempt = exception[1]
     for index, pattern in enumerate(secret_patterns):
-        if re.search(pattern, text): errors.append(f'{path}: sensitive pattern {index}')
+        if index not in exempt and re.search(pattern, text): errors.append(f'{path}: sensitive pattern {index}')
     scan = text
     if path.split(' (', 1)[0] in PUBLIC_DOC_PATHS:
         for phrase in PUBLIC_LEGACY_PHRASES:

@@ -180,6 +180,48 @@ class RecordStore:
         recovery.bootstrap(store)
         return store
 
+    @classmethod
+    def open_read_only(
+        cls,
+        db_path: Union[str, Path],
+        *,
+        migrations_dir: Union[str, Path, None] = None,
+        deletion_ledger_dir: Union[str, Path, None] = "auto",
+        deletion_anchor_dir: Union[str, Path, None] = "auto",
+    ) -> "RecordStore":
+        """Read a quiescent, current store while the caller holds its writer lock.
+
+        Recovery, migrations, and reconciliation require a normal writer open.
+        A refused read-only open leaves all recovery witnesses untouched.
+        """
+        from . import recovery
+
+        directory = Path(migrations_dir) if migrations_dir is not None else default_migrations_dir()
+        database = Path(db_path)
+        connection = connect(database, read_only=True)
+        try:
+            plan = inspect_migrations(connection, directory)
+            if plan.pending or not plan.applied:
+                raise MigrationRequired("read-only access requires the current PCS schema")
+            store = cls(connection, directory)
+            store._db_path = database
+            if deletion_ledger_dir is not None:
+                store.deletion_ledger_dir = (
+                    database.parent / "ledger"
+                    if deletion_ledger_dir == "auto" else Path(deletion_ledger_dir)
+                )
+            if deletion_anchor_dir is not None:
+                store.deletion_anchor_dir = (
+                    database.parent / "anchor"
+                    if deletion_anchor_dir == "auto" else Path(deletion_anchor_dir)
+                )
+            recovery.bootstrap(store, read_only=True)
+            store.require_ready("read-only open")
+            return store
+        except BaseException:
+            connection.close()
+            raise
+
     # ------------------------------------------------------------ lifecycle
 
     @property

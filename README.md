@@ -116,7 +116,7 @@ python tools/run_tests.py
 python tools/check_repository.py
 ```
 
-The core uses the standard library. Folder/Scope Recall and packaged tests additionally need the validated upstream runtime and build prerequisites; see the desktop guide. Tests use synthetic data and loopback providers, with output outside the checkout. Windows is the exercised platform; Linux/macOS support is not established.
+The core uses the standard library. Folder/Scope Recall tests use the pinned [runtime source](third_party/scope-recall/) and its Python dependencies. Run `python tools/setup_scope_recall.py` to prepare them. For packaged tests, see the desktop guide. Tests use synthetic data and loopback providers, with output outside the checkout. Windows is the exercised platform; Linux/macOS support is not established.
 
 ## Next step
 

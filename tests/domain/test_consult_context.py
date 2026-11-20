@@ -17,6 +17,7 @@ import json
 import sys
 import unittest
 import uuid
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,8 @@ from quintessence_pcs.runtime import (  # noqa: E402
     ContextService,
     ReadSetEntry,
 )
+from quintessence_pcs.runtime.context import ContinuityMaterial  # noqa: E402
+from quintessence_pcs.runtime.dreaming_journal import JournalEntry, JournalPeriod  # noqa: E402
 from quintessence_pcs.store import CognitionStore, RecordPointer  # noqa: E402
 from quintessence_pcs.store.cognition import (  # noqa: E402
     MAX_CONTEXT_BYTES,
@@ -79,6 +82,56 @@ class ConsultContextTests(CognitionTestCase):
         super().setUp()
         self.queries = CognitionQueryService(self.store, clock=self.clock)
         self.episodes = EpisodeService(self.store)
+
+    def journal_continuity(self, text, root, journal_live):
+        journal = JournalEntry(
+            period=JournalPeriod("month", date(2026, 3, 1), date(2026, 4, 1), "Asia/Shanghai"),
+            text=text, tags=("备份",), refs=(root,), children=(),
+            revision="synthetic-journal-revision",
+        )
+        return ContinuityMaterial(journals=(journal,), journal_live=journal_live)
+
+    def test_journal_recall_delivers_metadata_and_rechecks_roots(self):
+        _, root = self.register_consult_input(body="合成备份记录")
+        _, current = self.register_consult_input(body="上个月发生了什么")
+        material = self.journal_continuity(
+            "那个月，我重新检查了备份。",
+            root,
+            lambda entry: self.store.dreaming_experience_ref(self.access(), ref=root) is not None,
+        )
+        context = self.contexts.build_consult_context(
+            namespace=NS, input_refs=[current], access=self.access(), continuity=material,
+        )
+        (journal,) = self.document(context)["journal_recall"]["journals"]
+        self.assertEqual("month", journal["kind"])
+        self.assertEqual("2026-03-01", journal["start"])
+        self.assertEqual("2026-04-01", journal["end_exclusive"])
+        self.assertEqual(["备份"], journal["tags"])
+        self.assertEqual("那个月，我重新检查了备份。", journal["text"])
+        self.assertTrue(journal["untrusted"])
+        self.assertEqual(root["input_id"], self.store.context_history_rows(
+            namespace=NS, context_id=context.context_id,
+        )[0]["ref_id"])
+        self.store.delete_experience(
+            namespace=NS, ref_type="collab_input", ref_id=root["input_id"],
+            ref_version=root["content_version"], authorization_ref="authorization:synthetic-delete",
+        )
+        with self.assertRaises(ContextStale):
+            self.contexts.require_consult_continuity_live(context, self.access())
+        with self.assertRaises(ContextStale):
+            self.contexts.load_consult_context(context.context_id)
+
+    def test_long_journal_recall_keeps_text_when_it_fits_model_budget(self):
+        _, root = self.register_consult_input(body="合成备份记录")
+        _, current = self.register_consult_input(body="上个月发生了什么")
+        journal_text = ("合成经历的长回顾。" * 3000) + "最后一条重要回忆"
+        self.assertGreater(len(journal_text.encode("utf-8")), MAX_CONTEXT_BYTES)
+        material = self.journal_continuity(journal_text, root, lambda entry: True)
+        context = self.contexts.build_consult_context(
+            namespace=NS, input_refs=[current], access=self.access(), continuity=material,
+        )
+        (journal,) = self.document(context)["journal_recall"]["journals"]
+        self.assertEqual(journal_text, journal["text"])
 
     # ------------------------------------------------------------- fixtures
 

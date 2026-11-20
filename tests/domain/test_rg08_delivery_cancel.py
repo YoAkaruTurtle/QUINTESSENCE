@@ -38,8 +38,11 @@ class TransportCancelTests(unittest.TestCase):
         started = threading.Event()
         release = threading.Event()
 
-        def slow(body_text: str, *, timeout: float, api_key: str) -> str:
-            del body_text, timeout, api_key
+        def slow(
+            body_text: str, *, timeout: float, api_key: str,
+            cancel: threading.Event | None = None,
+        ) -> str:
+            del body_text, timeout, api_key, cancel
             started.set()
             release.wait(5.0)
             return "late"
@@ -76,8 +79,11 @@ class TransportCancelTests(unittest.TestCase):
         release = threading.Event()
         calls = {"n": 0}
 
-        def slow(body_text: str, *, timeout: float, api_key: str) -> str:
-            del body_text, timeout, api_key
+        def slow(
+            body_text: str, *, timeout: float, api_key: str,
+            cancel: threading.Event | None = None,
+        ) -> str:
+            del body_text, timeout, api_key, cancel
             calls["n"] += 1
             started.set()
             release.wait(5.0)
@@ -110,8 +116,11 @@ class TransportCancelTests(unittest.TestCase):
         model = _model()
         release = threading.Event()
 
-        def slow(body_text: str, *, timeout: float, api_key: str) -> str:
-            del body_text, timeout, api_key
+        def slow(
+            body_text: str, *, timeout: float, api_key: str,
+            cancel: threading.Event | None = None,
+        ) -> str:
+            del body_text, timeout, api_key, cancel
             release.wait(5.0)
             return "first"
 

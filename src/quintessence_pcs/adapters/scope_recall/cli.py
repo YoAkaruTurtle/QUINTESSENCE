@@ -11,10 +11,10 @@ path:
 
 ``search``
     A read-only browse/search through the upstream local-owner management API
-    (``MemoryManagement.list`` + ``MemoryFilter``).  It never calls
-    ``initialize``, never writes, never calls a model and never touches SQLite
-    directly.  Labels are bounded and content is clipped before it leaves the
-    subprocess.
+    (``MemoryManagement.list`` + ``MemoryFilter``). Desktop cold start pins
+    the existing writer lease and uses an immutable SQLite connection to keep
+    the original shared-memory companion unchanged. Labels are bounded and
+    content is clipped before it leaves the subprocess.
 
 ``recall``
     A read-only automatic recall through the upstream public
@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
@@ -212,9 +214,42 @@ def _page_view(page: object) -> dict:
     }
 
 
+@contextmanager
+def _search_core(binding, timeout_seconds: float, immutable: bool):
+    from scope_recall.core import CoreConfig, MemoryCore
+
+    config = CoreConfig(binding, write_timeout_seconds=timeout_seconds)
+    if not immutable:
+        yield MemoryCore(config)
+        return
+
+    from scope_recall.contracts import ContractError
+    from scope_recall.core.restore import restore_pending
+    from scope_recall.core.storage import SQLiteStorage
+    from scope_recall.core.writer_lease import TRUTH_WRITER_LEASE_FILENAME
+    from quintessence_pcs.foundation.sqlite_db import connect, hold_existing_lock
+
+    class ImmutableStorage(SQLiteStorage):
+        def _open(self, mode, remaining_seconds=None, *, restoring=False):
+            if mode != "ro" or restoring:
+                raise ContractError("ACCESS_DENIED", "immutable_search")
+            self._path_check()
+            if restore_pending(self.binding.data_directory):
+                raise ContractError("RESTORE_UNVERIFIED")
+            return connect(self.path, read_only=True)
+
+    try:
+        with hold_existing_lock(binding.data_directory / TRUTH_WRITER_LEASE_FILENAME):
+            storage = ImmutableStorage(
+                binding, timeout_seconds=timeout_seconds, upgrade_on_open=False
+            )
+            yield MemoryCore(config, storage=storage)
+    except (OSError, sqlite3.Error) as exc:
+        raise ContractError("STORAGE_UNAVAILABLE", "immutable_search") from exc
+
+
 def _search(request: dict) -> int:
     from scope_recall.contracts import ContractError, TrustedContext
-    from scope_recall.core import CoreConfig, MemoryCore
     from scope_recall.core.management import MemoryManagement
     from scope_recall.core.management_query import MemoryFilter
     from scope_recall.core.restore import InstallationMaintenance
@@ -225,6 +260,7 @@ def _search(request: dict) -> int:
     cursor = request.get("cursor")
     scope_id = request.get("scope_id")
     timeout_seconds = request.get("timeout_seconds")
+    immutable = request.get("immutable", False)
     if (
         not isinstance(query, str)
         or len(query) > MAX_SEARCH_QUERY_CHARS
@@ -243,6 +279,7 @@ def _search(request: dict) -> int:
         )
         or type(timeout_seconds) not in (int, float)
         or timeout_seconds <= 0
+        or type(immutable) is not bool
     ):
         return _fail("error", "invalid_request")
 
@@ -251,22 +288,20 @@ def _search(request: dict) -> int:
         return _fail("unavailable", "SOURCE_MISSING")
 
     try:
-        core = MemoryCore(
-            CoreConfig(binding, write_timeout_seconds=float(timeout_seconds))
-        )
         context = TrustedContext(
             binding,
             "local-management",
             binding.scope_ids,
             "host_generated",
         )
-        management = MemoryManagement(core, InstallationMaintenance(context))
-        page = management.list(
-            MemoryFilter(query=query, scope=scope_id),
-            limit=limit,
-            cursor=cursor,
-        )
-        result = _page_view(page)
+        with _search_core(binding, float(timeout_seconds), immutable) as core:
+            management = MemoryManagement(core, InstallationMaintenance(context))
+            page = management.list(
+                MemoryFilter(query=query, scope=scope_id),
+                limit=limit,
+                cursor=cursor,
+            )
+            result = _page_view(page)
     except ContractError as exc:
         return _contract_failure(exc)
     except (ValueError, TypeError):

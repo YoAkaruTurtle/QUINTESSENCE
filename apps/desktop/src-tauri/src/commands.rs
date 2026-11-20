@@ -17,6 +17,10 @@ use crate::sidecar::{HostError, HostReply, SidecarManager};
 use crate::AppState;
 
 static INSTANCE_SWITCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn instance_switching() -> bool {
+    INSTANCE_SWITCHING.load(std::sync::atomic::Ordering::Acquire)
+}
+
 struct InstanceSwitchGuard;
 impl Drop for InstanceSwitchGuard { fn drop(&mut self) { INSTANCE_SWITCHING.store(false, std::sync::atomic::Ordering::Release); } }
 
@@ -413,6 +417,21 @@ async fn call(
         .logs
         .record_ipc(method, &reply, started.elapsed().as_millis() as u64);
     reply
+}
+
+/// Status observers do not publish session authority or log polling failures.
+pub(crate) async fn observe_dreaming_info(state: &AppState) -> Option<Value> {
+    if instance_switching() {
+        return None;
+    }
+    let manager = manager(state).ok()?;
+    let reply = tauri::async_runtime::spawn_blocking(move || manager.observe_app_info())
+        .await
+        .ok()?;
+    if instance_switching() || !reply.ok {
+        return None;
+    }
+    reply.result
 }
 
 /// Re-read `app.info`, attach the desktop-only UI preference and cache it.
@@ -1646,6 +1665,49 @@ pub async fn maintenance_control(
 }
 
 #[tauri::command]
+pub async fn save_dreaming_enabled(
+    state: State<'_, AppState>,
+    session_id: String,
+    destination_id: String,
+    enabled: bool,
+    journals: Option<bool>,
+) -> Result<HostReply, String> {
+    let _saving = match begin_settings_save() {
+        Some(guard) => guard,
+        None => return Ok(HostReply::error(HostError::new("BUSY", "正在保存设置"))),
+    };
+    let info = match refresh(&state).await {
+        Ok(info) => info,
+        Err(reply) => return Ok(reply),
+    };
+    {
+        let session = match state.session.lock() {
+            Ok(session) => session,
+            Err(_) => return Ok(lock_error()),
+        };
+        if let Err(error) = session.validate_confirm(&session_id, &destination_id) {
+            return Ok(HostReply::error(error));
+        }
+    }
+    let (method, capability, unavailable) = if journals.unwrap_or(false) {
+        ("dreaming.configure_journals", "/dreaming/can_configure_journals", "当前实例无法启用日历日记")
+    } else {
+        ("dreaming.configure", "/dreaming/can_configure", "当前实例无法启用空闲思考")
+    };
+    if !crate::instance::is_folder_config(&state.config_path)
+        || (enabled && info.pointer(capability).and_then(Value::as_bool) != Some(true))
+    {
+        return Ok(HostReply::error(HostError::new("DREAMING_UNAVAILABLE", unavailable)));
+    }
+    Ok(call(
+        &state,
+        method,
+        json!({"session_id": session_id, "destination_id": destination_id, "enabled": enabled}),
+        Duration::from_secs(120),
+    ).await)
+}
+
+#[tauri::command]
 pub async fn save_maintenance_enabled(
     state: State<'_, AppState>,
     session_id: String,
@@ -2136,6 +2198,24 @@ mod tests {
     }
 
     #[test]
+    fn instance_selection_preserves_settings_inside_current_or_ready_destination() {
+        let previous = Path::new("test/previous");
+        let next = Path::new("test/next");
+        assert!(selection_settings_overlap(
+            &previous.join("prefs"), Some(previous), next, true,
+        ));
+        assert!(selection_settings_overlap(next, Some(previous), next, true));
+        assert!(selection_settings_overlap(previous, Some(previous), next, false));
+        assert!(!selection_settings_overlap(next, None, next, false));
+        assert!(!selection_settings_overlap(
+            Path::new("test/previous-work"), Some(previous), next, true,
+        ));
+        assert!(!selection_settings_overlap(
+            Path::new("test/app-state"), Some(previous), next, true,
+        ));
+    }
+
+    #[test]
     fn web_status_passes_through_the_host_truth() {
         let info = host_info(json!({
             "enabled": true,
@@ -2224,6 +2304,26 @@ pub struct LegacyInstanceAdoption { pub by: String, pub reason: String, pub conf
 #[derive(Clone, serde::Deserialize)]
 pub struct ComponentDeclaration { pub by: String, pub reason: String, pub components: Vec<String>, pub confirm: bool }
 
+fn selection_settings_overlap(
+    settings_dir: &Path,
+    current: Option<&Path>,
+    destination: &Path,
+    destination_ready: bool,
+) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let settings_dir = canonical(settings_dir);
+    let inside = |root: &Path| {
+        let root = canonical(root);
+        if cfg!(windows) {
+            Path::new(&crate::paths::comparable(&settings_dir))
+                .starts_with(Path::new(&crate::paths::comparable(&root)))
+        } else {
+            settings_dir.starts_with(root)
+        }
+    };
+    current.is_some_and(inside) || (destination_ready && inside(destination))
+}
+
 #[tauri::command]
 pub async fn connect_instance(app: tauri::AppHandle, state: State<'_, AppState>, root: String, legacy_adoption: Option<LegacyInstanceAdoption>, component_declaration: Option<ComponentDeclaration>) -> Result<HostReply, String> {
     let _saving = match begin_settings_save() { Some(guard) => guard, None => return Ok(HostReply::error(HostError::new("BUSY", "正在保存设置"))) };
@@ -2242,7 +2342,13 @@ pub async fn connect_instance(app: tauri::AppHandle, state: State<'_, AppState>,
         }
     }
     let current = crate::instance::status(&state.config_path);
-    let same_folder = current["portable"] == true && current["root"].as_str().map(|old| crate::paths::comparable(Path::new(old)) == crate::paths::comparable(Path::new(&root))).unwrap_or(false);
+    let current_root = (current["portable"] == true)
+        .then(|| current["root"].as_str().map(Path::new))
+        .flatten();
+    let destination_root = Path::new(&root);
+    let same_folder = current_root.is_some_and(|old| {
+        crate::paths::comparable(old) == crate::paths::comparable(destination_root)
+    });
     if same_folder && (legacy_adoption.is_some() || component_declaration.is_some()) {
         return Ok(HostReply::error(HostError::new("INSTANCE_ADOPTION_REFUSED", "不能为已登记的当前实例重复创建安全基线")));
     }
@@ -2264,7 +2370,7 @@ pub async fn connect_instance(app: tauri::AppHandle, state: State<'_, AppState>,
     let mut settings = match state.settings.lock() { Ok(s) => s.clone(), Err(_) => return Ok(lock_error()) };
     let prepare_settings = settings.clone();
     let selected_root = root.clone();
-    let prepared = tauri::async_runtime::spawn_blocking(move || crate::instance::prepare_folder_with_adoption(&paths, Path::new(&selected_root), &prepare_settings,
+    let prepared = tauri::async_runtime::spawn_blocking(move || crate::instance::connect_folder(&paths, Path::new(&selected_root), &prepare_settings,
         legacy_adoption.as_ref().map(|request| (request.by.as_str(), request.reason.as_str())),
         component_declaration.as_ref().map(|request| (request.by.as_str(), request.reason.as_str(), request.components.as_slice())))).await;
     let result = match prepared { Ok(Ok(result)) => result, Ok(Err(error)) => return Ok(HostReply::error(error)), Err(_) => return Ok(HostReply::error(HostError::new("INSTANCE_PREPARE_FAILED", "实例准备未完成"))) };
@@ -2272,8 +2378,22 @@ pub async fn connect_instance(app: tauri::AppHandle, state: State<'_, AppState>,
     settings.instance_root = Some(root.clone());
     settings.request_budget_units.get_or_insert(2_000_000);
     settings.output_reserve_units.get_or_insert(4096);
-    if let Err(error) = host_settings::save(&state.settings_path, &settings) { return Ok(HostReply::error(error)); }
+    let preserve_settings = state.settings_path.parent().is_some_and(|settings_dir| {
+        selection_settings_overlap(
+            settings_dir, current_root, destination_root, result["state"] == "connected",
+        )
+    });
+    if !preserve_settings {
+        if let Err(error) = host_settings::save(&state.settings_path, &settings) {
+            return Ok(HostReply::error(error));
+        }
+    } else if std::env::var_os("QUINTESSENCE_DESKTOP_STATE_DIR").is_some() {
+        // The restarted host must not keep the previous instance as its
+        // settings store. Otherwise the following switch could write there.
+        std::env::set_var("QUINTESSENCE_DESKTOP_STATE_DIR", destination_root);
+    }
     if let Ok(mut existing) = state.settings.lock() { *existing = settings; }
+    crate::dreaming_orb::destroy(&app);
     if let Some(manager) = manager { manager.shutdown(); }
     std::env::set_var(crate::instance::SELECTED_ENV, &root);
     std::env::set_var("QUINTESSENCE_RESTART_PARENT", std::process::id().to_string());

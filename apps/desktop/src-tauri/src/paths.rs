@@ -137,15 +137,22 @@ pub fn resolve(app: &AppHandle) -> Result<SidecarPaths, HostError> {
     #[cfg(debug_assertions)]
     {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let desktop = manifest
-            .join("..")
-            .canonicalize()
-            .unwrap_or_else(|_| manifest.join(".."));
+        // CARGO_MANIFEST_DIR is absolute. Windows canonicalization would add
+        // a verbatim prefix that Python does not reliably accept for scripts.
+        let desktop = manifest.parent().expect("desktop directory").to_path_buf();
+        let checkout = desktop.ancestors().nth(2).expect("checkout directory");
+        let source_root = checkout.join("src");
         let script = desktop.join("sidecar").join("pcs_bridge.py");
-        let source_root = desktop.join("..").join("..").join("src");
         if script.is_file() {
+            let venv_python = checkout.join(".venv").join(if cfg!(windows) {
+                "Scripts/python.exe"
+            } else {
+                "bin/python"
+            });
             let python = std::env::var_os("QUINTESSENCE_DESKTOP_PYTHON")
+                .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
+                .or_else(|| venv_python.is_file().then_some(venv_python))
                 .unwrap_or_else(|| PathBuf::from("python"));
             return Ok(SidecarPaths {
                 resource_dir,
@@ -154,9 +161,7 @@ pub fn resolve(app: &AppHandle) -> Result<SidecarPaths, HostError> {
                     python,
                     script,
                     working_dir: desktop,
-                    source_root: source_root
-                        .canonicalize()
-                        .unwrap_or(source_root),
+                    source_root,
                 },
                 dev_fallback: true,
             });

@@ -67,6 +67,7 @@ REASON_REPLAY_FAILED = "restore_replay_failed"
 REASON_CLEANUP_INCOMPLETE = "restore_cleanup_incomplete"
 REASON_ALREADY_ADOPTED = "restore_already_adopted"
 REASON_ADOPT_INVALID = "restore_adopt_invalid"
+REASON_RECOVERY_REQUIRED = "restore_requires_writer"
 
 
 class AdoptionRefused(Exception):
@@ -211,6 +212,8 @@ def _close(
     epochs: Mapping[str, int],
     head: str,
     deletion_safety: str = DELETION_SAFETY_ENFORCED,
+    *,
+    persist: bool = True,
 ) -> RestoreDecision:
     adoption = _adoption_of(store)
     decision = RestoreDecision(
@@ -223,18 +226,19 @@ def _close(
         deletion_safety=deletion_safety,
     )
     store.restore_decision = decision
-    write_json(
-        gate_path(store.db_path),
-        _gate_payload(
-            STATUS_CLOSED,
-            reason,
-            head,
-            epochs,
-            decision.adopted,
-            decision.pre_baseline,
-            deletion_safety,
-        ),
-    )
+    if persist:
+        write_json(
+            gate_path(store.db_path),
+            _gate_payload(
+                STATUS_CLOSED,
+                reason,
+                head,
+                epochs,
+                decision.adopted,
+                decision.pre_baseline,
+                deletion_safety,
+            ),
+        )
     return decision
 
 
@@ -425,11 +429,21 @@ def _open_unprotected(store: Any, request: Any) -> RestoreDecision:
     return decision
 
 
-def bootstrap(store: Any) -> RestoreDecision:
-    """Evaluate the restore gate at ``open`` time (never raises to the caller)."""
+def bootstrap(store: Any, *, read_only: bool = False) -> RestoreDecision:
+    """Evaluate the restore gate. A read-only open cannot perform recovery."""
+
+    def close(
+        reason: str,
+        epochs: Mapping[str, int],
+        head: str,
+        deletion_safety: str = DELETION_SAFETY_ENFORCED,
+    ) -> RestoreDecision:
+        return _close(
+            store, reason, epochs, head, deletion_safety, persist=not read_only
+        )
 
     unprotected = getattr(store, "ps06_unprotected", None)
-    if unprotected is not None:
+    if unprotected is not None and not read_only:
         return _open_unprotected(store, unprotected)
 
     ledger = _ledger_for(store)
@@ -441,8 +455,7 @@ def bootstrap(store: Any) -> RestoreDecision:
         # that lives outside both, so its presence closes the gate even when
         # the database looks untouched.
         epochs = _db_epochs(store)
-        return _close(
-            store,
+        return close(
             REASON_LEDGER_MISSING,
             epochs,
             GENESIS,
@@ -451,7 +464,7 @@ def bootstrap(store: Any) -> RestoreDecision:
 
     epochs = _db_epochs(store)
     request = getattr(store, "deletion_adopt", None)
-    if request:
+    if request and not read_only:
         try:
             adopt_existing(
                 store,
@@ -459,42 +472,52 @@ def bootstrap(store: Any) -> RestoreDecision:
                 adopt_reason=str(request.get("reason", "")),
             )
         except AdoptionRefused as refused:
-            return _close(store, refused.reason, epochs, GENESIS)
+            return close(refused.reason, epochs, GENESIS)
         except (LedgerUnavailable, LedgerCorrupt):
-            return _close(store, REASON_LEDGER_CORRUPT, epochs, GENESIS)
+            return close(REASON_LEDGER_CORRUPT, epochs, GENESIS)
         epochs = _db_epochs(store)
         ledger = _ledger_for(store)
         if ledger is None:  # pragma: no cover - configuration changed under us
-            return _close(store, REASON_LEDGER_MISSING, epochs, GENESIS)
+            return close(REASON_LEDGER_MISSING, epochs, GENESIS)
     try:
         ledger.verify()
     except LedgerUnavailable:
         # A brand-new database may create its ledger; one that already carries
         # watermarks cannot -- that is a missing ledger, not a fresh start.
-        if epochs and any(value > 0 for value in epochs.values()):
-            return _close(store, REASON_LEDGER_MISSING, epochs, GENESIS)
+        if read_only or any(value > 0 for value in epochs.values()):
+            return close(REASON_LEDGER_MISSING, epochs, GENESIS)
         try:
             ledger.initialize()
         except (LedgerUnavailable, LedgerCorrupt):
-            return _close(store, REASON_LEDGER_MISSING, epochs, GENESIS)
+            return close(REASON_LEDGER_MISSING, epochs, GENESIS)
     except LedgerCorrupt:
-        return _close(store, REASON_LEDGER_CORRUPT, epochs, GENESIS)
+        return close(REASON_LEDGER_CORRUPT, epochs, GENESIS)
 
     # A fresh database needs a baseline before it may delete anything; the
     # baseline is the current epoch so nothing older can be claimed.
     for namespace, epoch in epochs.items():
         try:
-            ledger.ensure_ready(namespace, epoch)
+            if read_only:
+                if ledger.baseline_epoch(namespace) is None:
+                    return close(REASON_LEDGER_MISSING, epochs, ledger.head_hash())
+            else:
+                ledger.ensure_ready(namespace, epoch)
         except (LedgerUnavailable, LedgerCorrupt):
-            return _close(store, REASON_LEDGER_CORRUPT, epochs, ledger.head_hash())
+            return close(REASON_LEDGER_CORRUPT, epochs, ledger.head_hash())
 
     anchor = read_json(anchor_path(store.db_path, getattr(store, "deletion_anchor_dir", None)))
+    if read_only and (
+        anchor is None or anchor.get("version") != 1
+        or not isinstance(anchor.get("namespaces"), dict)
+        or any(type(v) is not int or v < 0 for v in anchor["namespaces"].values())
+    ):
+        return close(REASON_ANCHOR_MISSING, epochs, ledger.head_hash())
     anchor_epochs = {} if anchor is None else {
         str(k): int(v) for k, v in (anchor.get("namespaces") or {}).items() if type(v) is int
     }
     first_run = not epochs or all(v == 0 for v in epochs.values())
     if anchor is None and not first_run:
-        return _close(store, REASON_ANCHOR_MISSING, epochs, ledger.head_hash())
+        return close(REASON_ANCHOR_MISSING, epochs, ledger.head_hash())
 
     db_total = sum(epochs.values())
     max_total = sum(ledger.max_epoch(ns) for ns in set(epochs) | ledger.namespaces())
@@ -503,26 +526,32 @@ def bootstrap(store: Any) -> RestoreDecision:
     # Same-point rollback: both sides sit behind what this instance has already
     # seen.  Refuse -- a human cannot vouch for a deletion history.
     if anchor is not None and db_total < anchor_total and max_total < anchor_total:
-        return _close(store, REASON_SAME_POINT, epochs, ledger.head_hash())
+        return close(REASON_SAME_POINT, epochs, ledger.head_hash())
 
     for namespace, epoch in list(epochs.items()):
         baseline = ledger.baseline_epoch(namespace)
         if baseline is not None and epoch < baseline:
-            return _close(store, REASON_BEFORE_BASELINE, epochs, ledger.head_hash())
+            return close(REASON_BEFORE_BASELINE, epochs, ledger.head_hash())
         ledger_max = ledger.max_epoch(namespace)
         if epoch > ledger_max:
             # The database remembers a deletion the ledger never saw: the ledger
             # is behind (or was rolled back) and cannot be trusted.
-            return _close(store, REASON_LEDGER_STALE, epochs, ledger.head_hash())
+            return close(REASON_LEDGER_STALE, epochs, ledger.head_hash())
 
-    replay_counts = replay_missing(store, ledger, epochs)
+    if read_only:
+        if any(epoch > epochs.get(ns, 0) for ns, epoch in anchor_epochs.items()):
+            return close(REASON_RECOVERY_REQUIRED, epochs, ledger.head_hash())
+        replay_counts = {}
+    else:
+        replay_counts = replay_missing(store, ledger, epochs)
     if replay_counts is None:
-        return _close(store, REASON_REPLAY_FAILED, epochs, ledger.head_hash())
+        return close(REASON_REPLAY_FAILED, epochs, ledger.head_hash())
 
     epochs_after = _db_epochs(store)
     for namespace in set(epochs_after) | ledger.namespaces():
         if epochs_after.get(namespace, 0) < ledger.max_epoch(namespace):
-            return _close(store, REASON_REPLAY_FAILED, epochs_after, ledger.head_hash())
+            reason = REASON_RECOVERY_REQUIRED if read_only else REASON_REPLAY_FAILED
+            return close(reason, epochs_after, ledger.head_hash())
 
     # Replay must leave no replayed target "pending cleanup": a barrier without
     # the payload cleared still holds the bytes the deletion removed.  Only the
@@ -533,7 +562,7 @@ def bootstrap(store: Any) -> RestoreDecision:
         try:
             store.cleanup_deletions()
         except Exception:  # noqa: BLE001 - a cleanup failure keeps the gate closed
-            return _close(store, REASON_CLEANUP_INCOMPLETE, epochs_after, ledger.head_hash())
+            return close(REASON_CLEANUP_INCOMPLETE, epochs_after, ledger.head_hash())
         for namespace in replayed:
             pending = store.connection.execute(
                 "SELECT COUNT(*) FROM deletion_targets "
@@ -541,12 +570,12 @@ def bootstrap(store: Any) -> RestoreDecision:
                 (namespace,),
             ).fetchone()
             if pending is not None and int(pending[0]) > 0:
-                return _close(
-                    store, REASON_CLEANUP_INCOMPLETE, epochs_after, ledger.head_hash()
-                )
+                return close(REASON_CLEANUP_INCOMPLETE, epochs_after, ledger.head_hash())
 
     gate = read_json(gate_path(store.db_path))
     head = ledger.head_hash()
+    if read_only and (gate is None or gate.get("status") != STATUS_OPEN):
+        return close(REASON_RECOVERY_REQUIRED, epochs_after, head)
     if gate is not None and gate.get("status") == STATUS_OPEN:
         recorded = gate.get("ledger_head_hash")
         if recorded != head:
@@ -559,7 +588,7 @@ def bootstrap(store: Any) -> RestoreDecision:
                 if type(v) is int
             }
             if sum(gate_epochs.values()) > sum(ledger.max_epoch(ns) for ns in gate_epochs):
-                return _close(store, REASON_GATE_STALE, epochs_after, head)
+                return close(REASON_GATE_STALE, epochs_after, head)
 
     adoption = _adoption_of(store)
     decision = RestoreDecision(
@@ -571,6 +600,8 @@ def bootstrap(store: Any) -> RestoreDecision:
         pre_baseline=PRE_BASELINE_UNPROVABLE if adoption is not None else None,
     )
     store.restore_decision = decision
+    if read_only:
+        return decision
     write_json(
         gate_path(store.db_path),
         _gate_payload(STATUS_OPEN, None, head, epochs_after, decision.adopted, decision.pre_baseline),

@@ -184,7 +184,8 @@ class DomainStateMixin:
         )
 
     def current_versions_of_kind(
-        self, namespace: str, kind: str
+        self, namespace: str, kind: str, *,
+        after_record_id: str | None = None, limit: int | None = None,
     ) -> tuple[RecordVersion, ...]:
         """Every readable record of *kind* at its current version.
 
@@ -197,6 +198,9 @@ class DomainStateMixin:
 
         identifiers.require_namespace(namespace)
         identifiers.require_kind(kind)
+        after = "" if after_record_id is None else identifiers.require_record_id(after_record_id)
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 100):
+            raise InvalidInput("current version page limit must be 1..100")
         rows = self._require_connection().execute(
             f"SELECT {_RV_COLUMNS} "
             "FROM records r "
@@ -204,14 +208,14 @@ class DomainStateMixin:
             "  ON rv.namespace = r.namespace "
             " AND rv.record_id = r.record_id "
             " AND rv.record_version = r.current_version "
-            "WHERE r.namespace = ? AND r.kind = ? "
+            "WHERE r.namespace = ? AND r.kind = ? AND r.record_id > ? "
             "  AND NOT EXISTS ("
             "    SELECT 1 FROM deletion_targets dt "
             "    WHERE dt.target_kind = ? AND dt.namespace = r.namespace "
             "      AND dt.target_id = r.record_id"
             "  ) "
-            "ORDER BY rv.record_id",
-            (namespace, kind, DELETION_RECORD),
+            "ORDER BY r.record_id LIMIT ?",
+            (namespace, kind, after, DELETION_RECORD, -1 if limit is None else limit),
         ).fetchall()
         return tuple(self._version_from_row(row) for row in rows)
 

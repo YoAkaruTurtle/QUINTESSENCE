@@ -14,21 +14,67 @@ Two deliberate choices:
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Union
+from typing import Iterator, Union
 
 from .errors import CorruptStore
 
 
-def connect(path: Union[str, Path]) -> sqlite3.Connection:
+@contextmanager
+def hold_existing_lock(path: Path) -> Iterator[None]:
+    """Pin an existing SQLite writer lock without changing its bytes."""
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise OSError("the existing writer lock must be a regular file")
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def connect(
+    path: Union[str, Path], *, read_only: bool = False
+) -> sqlite3.Connection:
     """Open *path* with row access by name and verified foreign keys."""
 
-    connection = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
+    target = str(path)
+    if read_only:
+        # The caller holds the normal writer lock for this connection's life.
+        # SQLite mode=ro alone can create WAL and SHM sidecars. An immutable
+        # open avoids those writes, but is only valid without pending journals.
+        database = Path(path).absolute()
+        for suffix in ("-wal", "-journal"):
+            companion = database.with_name(database.name + suffix)
+            try:
+                metadata = companion.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size:
+                raise sqlite3.OperationalError(
+                    "pending database journal requires foreground recovery"
+                )
+        target = f"{database.as_uri()}?mode=ro&immutable=1"
+    connection = sqlite3.connect(
+        target, uri=read_only, isolation_level=None, timeout=5.0
+    )
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         enabled = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        if read_only:
+            connection.execute("PRAGMA query_only = ON")
     except BaseException:
         connection.close()
         raise

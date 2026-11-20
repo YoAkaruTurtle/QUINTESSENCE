@@ -58,6 +58,17 @@ fn main() {
             let _ = read_frame(&mut input);
             thread::sleep(Duration::from_secs(120));
         }
+        "slow_status" => {
+            let first = read_frame(&mut input).expect("first frame");
+            let second = read_frame(&mut input).expect("second frame");
+            thread::sleep(Duration::from_millis(2_200));
+            let _ = output.write_all(&[reply_for(&first), reply_for(&second)].concat());
+            let _ = output.flush();
+            while let Some(request) = read_frame(&mut input) {
+                let _ = output.write_all(&reply_for(&request));
+                let _ = output.flush();
+            }
+        }
         "crash" => {
             let _ = read_frame(&mut input);
             std::process::exit(3);

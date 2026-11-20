@@ -116,7 +116,7 @@ python tools/run_tests.py
 python tools/check_repository.py
 ```
 
-核心使用标准库。文件夹/Scope Recall 与冻结后端测试还需要经过验证的上游运行依赖及构建环境，见桌面说明。测试使用合成数据和回环假服务，输出位于源码树外。已演练平台为 Windows；Linux/macOS 支持尚未成立。
+核心使用标准库。文件夹和 Scope Recall 测试使用仓库中固定版本的 [运行时源码](third_party/scope-recall/) 及其 Python 依赖。运行 `python tools/setup_scope_recall.py` 准备环境。冻结后端测试的构建要求见桌面说明。测试使用合成数据和回环假服务，输出位于源码树外。已演练平台为 Windows；Linux/macOS 支持尚未成立。
 
 ## 下一步
 
