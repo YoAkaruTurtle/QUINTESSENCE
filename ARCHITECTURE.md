@@ -4,7 +4,7 @@
 
 **English** · [简体中文](ARCHITECTURE.zh-CN.md)
 
-> Status checked 2026-11-05. Local main includes the J-series and folder-instance A/B/C. This document distinguishes current code, scoped empirical evidence and future design. Windows installation has been exercised locally; genuinely clean-machine installation, signing and a formal release are not established.
+**Implementation status.** `main` includes the J-series, folder-instance A/B/C, Desktop Dreaming, calendar journals and the pinned Scope Recall runtime. Windows packaging has been exercised locally. Clean-machine installation, signing and a formal release remain pending. [Integration record](docs/desktop-dreaming-calendar-journals/main-integration.md)
 >
 > Status terms: **Implemented** = present in the current code and covered by tests; **Approved design** = design accepted, not implemented; **Planned** = not yet delivered; **Research direction** = long-term inquiry, not an engineering commitment.
 
@@ -135,7 +135,7 @@ First-phase interactions have explicit call limits, and queries and repair share
 | Cognition | QUINTESSENCE's source-linked beliefs, revision, support/impact governance, review and domain commits; retrieved text is not automatically a fact |
 | Experience / conversations | PCS inputs, answers, tool results, turns and processing events retain exact sources; transcript search and Memory search are separate readers |
 
-ExperienceReadBridge / MemoryProjectionService deliver eligible recorded interactions to Scope Recall under retention and authorization rules, with delivery state, stable source keys and receipts. The adapter uses upstream public capture/search/recall/time-window APIs; the host owns binding, scope, relocation, budgets and timeouts. Scope Recall's storage, Episode and retrieval implementation remain upstream work. QUINTESSENCE implements the collaboration, projection/delivery and management adaptation, not that external engine; the upstream repository is not vendored here.
+ExperienceReadBridge / MemoryProjectionService deliver eligible recorded interactions to Scope Recall under retention and authorization rules, with delivery state, stable source keys and receipts. The adapter uses upstream public capture/search/recall/time-window APIs; the host owns binding, scope, relocation, budgets and timeouts. Scope Recall's storage, Episode and retrieval implementation remain upstream work. QUINTESSENCE supplies collaboration, projection, delivery and instance management. The checkout and frozen Windows sidecar incorporate the pinned upstream runtime. With an explicit configuration, the desktop host runs Scope Recall’s semantic worker and vector retrieval, and PCS rechecks the instance, namespace, scope, source and revision before use. [Vendored source and provenance](docs/desktop-dreaming-calendar-journals/main-integration.md#scope-recall-source-and-authority)
 
 Delivery creates searchable raw events. Enqueued semantic consolidation/embedding is not proof of completed processing: the desktop adapter does not automatically configure and drive the full upstream worker stack. Chat-based Cognition proposals/review are a separate mechanism. Provenance, version, role and derived status remain distinct; rule-based Review is not a proof of open-world semantic truth.
 
@@ -145,7 +145,7 @@ When enabled, ConversationOrchestrator first runs the content stage with formal 
 
 ### Cognition governance and bounded maintenance
 
-The model proposes; the host/domain layer checks versions, scope, authorization, source/support and impact. Higher-impact candidates or those outside automatic-commit conditions require human review; every successful update still requires a formal receipt. Decisions are append-only history: current status uses the candidate and latest applicable decision, not a count of historical awaiting-human rows. Existing bounded maintenance slices, repair feedback and review linkage are foundations for Dreaming, not complete unattended growth.
+The model proposes; the host/domain layer checks versions, scope, authorization, source/support and impact. Higher-impact candidates or those outside automatic-commit conditions require human review; every successful update still requires a formal receipt. Decisions are append-only history: current status uses the candidate and latest applicable decision, not a count of historical awaiting-human rows. The completed-turn automatic maintenance path continues to use bounded slices, repair feedback and review linkage. The resident Dreaming scheduler separately admits authorized idle reflection and calendar work, yields to foreground work, and persists its progress in the private instance. The status orb has a separate visibility setting. [Dreaming acceptance](docs/desktop-dreaming-continuity/acceptance.md)
 
 ## 6. Authorization, deletion, and persistence boundaries
 
@@ -163,7 +163,7 @@ This design does not defend against malicious same-process code operating on the
 
 ### Instance-owned state and lifecycle
 
-`instance.json` holds stable identity, component state and registration basis; `instance-host.json` holds non-secret host configuration. The PCS database owns Persona versions, conversations, Cognition, sources, decisions and delivery state. The Scope Recall database, deletion ledger, Anchor, private UI preferences and registration audit also belong to the instance folder. Cognition already lives in PCS, so no empty cosmetic component is created. Model services, generic runtime dependencies and authorization credentials may remain external; they are not irreplaceable private instance state.
+`instance.json` holds stable identity, component state and registration basis; `instance-host.json` holds non-secret host configuration. The PCS database owns Persona versions, conversations, Cognition, sources, decisions and delivery state. The Scope Recall database, deletion ledger, Anchor, private UI preferences and registration audit also belong to the instance folder. Resident Dreaming state and calendar journals are additive private components with their own authorization. Cognition already lives in PCS, so no empty cosmetic component is created. Model services, generic runtime dependencies and authorization credentials may remain external; they are not irreplaceable private instance state.
 
 A initializes real components from an empty folder under durable pending/initializing/ready states. B cold-copies a complete folder, preserves identity and assets, and audits path rebinding. C preserves existing content and completes only known-never-created components or noncritical README files. Unknown legacy history fails closed until a separate operator declaration establishes never-created status. Ready/lost, interrupted, damaged, remnant-bearing or identity/config-loss cases cannot be replaced with blank state. Existing path confinement, version checks, single-writer locks, idempotency and recovery checks remain. GUI selection is persisted and the host restarted only after preparation succeeds; active work blocks switching.
 
@@ -174,14 +174,14 @@ Recovery assets travel with the folder. Ledger integrity, watermarks, deletion r
 | Capability | Research responsibility | Current implementation scope |
 |---|---|---|
 | Persona | Continuity of identity and dispositions; contextual feedback | Profile publication/activation, policy, examples and SDRPE; deeper contextual evolution pending |
-| Memory | Retention, organization, selection, and reuse of experience | Scope Recall delivery/browse/recall integrated; full semantic workers and cross-module deletion pending |
+| Memory | Retention, organization, selection, and reuse of experience | Scope Recall delivery, browsing and recall, optional semantic/vector processing, and time-based PCS journal recall. Cross-module deletion remains open. |
 | Cognition | Form and revise beliefs; carry questions and focus forward | Belief / Context, source governance and persistent OpenQuestion basics implemented; fuller Focus/growth pending |
 | Affect | Source-bearing evaluation of objects and experiences | Research direction |
 | Load & Recovery | Activity load, stopping, and recovery rhythm | Long-term mechanism pending; current call budgets are not a complete load system |
 
 The five are conceptual responsibility divisions; whether they become separate modules depends on implementation needs. Shared state and provenance do not imply that every domain uses the same update rules.
 
-Long-term triggers for cognitive activity may include accumulated experience, state changes, unresolved problems, and persistent focus. Current chat-triggered and configuration-controlled maintenance entry points are bounded; they do not constitute complete Dreaming or autonomous continuous operation.
+Calendar Dreaming uses completed local days, weeks, months and years. It uses the active Persona and authorized PCS reading tools to build source-linked journals. Ordinary Consult resolves time queries through PCS, which can also request Scope Recall results. Idle reflection can persist proposals for a future trusted executor. [Journal acceptance](docs/desktop-dreaming-calendar-journals/acceptance.md)
 
 ## 8. How to validate the architecture
 

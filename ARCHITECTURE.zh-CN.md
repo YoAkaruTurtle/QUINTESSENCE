@@ -4,7 +4,7 @@
 
 [English](ARCHITECTURE.md) · **简体中文**
 
-> 状态核对：2026-11-05。本地 main 已包含 J 系列与实例 A/B/C；本文区分实际实现、有限实测和未来设计。本机 Windows 安装已演练，真正干净机与正式签名发行尚未完成。
+**实现进度。** `main` 已纳入 J 系列、实例 A/B/C、桌面 Dreaming、日历记和固定版本的 Scope Recall 运行时。Windows 打包已在本机演练。干净机安装、签名及正式发行仍待验证。[集成记录](docs/desktop-dreaming-calendar-journals/main-integration.md)
 >
 > 状态用语：**已实现** = 当前代码中存在并有测试覆盖；**已批准设计** = 设计已批准、尚未实施；**规划中** = 尚未交付的后续安排；**研究方向** = 长期研究，不构成工程承诺。
 
@@ -135,7 +135,7 @@ consult 不因模型输出“应该记住”就自动转成 review。review 中�
 | Cognition | QUINTESSENCE 自研的带来源认识、修订、支持与影响分级、审核和领域提交；不把召回文本自动当成事实 |
 | Experience / 会话 | PCS 保存输入、回答、工具结果、轮次、处理事件及精确来源；会话搜索和 Memory 搜索是不同读取入口 |
 
-ExperienceReadBridge / MemoryProjectionService 将符合保留与授权规则的已发生交互投递给 Scope Recall，保存投递状态、稳定来源键及回执。适配器通过上游公开 API 执行 capture、search、recall 与 time_window；宿主控制身份、范围、目录绑定、预算和超时。上游 Memory 的实现、Episode 与检索算法属于 Scope Recall；QUINTESSENCE 自研的是协作、投递和管理适配。完整上游仓库没有复制进本项目。
+ExperienceReadBridge / MemoryProjectionService 将符合保留与授权规则的已发生交互投递给 Scope Recall，保存投递状态、稳定来源键及回执。适配器通过上游公开 API 执行 capture、search、recall 与 time_window；宿主控制身份、范围、目录绑定、预算和超时。Memory 的实现、Episode 与检索算法来自 Scope Recall。QUINTESSENCE 提供协作、投递和实例管理适配。源码仓库与 Windows 冻结 sidecar 均带有固定版本的上游运行时。显式配置后，桌面宿主可以运行 Scope Recall 的语义 worker 和向量检索。PCS 在使用结果前复核实例、命名空间、范围、来源与版本。[内置源码及来源](docs/desktop-dreaming-calendar-journals/main-integration.md#scope-recall-source-and-authority)
 
 基础投递产生可检索的原文事件；语义提炼和向量任务入队不代表已经加工，当前桌面适配器没有自动配置并驱动完整上游 worker。Cognition 的聊天提案/审核与这组 Memory 后台任务不是同一个机制。来源、版本、模型/用户角色和派生状态始终保留区分；Review 的规则检查不是开放域语义真实性证明。
 
@@ -145,7 +145,7 @@ ExperienceReadBridge / MemoryProjectionService 将符合保留与授权规则的
 
 ### Cognition 治理与维护
 
-模型只能提出候选，宿主与领域层检查版本、范围、权限、来源、支持依据和影响。较高影响或不满足自动提交条件的候选进入人工审核；可自动处理的候选仍需正式提交回执。审核决定是追加历史，当前状态应读取候选状态及最新适用决定，不能把历史 awaiting_human 计为仍待审。已有有界维护切片、修复反馈和审核衔接只是 Dreaming 的基础，不是完整无人值守成长。
+模型只能提出候选，宿主与领域层检查版本、范围、权限、来源、支持依据和影响。较高影响或不满足自动提交条件的候选进入人工审核；可自动处理的候选仍需正式提交回执。审核决定是追加历史，当前状态应读取候选状态及最新适用决定，不能把历史 awaiting_human 计为仍待审。完成对话后的自动维护沿用有界切片、修复反馈和审核衔接。常驻 Dreaming 另行调度获授权的空闲反思与日历记，向前台任务让出执行机会，并把进度保存在私人实例内。悬浮球的显隐独立设置。[Dreaming 验收](docs/desktop-dreaming-continuity/acceptance.md)
 
 ## 6. 授权、删除与持久边界
 
@@ -163,7 +163,7 @@ ExperienceReadBridge / MemoryProjectionService 将符合保留与授权规则的
 
 ### 实例文件夹的所有权与生命周期
 
-`instance.json` 保存稳定身份、组件状态与登记依据；`instance-host.json` 保存不含凭据的宿主配置；PCS 数据库保存人格版本、会话、认识、来源、审核与投递记录；Scope Recall 的 Memory 数据库、删除账本、Anchor、UI 私人设置及登记审计同属该文件夹。Cognition 位于 PCS，不额外创建没有用途的空组件。模型服务、通用运行依赖和授权凭据可以外置，不是实例不可再生的私人状态。
+`instance.json` 保存稳定身份、组件状态与登记依据；`instance-host.json` 保存不含凭据的宿主配置；PCS 数据库保存人格版本、会话、认识、来源、审核与投递记录；Scope Recall 的 Memory 数据库、删除账本、Anchor、UI 私人设置及登记审计同属该文件夹。Dreaming 状态与日历记也是在私人实例中补建的组件，各自保管授权。Cognition 位于 PCS，不额外创建没有用途的空组件。模型服务、通用运行依赖和授权凭据可以外置，不是实例不可再生的私人状态。
 
 A：空目录在持久化 pending / initializing / ready 生命周期下初始化实际模块。B：完整实例冷复制后恢复相同身份，重绑定旧路径并留审计，历史与安全资产随目录移动。C：保留现有内容，只补确定从未创建的组件与非关键 README；未知旧组件历史默认拒绝，可由操作者单独登记“此前从未建立”。已经 ready、初始化中断、残留见证、身份/配置丢失或损坏不允许用空数据替换。版本/路径边界、单写者锁、幂等和恢复前检查复用已有模块。GUI 只在准备成功后保存选择并重启，忙碌时拒绝切换。
 
@@ -174,14 +174,14 @@ A：空目录在持久化 pending / initializing / ready 生命周期下初始�
 | 能力 | 研究职责 | 当前落地范围 |
 |---|---|---|
 | Persona | 身份与倾向的连续性、情境反馈 | Profile 发布/激活、表达政策、示例及 SDRPE；更深入的情境演化待做 |
-| Memory | 经历保留、组织、选择与再利用 | Scope Recall 投递、浏览/召回已适配；语义 worker 与跨模块删除未完整接通 |
+| Memory | 经历保留、组织、选择与再利用 | Scope Recall 投递、浏览与召回、可选语义和向量加工，以及由 PCS 按时间召回日历记。跨模块删除仍待完善。 |
 | Cognition | 形成和修正认识，延续问题与关注 | Belief / Context、来源治理与持久 OpenQuestion 基础已实现；更完整 Focus/成长机制待研究 |
 | Affect | 对对象和经历进行带来源的评价 | 研究方向 |
 | Load & Recovery | 活动负荷、停止与恢复节律 | 长期机制待研究；现有调用预算不等于完整负荷系统 |
 
 五项是概念与职责划分，具体模块是否独立由实现需求决定。共享状态和来源，不意味着各领域采用同一套更新规则。
 
-认知活动的长期触发来源可以包括累积经历、状态变化、未解决问题和持续关注。当前提供聊天触发及配置控制的有界维护入口；不代表完整 Dreaming 或自主持续运行。
+日历深睡按已经结束的本地日、周、月、年运行，使用当前人格与获准的 PCS 读取工具写出带来源的记录。普通 Consult 通过 PCS 按时间召回，也可由 PCS 请求 Scope Recall 检索。空闲反思能够存下供未来可信执行器读取的提议。[日历记验收](docs/desktop-dreaming-calendar-journals/acceptance.md)
 
 ## 8. 怎样验证这套架构
 

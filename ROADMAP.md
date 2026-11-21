@@ -4,13 +4,13 @@
 
 **English** · [简体中文](ROADMAP.zh-CN.md)
 
-> Status checked 2026-11-05. J-series and folder-instance A/B/C engineering are complete on local main within their exercised scope. No delivery date is promised; formal release, signing and genuinely clean-machine installation remain pending.
+> The J-series, folder-instance A/B/C, Desktop Dreaming and calendar journals are integrated on `main`. Formal release, signing and clean-machine installation remain pending.
 
 [Project overview](README.md) · [Architecture](ARCHITECTURE.md)
 
 ## Where the project is now
 
-QUINTESSENCE has an early cognitive substrate and a real-model revision chain. Unified collaboration, chat and folder-owned instances are available in the Windows application; next work concerns bounded incremental maintenance, research and installation maturity.
+QUINTESSENCE has an early cognitive substrate and a real-model revision chain. The Windows app provides unified collaboration, chat, folder-owned instances, resident Dreaming and calendar journals.
 
 | Work | Status | Existing results or remaining work |
 |---|---|---|
@@ -22,6 +22,8 @@ QUINTESSENCE has an early cognitive substrate and a real-model revision chain. U
 | P0 unified collaboration layer | Implemented and merged to `main`; controlled real-model evidence | Consult, deterministic query, Review, approval, recovery, Windows desktop client; release packaging and signing pending |
 | J-series engineering | Implemented, with behavioral limits | Persona/SDRPE, Memory delivery/recall, Cognition governance, transcripts, bounded maintenance and recovery |
 | Folder-instance A/B/C | Implemented and exercised | Empty creation, complete relocation/restart, safe partial completion, GUI selection and explicit legacy registration |
+| Desktop Dreaming and calendar journals | Implemented and exercised | Resident idle reflection, independent status orb, recent continuity, and daily through yearly journals retrievable through Consult |
+| Scope Recall runtime and semantic recall | Integrated and exercised | Pinned source and frozen sidecar. Optional explicit semantic configuration, with PCS governing retrieval. |
 | Windows packaging/local installation | Exercised locally | Complete frozen sidecar and NSIS development installer; genuine clean-machine test not run |
 
 M1–M6, P0, the J-series and A/B/C are complete within their engineering scope. The Windows installer has been exercised locally; it remains an unsigned development build, not a formal public release.
@@ -85,14 +87,14 @@ The new interface is not a prerequisite for the underlying collaboration capabil
 
 | Direction | Status | Next observable work |
 |---|---|---|
-| Dreaming | Design and partial foundations; full system pending | Incremental Experience organization; coordinate Memory/Cognition workers, budgets, review and interruption recovery; validate processing rather than queue admission alone |
+| Dreaming follow-up | Resident features implemented | Evaluate longer-term behavior and a trusted host path for executing proposals |
 | Work and DSH tools | Planned | Connect host observations, authorization and real execution receipts to existing collaboration boundaries; DSH is not a current core dependency |
 | Deeper Cognition and growth | Ongoing research; full growth not implemented | Source support, belief revision, Knowledge and Question/Focus, with separate behavioral evidence |
 | Memory deletion/cross-module forgetting | Not complete | Invalidation, removal and recovery consistency across PCS, Scope Recall, derived artifacts and backups; PCS deletion currently leaves delivered Memory text |
 | Persona evolution | Management/expression delivered; further evolution pending | Traceable, source-bearing and constrained contextual feedback, without turning a local preference into global identity |
 | Installation/compatibility | Local Windows checks complete; further work | Genuine clean-machine installation, WebView/overlay compatibility, signing/versioned releases; Linux/macOS require separate verification |
 
-Bounded maintenance, review linkage and raw Memory delivery do not constitute complete Dreaming, semantic memory or autonomous continual learning. A design document does not close an implementation item.
+Engineering acceptance covers the current Dreaming, journal and Scope Recall paths with synthetic instances. Further growth and long-term behavior remain research. [Integration acceptance](docs/desktop-dreaming-calendar-journals/main-integration.md)
 
 ## Farther research
 
@@ -108,7 +110,7 @@ Scope Recall is already integrated for Memory. Future model, retrieval and host 
 
 ## Publication and research proceed separately
 
-Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. P0, the J-series and A/B/C are on local main; complete Windows packaging and local installation have been exercised. Formal release, signing, genuinely clean-machine validation and versioned publication remain pending. Linux verification has been deferred and is not listed as a supported environment.
+Local migration, licensing, build acceptance, and the formal mainline switch are complete; the GitHub Public repository is live. `main` includes P0, the J-series, A/B/C, Desktop Dreaming, calendar journals and the pinned Scope Recall runtime. Complete Windows packaging and local installation have been exercised. Formal release, signing, genuinely clean-machine validation and versioned publication remain pending. Linux verification has been deferred and is not listed as a supported environment.
 
 Publication preparation and capability development are recorded separately. GitHub upload is not a technical dependency of the cognitive mechanisms; execution order is set by the maintainer, and publication status is not rewritten as engineering capability or experimental results.
 

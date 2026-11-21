@@ -32,7 +32,7 @@ QUINTESSENCE is a general-purpose personal AI persistent-state and cognitive col
 
 A Persistent Cognitive System keeps experiences, current beliefs, provenance, versions, and unfinished work across calls, and treats model output as a candidate subject to domain rules rather than as directly authoritative state. This differs from a conventional LLM memory layer, which mainly stores and retrieves text for prompts: PCS adds explicit evidence relationships, scoped beliefs, versioned retraction and replacement, formal Context assembly, and commit and audit boundaries. Retrieval is one part; the system also governs whether a proposed belief may become persistent state.
 
-> **Early research stage; status checked 2026-11-05.** Local `main` includes the J-series engineering work and folder-instance A/B/C implementation. Chat, Persona/SDRPE, Scope Recall integration, Cognition governance, recovery and Windows folder selection have code and scoped tests. Windows packaging and installation have been exercised locally; signing, a formal binary release and genuinely clean-machine installation remain unverified or pending. Engineering completion does not establish autonomous cognition or general behavioral reliability.
+> **Early research stage.** The J-series, folder-instance A/B/C, Desktop Dreaming and calendar journals are integrated on `main`. Scope Recall’s pinned runtime is included in the checkout and the Windows sidecar. Signing, a formal binary release and installation on a clean Windows machine remain pending. [Integration acceptance](docs/desktop-dreaming-calendar-journals/main-integration.md)
 
 ## Why this matters
 
@@ -52,17 +52,19 @@ The long-term goal is a system with identity continuity, memory, cognition, eval
 |---|---|---|
 | Persistent state and unified LLM–PCS collaboration | Implemented | Versioned records, formal Context, consult/review, bounded chat/tool orchestration and authoritative receipts |
 | Persona and expression | Implemented | Reviewed profile publication/activation, expression policy and examples; optional two-stage SDRPE; model-default style without a custom Persona |
-| Scope Recall memory integration | Implemented, with limits | Experience delivery, persisted upstream events, browse/search and bounded automatic recall; semantic consolidation/vector workers are not automatically provisioned by the desktop adapter |
+| Scope Recall memory integration | Implemented | Vendored runtime, Experience delivery, browse/search and automatic recall. Optional semantic and vector recall runs with explicit configuration and falls back to keyword search when unavailable. PCS controls which results can be used. |
 | Cognition | Implemented foundation | Source-linked beliefs, direct/inferred support rules, revision and impact-based automatic/manual review; durable decisions, not proof of semantic truth |
 | Conversations and cross-session use | Implemented | Saved transcripts, history search, Memory recall and cognition reuse; model self-reports are not storage receipts |
 | Independent instance folders: A/B/C | Implemented and exercised | Empty creation, complete-folder migration/restart, safe partial completion and explicit legacy onboarding |
 | Windows desktop and local installer | Tested locally | Folder picker, connection/status, settings and review; unsigned development build, clean-machine test not run |
 | Cognitive Workbench V0.2 | Frozen experimental prototype | Separate bespoke demo, not the standard desktop application |
-| Dreaming, Work/DSH and deeper growth | Planned / research | See the roadmap; no complete autonomous continual-learning system |
+| Desktop Dreaming and continuity | Implemented | Resident idle reflection, recent context across chats, and a Windows status orb with its own visibility setting |
+| Calendar journals | Implemented | Daily, weekly, monthly and yearly journals with active Persona and PCS access. Consult can retrieve them by time period. |
+| Work/DSH and deeper growth | Planned / research | The current reflection handoff can record proposals for a future executor |
 
 ### Current limits
 
-The host adapter currently establishes raw-event storage and lexical recall. Scope Recall semantic consolidation and embedding require separately configured and driven upstream workers; queued work is not evidence that those capabilities ran. PCS deletion does not yet physically remove already-delivered Memory content. Recovery assets travel inside the instance folder, so a joint rollback of database, ledger and Anchor cannot be reliably detected. Windows compatibility with injected overlays remains environment-dependent; local installation is not clean-machine validation.
+Dreaming runs while the app is resident. Idle reflection and calendar journals use separate private authorizations. The first daily journal is eligible after a day of observed app activity, even without a chat. Journal data, grants and continuity state remain in the private instance folder. PCS deletion does not yet physically erase text previously delivered to Scope Recall. Recovery assets travel with the instance, so a joint rollback of its database, ledger and Anchor cannot be reliably detected.
 
 ### A concrete example: revising “this tool does not work”
 
@@ -120,7 +122,7 @@ The core uses the standard library. Folder/Scope Recall tests use the pinned [ru
 
 ## Next step
 
-The J-series and A/B/C engineering increments are implemented within their documented scope. Next work is Dreaming and incremental maintenance, Work/DSH integration, deeper Cognition research, cross-module deletion governance, Persona evolution and installation compatibility. Existing bounded maintenance code is a foundation, not a completed Dreaming system. See [ROADMAP.md](ROADMAP.md).
+Next work includes cross-module deletion, Work/DSH integration, deeper Cognition research, Persona evolution and Windows installation compatibility. [Roadmap](ROADMAP.md)
 
 ## Development and contributions
 
