@@ -1,10 +1,12 @@
 # Documentation
 
-## Desktop Dreaming
+[Current implementation status](development/STATUS.md)
 
+## Desktop Dreaming and Scope Recall
+
+- [Mainline integration, development setup, and verification](desktop-dreaming-calendar-journals/main-integration.md)
 - [Calendar journals plan](desktop-dreaming-calendar-journals/plan.md)
 - [Calendar journals acceptance](desktop-dreaming-calendar-journals/acceptance.md)
-- [Dreaming and Scope Recall main integration](desktop-dreaming-calendar-journals/main-integration.md)
 - [Dreaming and continuity plan](desktop-dreaming-continuity/plan.md)
 - [Dreaming and continuity acceptance](desktop-dreaming-continuity/acceptance.md)
 
@@ -34,9 +36,8 @@
 - [J02 Memory integration contracts](development/J02-CONTRACTS.md)
 - [J07 Belief contexts and on-demand retrieval](j07-retrieval.md)
 
-## Architecture decisions and implementation status
+## Architecture decisions
 
 - [ADR 0001 Controlled agent mode](adr/0001-agent-mode.md)
 - [ADR 0002 SDRPE stage and persona policy authority](adr/0002-sdrpe-stage-authority.md)
 - [Maintenance boundary](development/MIGRATION-BOUNDARY.md)
-- [Implementation status](development/STATUS.md)
